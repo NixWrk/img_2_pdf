@@ -48,6 +48,12 @@ Current implemented modules in this new app:
 4. `Export`: merged PDF and separate image export
 5. `Jobs`: background job progress and cancellation
 
+Implementation notes:
+
+1. Session pages are disk-backed (`uniscan` cache) with lazy reads to reduce RAM usage on large batches.
+2. `Pages` review now shows `Before/After` preview for preprocessing visibility.
+3. Capture preprocessing includes presets (`Document`, `Whiteboard`, `Photo`, `B/W High Contrast`) and tuning controls.
+
 ## What The App Does
 
 `camscan_hybrid_tool.py` supports three source modes:
