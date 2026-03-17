@@ -72,8 +72,9 @@ Status: In progress.
 
 1. [x] `feat(ocr-core): OCR engine abstraction and dependency checks`
 2. [x] `feat(ocr-ui): OCR language/profile controls`
-3. [~] `feat(ocr-export): searchable PDF text layer` (first implementation done, needs fixture validation)
-4. [ ] `test(ocr): integration tests on fixtures`
+3. [~] `feat(ocr-export): searchable PDF text layer` (`pytesseract`, `OCRmyPDF`, `PyMuPDF OCR` wired; others pending)
+4. [~] `feat(ocr-engines): add engine selection for OCRmyPDF/PaddleOCR/PyMuPDF/Surya/MinerU`
+5. [ ] `test(ocr): integration tests on fixtures`
 
 ### Stage F: Production Readiness
 

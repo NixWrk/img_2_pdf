@@ -45,7 +45,7 @@ Quick workflow (Office Lens style):
 1. Open tab `1. Scan` and pick a `Lens mode` (`Document`, `Whiteboard`, `Photo`, `B/W`).
 2. Capture from camera or go to `2. Import` and load files/folder.
 3. App switches to `3. Review`: reorder, rotate, deskew, manual corners, before/after check.
-4. Open `4. Export` and save merged PDF or image files (`Searchable PDF (OCR)` is optional).
+4. Open `4. Export`, choose OCR engine if needed, then save merged PDF or image files.
 
 Current implemented modules in this new app:
 
@@ -60,7 +60,9 @@ Implementation notes:
 1. Session pages are disk-backed (`uniscan` cache) with lazy reads to reduce RAM usage on large batches.
 2. `Pages` review now shows `Before/After` preview for preprocessing visibility.
 3. Capture preprocessing includes Office Lens style modes (`Document`, `Whiteboard`, `Photo`, `B/W`) plus manual preset/sliders.
-4. Export tab supports optional searchable PDF via OCR (`tesseract` + `pytesseract` + `pypdf`) with dependency status check.
+4. Export tab supports OCR engine selection with dependency status checks.
+5. Searchable PDF is currently wired for `pytesseract`, `OCRmyPDF`, and `PyMuPDF OCR`.
+6. `PaddleOCR`, `Surya`, and `MinerU` are available as selectable OCR backends with readiness checks (searchable-PDF wiring pending).
 
 ## What The App Does
 
@@ -113,13 +115,21 @@ Install dependencies:
 pip install opencv-python numpy pillow img2pdf pymupdf
 ```
 
-Optional for searchable PDF OCR in the new app:
+Optional OCR dependencies in the new app:
 
 ```powershell
-pip install pytesseract pypdf
+pip install pytesseract pypdf ocrmypdf paddleocr pymupdf
 ```
 
-Also install Tesseract OCR engine (system package / installer) and ensure `tesseract` is in `PATH`.
+Also install CLI/system tools where needed:
+
+1. Tesseract OCR engine in `PATH` for `pytesseract` and `PyMuPDF OCR` mode.
+2. `ocrmypdf` command in `PATH` for `OCRmyPDF` mode.
+
+Experimental engine packages:
+
+1. `Surya` (or `marker` package path that bundles Surya OCR).
+2. `MinerU` (`mineru` or `magic_pdf` package).
 
 If you plan to use legacy scripts with OCR, install additionally:
 
