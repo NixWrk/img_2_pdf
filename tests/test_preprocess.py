@@ -1,6 +1,7 @@
+import cv2
 import numpy as np
 
-from uniscan.core.preprocess import PREPROCESS_PRESETS, PreprocessSettings, apply_enhancements
+from uniscan.core.preprocess import PREPROCESS_PRESETS, PreprocessSettings, apply_enhancements, deskew_document
 
 
 def _color_img() -> np.ndarray:
@@ -31,3 +32,14 @@ def test_apply_enhancements_threshold_returns_binary() -> None:
     assert out.ndim == 2
     unique = set(np.unique(out).tolist())
     assert unique.issubset({0, 255})
+
+
+def test_deskew_document_returns_angle_for_rotated_content() -> None:
+    base = np.full((160, 220, 3), 255, dtype=np.uint8)
+    cv2.rectangle(base, (40, 60), (180, 100), (0, 0, 0), -1)
+    m = cv2.getRotationMatrix2D((110, 80), 17.0, 1.0)
+    rotated = cv2.warpAffine(base, m, (220, 160), flags=cv2.INTER_LINEAR, borderValue=(255, 255, 255))
+
+    fixed, angle = deskew_document(rotated)
+    assert fixed.shape == rotated.shape
+    assert abs(angle) > 1.0

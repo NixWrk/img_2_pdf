@@ -2,7 +2,7 @@
 
 from .geometry import order_quad_points, warp_perspective_from_points
 from .pipeline import PipelineOptions, build_pdf_from_images, process_loaded_items, split_spread
-from .preprocess import PREPROCESS_PRESETS, PreprocessSettings, apply_enhancements
+from .preprocess import PREPROCESS_PRESETS, PreprocessSettings, apply_enhancements, deskew_document
 from .postprocess import POSTPROCESSING_OPTIONS
 from .scanner_adapter import ScanAdapterError, scan_with_document_detector
 
@@ -14,6 +14,7 @@ __all__ = [
     "ScanAdapterError",
     "apply_enhancements",
     "build_pdf_from_images",
+    "deskew_document",
     "order_quad_points",
     "process_loaded_items",
     "scan_with_document_detector",

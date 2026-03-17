@@ -21,7 +21,7 @@ from uniscan.export import (
 )
 from uniscan.core.geometry import warp_perspective_from_points
 from uniscan.core.pipeline import PipelineOptions, process_loaded_items, split_spread
-from uniscan.core.preprocess import PREPROCESS_PRESETS, PreprocessSettings, apply_enhancements
+from uniscan.core.preprocess import PREPROCESS_PRESETS, PreprocessSettings, apply_enhancements, deskew_document
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.scanner_adapter import ScanAdapterError, scan_with_document_detector
 from uniscan.io import CameraService
@@ -299,6 +299,20 @@ class UnifiedScanApp(ctk.CTk):
             width=226,
             command=self.open_manual_corners_editor,
         ).pack(side=ctk.LEFT)
+
+        row_e = ctk.CTkFrame(left, fg_color="transparent")
+        row_e.pack(fill=ctk.X, padx=10, pady=(0, 4))
+        ctk.CTkButton(row_e, text="Rotate Left", width=110, command=self.rotate_selected_left).pack(side=ctk.LEFT)
+        ctk.CTkButton(row_e, text="Rotate Right", width=110, command=self.rotate_selected_right).pack(
+            side=ctk.LEFT,
+            padx=6,
+        )
+
+        row_f = ctk.CTkFrame(left, fg_color="transparent")
+        row_f.pack(fill=ctk.X, padx=10, pady=(0, 4))
+        ctk.CTkButton(row_f, text="Auto Deskew Sel", width=226, command=self.auto_deskew_selected).pack(
+            side=ctk.LEFT
+        )
 
         ctk.CTkButton(
             left,
@@ -1266,13 +1280,65 @@ class UnifiedScanApp(ctk.CTk):
         win.lift()
         win.attributes("-topmost", False)
 
+    def _reprocess_entry_from_original(self, entry) -> None:
+        postprocess_fn = POSTPROCESSING_OPTIONS.get(self.postprocess_var.get(), POSTPROCESSING_OPTIONS["None"])
+        settings = self._current_preprocess_settings()
+        base = postprocess_fn(entry.original_image)
+        entry.current_image = apply_enhancements(base, settings)
+
+    def _selected_entry_indices(self) -> list[int]:
+        indexes = list(self.page_listbox.curselection())
+        valid = [idx for idx in indexes if 0 <= idx < len(self.session.entries)]
+        return valid
+
+    def rotate_selected_left(self) -> None:
+        indices = self._selected_entry_indices()
+        if not indices:
+            self._set_status("Select page(s) to rotate.")
+            return
+        for idx in indices:
+            entry = self.session.entries[idx]
+            rotated = cv2.rotate(entry.original_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            entry.original_image = rotated
+            self._reprocess_entry_from_original(entry)
+        self.refresh_page_list(keep_index=indices[-1])
+        self._set_status(f"Rotated {len(indices)} page(s) left.")
+
+    def rotate_selected_right(self) -> None:
+        indices = self._selected_entry_indices()
+        if not indices:
+            self._set_status("Select page(s) to rotate.")
+            return
+        for idx in indices:
+            entry = self.session.entries[idx]
+            rotated = cv2.rotate(entry.original_image, cv2.ROTATE_90_CLOCKWISE)
+            entry.original_image = rotated
+            self._reprocess_entry_from_original(entry)
+        self.refresh_page_list(keep_index=indices[-1])
+        self._set_status(f"Rotated {len(indices)} page(s) right.")
+
+    def auto_deskew_selected(self) -> None:
+        indices = self._selected_entry_indices()
+        if not indices:
+            self._set_status("Select page(s) to deskew.")
+            return
+
+        angles: list[float] = []
+        for idx in indices:
+            entry = self.session.entries[idx]
+            deskewed, angle = deskew_document(entry.original_image)
+            entry.original_image = deskewed
+            self._reprocess_entry_from_original(entry)
+            angles.append(angle)
+
+        self.refresh_page_list(keep_index=indices[-1])
+        mean_angle = sum(angles) / max(1, len(angles))
+        self._set_status(f"Deskewed {len(indices)} page(s), avg angle {mean_angle:.1f}°.")
+
     def apply_postprocess_to_session(self) -> None:
         try:
-            postprocess_fn = POSTPROCESSING_OPTIONS.get(self.postprocess_var.get(), POSTPROCESSING_OPTIONS["None"])
-            settings = self._current_preprocess_settings()
             for entry in self.session.entries:
-                base = postprocess_fn(entry.original_image)
-                entry.current_image = apply_enhancements(base, settings)
+                self._reprocess_entry_from_original(entry)
             self.update_page_preview()
             self._set_status("Postprocess reapplied to session")
         except Exception as exc:

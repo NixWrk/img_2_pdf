@@ -59,3 +59,39 @@ def apply_enhancements(image: np.ndarray, settings: PreprocessSettings) -> np.nd
         _, out = cv2.threshold(gray, int(settings.threshold), 255, cv2.THRESH_BINARY)
 
     return out
+
+
+def deskew_document(image: np.ndarray) -> tuple[np.ndarray, float]:
+    """
+    Try to estimate and correct document skew.
+
+    Returns `(deskewed_image, applied_angle_degrees)`.
+    """
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image
+
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    inv = cv2.bitwise_not(thresh)
+    coords = np.column_stack(np.where(inv > 0))
+    if coords.size == 0:
+        return image, 0.0
+
+    rect = cv2.minAreaRect(coords[:, ::-1].astype(np.float32))
+    angle = rect[-1]
+    if angle < -45:
+        angle = 90 + angle
+
+    h, w = image.shape[:2]
+    center = (w / 2.0, h / 2.0)
+    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    rotated = cv2.warpAffine(
+        image,
+        matrix,
+        (w, h),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+    return rotated, float(angle)
