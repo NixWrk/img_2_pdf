@@ -125,6 +125,26 @@ class CaptureSession:
         for entry in self._entries:
             entry.current_image = post_fn(entry.original_image)
 
+    def replace_entry_image(
+        self,
+        entry_id: str,
+        *,
+        original_image: np.ndarray,
+        current_image: np.ndarray | None = None,
+        name: str | None = None,
+    ) -> bool:
+        """Replace entry images in-place while preserving ordering and identity."""
+        index = self._find_index(entry_id)
+        if index is None:
+            return False
+
+        entry = self._entries[index]
+        entry.original_image = original_image
+        entry.current_image = original_image if current_image is None else current_image
+        if name is not None and name.strip():
+            entry.name = name.strip()
+        return True
+
     def selected_entries(self) -> list[CaptureEntry]:
         return [entry for entry in self._entries if entry.selected]
 

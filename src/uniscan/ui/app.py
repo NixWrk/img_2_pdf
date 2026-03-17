@@ -33,7 +33,7 @@ from uniscan.core.preprocess import (
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.scanner_adapter import ScanAdapterError, scan_with_document_detector
 from uniscan.io import CameraService
-from uniscan.io.loaders import IMG_EXTS, PDF_EXTS, list_supported_in_folder, load_input_items
+from uniscan.io.loaders import IMG_EXTS, PDF_EXTS, imread_unicode, list_supported_in_folder, load_input_items
 from uniscan.session import CaptureSession
 
 PREVIEW_WAIT_MS = 80
@@ -335,9 +335,13 @@ class UnifiedScanApp(ctk.CTk):
         ctk.CTkButton(
             row_d,
             text="Manual Corners",
-            width=226,
+            width=110,
             command=self.open_manual_corners_editor,
         ).pack(side=ctk.LEFT)
+        ctk.CTkButton(row_d, text="Replace Sel...", width=110, command=self.replace_selected_page_from_file).pack(
+            side=ctk.LEFT,
+            padx=6,
+        )
 
         row_e = ctk.CTkFrame(left, fg_color="transparent")
         row_e.pack(fill=ctk.X, padx=10, pady=(0, 4))
@@ -1225,6 +1229,44 @@ class UnifiedScanApp(ctk.CTk):
             return
         self.refresh_page_list()
         self._set_status(f"Deleted {removed} page(s). Session pages: {len(self.session)}")
+
+    def replace_selected_page_from_file(self) -> None:
+        index, entry = self._single_selected_entry()
+        if entry is None or index is None:
+            self._set_status("Select exactly one page to replace.")
+            return
+
+        path = filedialog.askopenfilename(
+            title="Replace selected page from image",
+            filetypes=[
+                ("Image files", "*.jpg;*.jpeg;*.png;*.tif;*.tiff;*.webp;*.bmp"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            return
+
+        try:
+            image_path = Path(path)
+            image = imread_unicode(image_path)
+            if image is None:
+                raise RuntimeError(f"Cannot read image: {image_path}")
+
+            processed = self._apply_postprocess(image)
+            ok = self.session.replace_entry_image(
+                entry.entry_id,
+                original_image=image,
+                current_image=processed,
+                name=image_path.stem,
+            )
+            if not ok:
+                raise RuntimeError("Selected page was not found in session.")
+
+            self.refresh_page_list(keep_index=index)
+            self._set_status(f"Replaced page {index + 1} from {image_path.name}.")
+        except Exception as exc:
+            messagebox.showerror("Replace Page Error", str(exc))
+            self._set_status("Replace page failed")
 
     def open_manual_corners_editor(self) -> None:
         index, entry = self._single_selected_entry()

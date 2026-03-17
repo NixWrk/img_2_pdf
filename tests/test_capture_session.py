@@ -58,3 +58,31 @@ def test_entry_original_image_setter_writes_to_disk(tmp_path) -> None:
     assert reloaded.shape == replacement.shape
     assert int(reloaded[0, 0, 0]) == 200
     session.close()
+
+
+def test_replace_entry_image_updates_content_and_name(tmp_path) -> None:
+    session = CaptureSession(store=PageStore(root_dir=tmp_path))
+    entry = session.add_image(name="old", image=_img(10))
+    original = _img(140)
+    current = _img(220)
+
+    ok = session.replace_entry_image(
+        entry.entry_id,
+        original_image=original,
+        current_image=current,
+        name="new_name",
+    )
+
+    assert ok
+    assert entry.name == "new_name"
+    assert int(entry.original_image[0, 0, 0]) == 140
+    assert int(entry.current_image[0, 0, 0]) == 220
+    session.close()
+
+
+def test_replace_entry_image_returns_false_for_unknown_id(tmp_path) -> None:
+    session = CaptureSession(store=PageStore(root_dir=tmp_path))
+    session.add_image(name="only", image=_img(10))
+    ok = session.replace_entry_image("missing", original_image=_img(50))
+    assert not ok
+    session.close()
