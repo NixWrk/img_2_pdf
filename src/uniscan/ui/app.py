@@ -15,8 +15,12 @@ import tkinter as tk
 from PIL import Image
 from tkinter import filedialog, messagebox
 
-from uniscan.export import export_pages_as_files, export_pages_as_pdf
+from uniscan.export import (
+    export_image_paths_as_files,
+    export_image_paths_as_pdf,
+)
 from uniscan.core.pipeline import PipelineOptions, process_loaded_items, split_spread
+from uniscan.core.preprocess import PREPROCESS_PRESETS, PreprocessSettings, apply_enhancements
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.scanner_adapter import ScanAdapterError, scan_with_document_detector
 from uniscan.io import CameraService
@@ -66,6 +70,11 @@ class UnifiedScanApp(ctk.CTk):
         self.two_page_mode_var = tk.BooleanVar(value=False)
         self.free_capture_var = tk.BooleanVar(value=False)
         self.postprocess_var = tk.StringVar(value="None")
+        self.preprocess_preset_var = tk.StringVar(value="Document")
+        self.preprocess_contrast_var = tk.DoubleVar(value=1.25)
+        self.preprocess_brightness_var = tk.IntVar(value=10)
+        self.preprocess_denoise_var = tk.IntVar(value=4)
+        self.preprocess_threshold_var = tk.IntVar(value=170)
         self.import_folder_var = tk.StringVar()
         self.import_files_var = tk.StringVar()
         self.import_pdf_dpi_var = tk.IntVar(value=300)
@@ -82,6 +91,7 @@ class UnifiedScanApp(ctk.CTk):
         self.job_thread: threading.Thread | None = None
 
         self._build_ui()
+        self.on_preprocess_preset_change(self.preprocess_preset_var.get())
         self.after(120, self._poll_job_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -162,6 +172,51 @@ class UnifiedScanApp(ctk.CTk):
             variable=self.postprocess_var,
         )
         self.postprocess_menu.pack(anchor="w", padx=10, pady=(0, 8))
+
+        ctk.CTkLabel(controls, text="Preset").pack(anchor="w", padx=10, pady=(0, 2))
+        self.preprocess_preset_menu = ctk.CTkOptionMenu(
+            controls,
+            values=list(PREPROCESS_PRESETS.keys()),
+            variable=self.preprocess_preset_var,
+            command=self.on_preprocess_preset_change,
+        )
+        self.preprocess_preset_menu.pack(anchor="w", padx=10, pady=(0, 6))
+
+        ctk.CTkLabel(controls, text="Contrast").pack(anchor="w", padx=10, pady=(0, 2))
+        ctk.CTkSlider(
+            controls,
+            from_=0.7,
+            to=2.0,
+            number_of_steps=26,
+            variable=self.preprocess_contrast_var,
+        ).pack(fill=ctk.X, padx=10, pady=(0, 6))
+
+        ctk.CTkLabel(controls, text="Brightness").pack(anchor="w", padx=10, pady=(0, 2))
+        ctk.CTkSlider(
+            controls,
+            from_=-80,
+            to=80,
+            number_of_steps=160,
+            variable=self.preprocess_brightness_var,
+        ).pack(fill=ctk.X, padx=10, pady=(0, 6))
+
+        ctk.CTkLabel(controls, text="Denoise").pack(anchor="w", padx=10, pady=(0, 2))
+        ctk.CTkSlider(
+            controls,
+            from_=0,
+            to=20,
+            number_of_steps=20,
+            variable=self.preprocess_denoise_var,
+        ).pack(fill=ctk.X, padx=10, pady=(0, 6))
+
+        ctk.CTkLabel(controls, text="B/W Threshold").pack(anchor="w", padx=10, pady=(0, 2))
+        ctk.CTkSlider(
+            controls,
+            from_=80,
+            to=240,
+            number_of_steps=160,
+            variable=self.preprocess_threshold_var,
+        ).pack(fill=ctk.X, padx=10, pady=(0, 8))
 
         ctk.CTkLabel(controls, text="Burst shots").pack(anchor="w", padx=10, pady=(4, 2))
         self.shots_entry = ctk.CTkEntry(controls, textvariable=self.camera_shots_var, width=120)
@@ -275,6 +330,23 @@ class UnifiedScanApp(ctk.CTk):
     def _set_status(self, text: str) -> None:
         self.status_var.set(text)
 
+    def on_preprocess_preset_change(self, preset_name: str) -> None:
+        preset = PREPROCESS_PRESETS.get(preset_name)
+        if preset is None:
+            return
+        self.preprocess_contrast_var.set(float(preset.contrast))
+        self.preprocess_brightness_var.set(int(preset.brightness))
+        self.preprocess_denoise_var.set(int(preset.denoise))
+        self.preprocess_threshold_var.set(int(preset.threshold))
+
+        # Preset may guide main postprocess mode for clearer UX.
+        if preset_name == "B/W High Contrast":
+            self.postprocess_var.set("Black and White")
+        elif preset_name in {"Document", "Whiteboard"} and self.postprocess_var.get() == "None":
+            self.postprocess_var.set("Grayscale")
+        elif preset_name == "Photo" and self.postprocess_var.get() == "Black and White":
+            self.postprocess_var.set("None")
+
     def _set_job_display(self, *, stage: str | None = None, current: str | None = None, progress: int | None = None) -> None:
         if stage is not None:
             self.job_stage_var.set(stage)
@@ -315,6 +387,11 @@ class UnifiedScanApp(ctk.CTk):
                 if kind == "progress":
                     stage, current, progress = payload
                     self._set_job_display(stage=stage, current=current, progress=progress)
+                elif kind == "import_chunk":
+                    items = payload
+                    if items:
+                        self.session.add_images(items)
+                        self.refresh_page_list(keep_index=len(self.session) - 1)
                 elif kind == "done":
                     on_done, result, name = payload
                     try:
@@ -421,10 +498,23 @@ class UnifiedScanApp(ctk.CTk):
         cv2.polylines(out, [points], isClosed=True, color=(0, 255, 0), thickness=3)
         return out
 
+    def _current_preprocess_settings(self) -> PreprocessSettings:
+        preset_name = self.preprocess_preset_var.get()
+        preset = PREPROCESS_PRESETS.get(preset_name, PREPROCESS_PRESETS["Custom"])
+        apply_threshold = bool(preset.apply_threshold or self.postprocess_var.get() == "Black and White")
+        return PreprocessSettings(
+            contrast=float(self.preprocess_contrast_var.get()),
+            brightness=int(self.preprocess_brightness_var.get()),
+            denoise=int(self.preprocess_denoise_var.get()),
+            threshold=int(self.preprocess_threshold_var.get()),
+            apply_threshold=apply_threshold,
+        )
+
     def _apply_postprocess(self, image: np.ndarray) -> np.ndarray:
         mode = self.postprocess_var.get()
         fn = POSTPROCESSING_OPTIONS.get(mode, POSTPROCESSING_OPTIONS["None"])
-        return fn(image)
+        out = fn(image)
+        return apply_enhancements(out, self._current_preprocess_settings())
 
     def _show_in_preview(self, image: np.ndarray) -> None:
         photo = self._to_ctk_photo_for_label(image, self.preview_label)
@@ -457,11 +547,13 @@ class UnifiedScanApp(ctk.CTk):
         two_page_mode: bool | None = None,
         free_capture: bool | None = None,
         postprocess_name: str | None = None,
+        preprocess_settings: PreprocessSettings | None = None,
     ) -> list[tuple[str, np.ndarray]]:
         detect_document = bool(self.detect_document_var.get()) if detect_document is None else detect_document
         two_page_mode = bool(self.two_page_mode_var.get()) if two_page_mode is None else two_page_mode
         free_capture = bool(self.free_capture_var.get()) if free_capture is None else free_capture
         postprocess_name = self.postprocess_var.get() if postprocess_name is None else postprocess_name
+        preprocess_settings = self._current_preprocess_settings() if preprocess_settings is None else preprocess_settings
 
         use_detector = detect_document and not free_capture
         working = frame
@@ -479,6 +571,7 @@ class UnifiedScanApp(ctk.CTk):
 
         postprocess_fn = POSTPROCESSING_OPTIONS.get(postprocess_name, POSTPROCESSING_OPTIONS["None"])
         processed = postprocess_fn(working)
+        processed = apply_enhancements(processed, preprocess_settings)
         pages = split_spread(processed) if two_page_mode else [processed]
         if len(pages) == 1:
             return [(base_name, pages[0])]
@@ -508,6 +601,7 @@ class UnifiedScanApp(ctk.CTk):
             two_page_mode = bool(self.two_page_mode_var.get())
             free_capture = bool(self.free_capture_var.get())
             postprocess_name = self.postprocess_var.get()
+            preprocess_settings = self._current_preprocess_settings()
             timestamp = datetime.now().strftime(r"%Y%m%d_%H%M%S")
 
             self.stop_preview()
@@ -542,6 +636,7 @@ class UnifiedScanApp(ctk.CTk):
                         two_page_mode=two_page_mode,
                         free_capture=free_capture,
                         postprocess_name=postprocess_name,
+                        preprocess_settings=preprocess_settings,
                     )
                     items.extend(current_items)
                     emit(
@@ -867,13 +962,14 @@ class UnifiedScanApp(ctk.CTk):
             two_page_mode=bool(self.two_page_mode_var.get()),
             postprocess_name=self.postprocess_var.get(),
         )
+        preprocess_settings = self._current_preprocess_settings()
         self._set_status(f"Starting import for {len(paths)} file(s)...")
 
         def worker(emit, is_cancelled):
             emit(stage="Import", current=f"{len(paths)} input file(s)", progress=0)
-            items: list[tuple[str, np.ndarray]] = []
             counter = 1
             total_paths = len(paths)
+            added_pages = 0
 
             for file_index, path in enumerate(paths, start=1):
                 if is_cancelled():
@@ -896,9 +992,15 @@ class UnifiedScanApp(ctk.CTk):
                     cancel_cb=is_cancelled,
                 )
 
+                items_chunk: list[tuple[str, np.ndarray]] = []
                 for page in pages_for_file:
-                    items.append((f"{source_label}_{counter:05d}", page))
+                    enhanced = apply_enhancements(page, preprocess_settings)
+                    items_chunk.append((f"{source_label}_{counter:05d}", enhanced))
                     counter += 1
+                    added_pages += 1
+
+                if items_chunk:
+                    self.job_queue.put(("import_chunk", items_chunk))
 
                 emit(
                     stage="Import processing",
@@ -906,13 +1008,13 @@ class UnifiedScanApp(ctk.CTk):
                     progress=45 + int((file_index / total_paths) * 55),
                 )
 
-            return items
+            return {"files": total_paths, "pages": added_pages}
 
-        def on_done(items):
-            self.session.add_images(items)
-            self.refresh_page_list(keep_index=len(self.session) - 1)
+        def on_done(stats):
+            files_count = int(stats["files"])
+            pages_count = int(stats["pages"])
             self._set_status(
-                f"Imported {len(paths)} file(s), added {len(items)} page(s). Session pages: {len(self.session)}"
+                f"Imported {files_count} file(s), added {pages_count} page(s). Session pages: {len(self.session)}"
             )
 
         self._start_background_job("Import", worker, on_done)
@@ -1021,7 +1123,11 @@ class UnifiedScanApp(ctk.CTk):
 
     def apply_postprocess_to_session(self) -> None:
         try:
-            self.session.apply_postprocess(self.postprocess_var.get())
+            postprocess_fn = POSTPROCESSING_OPTIONS.get(self.postprocess_var.get(), POSTPROCESSING_OPTIONS["None"])
+            settings = self._current_preprocess_settings()
+            for entry in self.session.entries:
+                base = postprocess_fn(entry.original_image)
+                entry.current_image = apply_enhancements(base, settings)
             self.update_page_preview()
             self._set_status("Postprocess reapplied to session")
         except Exception as exc:
@@ -1041,18 +1147,18 @@ class UnifiedScanApp(ctk.CTk):
         if path:
             self.export_dir_var.set(path)
 
-    def _pages_for_export(self) -> list[np.ndarray]:
+    def _entries_for_export(self):
         if self.export_scope_var.get() == "Selected pages":
             self._sync_page_selection_to_session()
             entries = self.session.selected_entries()
         else:
             entries = self.session.entries
-        return [entry.current_image for entry in entries]
+        return entries
 
     def export_to_pdf(self) -> None:
         try:
-            pages = self._pages_for_export()
-            if not pages:
+            entries = self._entries_for_export()
+            if not entries:
                 raise RuntimeError("No pages available for export.")
             path_raw = self.export_pdf_path_var.get().strip()
             if not path_raw:
@@ -1068,15 +1174,16 @@ class UnifiedScanApp(ctk.CTk):
             dpi = int(self.export_pdf_dpi_var.get())
             if dpi < 72:
                 raise RuntimeError("PDF DPI must be >= 72.")
+            image_paths = [entry.current_path for entry in entries]
 
             def worker(emit, _is_cancelled):
-                emit(stage="Export PDF", current=f"Writing {len(pages)} page(s)", progress=10)
-                out_path = export_pages_as_pdf(pages, out_pdf=Path(path_raw), dpi=dpi)
+                emit(stage="Export PDF", current=f"Writing {len(image_paths)} page(s)", progress=10)
+                out_path = export_image_paths_as_pdf(image_paths, out_pdf=Path(path_raw), dpi=dpi)
                 emit(stage="Export PDF", current="Finalizing", progress=100)
                 return out_path
 
             def on_done(out_path):
-                self._set_status(f"Exported {len(pages)} page(s) to PDF: {out_path}")
+                self._set_status(f"Exported {len(image_paths)} page(s) to PDF: {out_path}")
 
             self._start_background_job("Export PDF", worker, on_done)
         except Exception as exc:
@@ -1085,8 +1192,8 @@ class UnifiedScanApp(ctk.CTk):
 
     def export_to_files(self) -> None:
         try:
-            pages = self._pages_for_export()
-            if not pages:
+            entries = self._entries_for_export()
+            if not entries:
                 raise RuntimeError("No pages available for export.")
             path_raw = self.export_dir_var.get().strip()
             if not path_raw:
@@ -1097,11 +1204,12 @@ class UnifiedScanApp(ctk.CTk):
                 self.export_dir_var.set(chosen)
 
             fmt = self.export_format_var.get()
+            image_paths = [entry.current_path for entry in entries]
 
             def worker(emit, _is_cancelled):
-                emit(stage="Export files", current=f"Writing {len(pages)} page(s)", progress=10)
-                out_paths = export_pages_as_files(
-                    pages,
+                emit(stage="Export files", current=f"Writing {len(image_paths)} page(s)", progress=10)
+                out_paths = export_image_paths_as_files(
+                    image_paths,
                     output_dir=Path(path_raw),
                     ext=fmt,
                     base_name="page",
