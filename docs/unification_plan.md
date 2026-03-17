@@ -1,57 +1,66 @@
-# Unified Scan Project Plan
+# UniScan Office Lens PC Plan
 
-## Goal
+## Product Goal
 
-Build one application that combines the strongest functionality from:
+Deliver a PC-first Office Lens analogue:
 
-- `camscan_hybrid_tool.py`
-- `camscan_suhren/camscan/app.py`
+1. Fast capture flow: `Scan -> Review -> Export`
+2. Clear preprocessing UX: visible `Before/After`, presets, manual corner edit
+3. Memory-safe handling of large batches (disk-backed pages, streaming pipeline)
+4. Searchable PDF with OCR
 
-Target capabilities:
+## Current Status (already implemented)
 
-1. Live camera preview and interactive capture
-2. Batch camera capture (N shots + delay)
-3. Import from folder, files, and PDF
-4. Page/session management (preview, reorder, select, delete)
-5. Export to merged PDF and separate image files
-6. Processing controls (detect document, two-page split, postprocess, quality profile)
-7. Background jobs with progress and cancellation
-8. Optional OCR stage
+1. Unified package and launcher
+2. Camera capture (single + burst), import, page review, export
+3. Background jobs with progress/cancel hook
+4. Core tests for session/pipeline/export
 
-## Architecture
+## Implementation Stages
 
-Create a new root package:
+### Stage A: Memory & Storage (In Progress)
 
-- `src/uniscan/core`: processing pipeline + adapters
-- `src/uniscan/io`: image/pdf/camera loaders
-- `src/uniscan/session`: capture session model and operations
-- `src/uniscan/export`: PDF and separate-file exporters
-- `src/uniscan/ui`: unified CustomTkinter app
-- `src/uniscan/ocr`: optional OCR integration
+1. `feat(storage): add cache workspace manager for page assets`
+2. `refactor(session): store page originals/processed images on disk with lazy loading`
+3. `refactor(import): convert import pipeline to streaming to avoid full-memory batches`
+4. `refactor(export): stream export from disk-backed pages where possible`
+5. `test(memory): add high-volume memory regression tests`
 
-## Commit Roadmap
+### Stage B: Office Lens Flow UX
 
-1. `chore(repo): add root pyproject, tooling, pytest config`
-2. `chore(vendor): pin camscan source as tracked dependency and add THIRD_PARTY_NOTICES`
-3. `refactor(core): create src/uniscan/core/postprocess.py and scanner_adapter.py`
-4. `refactor(core): move image/pdf loading to src/uniscan/io/loaders.py`
-5. `refactor(core): move processing pipeline to src/uniscan/core/pipeline.py`
-6. `refactor(core): add camera service (live stream + burst capture) in src/uniscan/io/camera_service.py`
-7. `feat(session): add CaptureSession model with add/remove/reorder/select`
-8. `feat(ui): scaffold unified CTk app shell in src/uniscan/ui/app.py`
-9. `feat(ui-camera): port live preview, free-capture mode, camera config dialog`
-10. `feat(ui-import): add import folder/files/pdf + natural sorting + validation`
-11. `feat(ui-pages): add thumbnails, full preview, select-all, delete, reorder`
-12. `feat(ui-export): merged PDF export + separate files export + format selection`
-13. `feat(ui-processing): quality profiles, detect toggle, two-page split, postprocess mode`
-14. `feat(worker): background jobs, stage/progress bar, cancel support`
-15. `feat(ocr): optional OCR stage (engine select, language, dependency checks)`
-16. `chore(compat): convert old entrypoints to wrappers`
-17. `test: add unit tests for loaders/pipeline/session/export and smoke UI test`
-18. `docs(ci): rewrite README + add GitHub Actions for lint/test`
+1. `feat(ui-flow): switch to guided flow Scan -> Review -> Export`
+2. `feat(ui-scan): simplify capture controls and add camera health state`
+3. `feat(ui-review): faster filmstrip with thumbnails from disk cache`
+4. `feat(ui-review): retake/replace page in-place`
+5. `docs(ui): in-app guidance and quick tips`
 
-## Delivery Milestones
+### Stage C: Preprocessing Clarity
 
-1. `v0.1`: commits 1-8 (single package and app skeleton)
-2. `v0.2`: commits 9-14 (merged functionality from both projects)
-3. `v0.3`: commits 15-18 (OCR and stabilization)
+1. `feat(preprocess-ui): side-by-side before/after panel`
+2. `feat(preprocess-presets): Document, Whiteboard, Photo, B/W modes`
+3. `feat(preprocess-controls): expose threshold/contrast/denoise sliders`
+4. `feat(corners): manual 4-point corner correction`
+5. `test(preprocess): deterministic tests for filter and transform chain`
+
+### Stage D: Scan Quality
+
+1. `feat(cv): robust contour fallback and glare reduction`
+2. `feat(cv): deskew/orientation correction`
+3. `feat(cv): improved text enhancement profile`
+4. `feat(cv): smart two-page split center detection`
+5. `perf(cv): optimize preview + processing latency`
+
+### Stage E: OCR/Searchable PDF
+
+1. `feat(ocr-core): OCR engine abstraction and dependency checks`
+2. `feat(ocr-ui): OCR language/profile controls`
+3. `feat(ocr-export): searchable PDF text layer`
+4. `test(ocr): integration tests on fixtures`
+
+### Stage F: Production Readiness
+
+1. `feat(recovery): autosave/restore sessions`
+2. `feat(io): drag-and-drop + clipboard import`
+3. `feat(export): output naming templates and profile presets`
+4. `ci: add root lint/test workflow`
+5. `docs: user guide + troubleshooting`
