@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Callable
 
 import img2pdf
 import numpy as np
@@ -13,6 +14,8 @@ from uniscan.core.scanner_adapter import scan_with_document_detector
 from uniscan.io.loaders import imwrite_unicode
 
 LoadedItem = tuple[str, np.ndarray]
+ProgressCb = Callable[[int, int, str], None]
+CancelCb = Callable[[], bool]
 
 
 @dataclass(slots=True)
@@ -40,6 +43,8 @@ def process_loaded_items(
     *,
     options: PipelineOptions,
     scanner_root: Path | None = None,
+    on_progress: ProgressCb | None = None,
+    cancel_cb: CancelCb | None = None,
 ) -> list[np.ndarray]:
     """Process loaded input items and return page images in order."""
     if options.postprocess_name not in POSTPROCESSING_OPTIONS:
@@ -48,7 +53,11 @@ def process_loaded_items(
     postprocess_fn = POSTPROCESSING_OPTIONS[options.postprocess_name]
     pages: list[np.ndarray] = []
 
-    for _, image in loaded_items:
+    total = len(loaded_items)
+    for index, (name, image) in enumerate(loaded_items, start=1):
+        if cancel_cb is not None and cancel_cb():
+            raise RuntimeError("Cancelled by user.")
+
         scan_output = scan_with_document_detector(
             image,
             enabled=options.detect_document,
@@ -58,6 +67,8 @@ def process_loaded_items(
         processed = postprocess_fn(working)
         split_pages = split_spread(processed) if options.two_page_mode else [processed]
         pages.extend(split_pages)
+        if on_progress is not None:
+            on_progress(index, total, name)
 
     return pages
 

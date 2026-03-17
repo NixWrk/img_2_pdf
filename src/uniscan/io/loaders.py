@@ -14,6 +14,7 @@ PDF_EXTS = {".pdf"}
 
 LoadedItem = tuple[str, np.ndarray]
 ProgressCb = Callable[[int, int, str], None]
+CancelCb = Callable[[], bool]
 
 
 def natural_key(value: str) -> list[int | str]:
@@ -75,6 +76,7 @@ def load_input_items(
     *,
     pdf_dpi: int,
     on_progress: ProgressCb | None = None,
+    cancel_cb: CancelCb | None = None,
 ) -> list[LoadedItem]:
     """
     Load a mixed list of image/PDF paths into in-memory BGR items.
@@ -86,6 +88,9 @@ def load_input_items(
     items: list[LoadedItem] = []
 
     for index, path in enumerate(input_paths, start=1):
+        if cancel_cb is not None and cancel_cb():
+            raise RuntimeError("Cancelled by user.")
+
         ext = path.suffix.lower()
         if ext in IMG_EXTS:
             image = imread_unicode(path)

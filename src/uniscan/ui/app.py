@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import queue
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -71,8 +73,15 @@ class UnifiedScanApp(ctk.CTk):
         self.export_dir_var = tk.StringVar()
         self.export_format_var = tk.StringVar(value="png")
         self.export_pdf_dpi_var = tk.IntVar(value=300)
+        self.job_stage_var = tk.StringVar(value="Idle")
+        self.job_current_var = tk.StringVar(value="-")
+        self.job_progress_var = tk.StringVar(value="0%")
+        self.job_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.job_cancel_event = threading.Event()
+        self.job_thread: threading.Thread | None = None
 
         self._build_ui()
+        self.after(120, self._poll_job_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self) -> None:
@@ -99,13 +108,7 @@ class UnifiedScanApp(ctk.CTk):
         self._build_import_tab(self.import_tab)
         self._build_pages_tab(self.pages_tab)
         self._build_export_tab(self.export_tab)
-        for tab, name in ((self.jobs_tab, "Jobs"),):
-            body = ctk.CTkLabel(
-                tab,
-                text=f"{name} module: implementation in progress",
-                anchor="w",
-            )
-            body.pack(fill=ctk.X, padx=16, pady=16)
+        self._build_jobs_tab(self.jobs_tab)
 
         status_frame = ctk.CTkFrame(container)
         status_frame.pack(fill=ctk.X, padx=12, pady=(0, 12))
@@ -248,12 +251,83 @@ class UnifiedScanApp(ctk.CTk):
 
     def _on_close(self) -> None:
         self.stop_preview()
+        self.job_cancel_event.set()
         if self.camera is not None:
             self.camera.release()
         self.destroy()
 
     def _set_status(self, text: str) -> None:
         self.status_var.set(text)
+
+    def _set_job_display(self, *, stage: str | None = None, current: str | None = None, progress: int | None = None) -> None:
+        if stage is not None:
+            self.job_stage_var.set(stage)
+        if current is not None:
+            self.job_current_var.set(current)
+        if progress is not None:
+            p = max(0, min(100, int(progress)))
+            self.job_progress.set(p / 100.0)
+            self.job_progress_var.set(f"{p}%")
+
+    def _start_background_job(self, name: str, worker, on_done) -> bool:
+        if self.job_thread is not None and self.job_thread.is_alive():
+            messagebox.showwarning("Busy", "Another background job is already running.")
+            return False
+
+        self.job_cancel_event.clear()
+        self.job_cancel_button.configure(state="normal")
+        self._set_job_display(stage=name, current="Starting...", progress=0)
+
+        def emit(stage: str | None = None, current: str | None = None, progress: int | None = None) -> None:
+            self.job_queue.put(("progress", (stage, current, progress)))
+
+        def run() -> None:
+            try:
+                result = worker(emit, self.job_cancel_event.is_set)
+                self.job_queue.put(("done", (on_done, result, name)))
+            except Exception as exc:
+                self.job_queue.put(("error", (name, str(exc))))
+
+        self.job_thread = threading.Thread(target=run, daemon=True)
+        self.job_thread.start()
+        return True
+
+    def _poll_job_queue(self) -> None:
+        try:
+            while True:
+                kind, payload = self.job_queue.get_nowait()
+                if kind == "progress":
+                    stage, current, progress = payload
+                    self._set_job_display(stage=stage, current=current, progress=progress)
+                elif kind == "done":
+                    on_done, result, name = payload
+                    try:
+                        on_done(result)
+                    finally:
+                        self.job_cancel_button.configure(state="disabled")
+                        self._set_job_display(stage=f"{name}: done", current="Completed", progress=100)
+                elif kind == "error":
+                    name, text = payload
+                    self.job_cancel_button.configure(state="disabled")
+                    if "Cancelled by user." in text:
+                        self._set_job_display(stage=f"{name}: cancelled", current=text, progress=0)
+                        self._set_status(f"{name} cancelled")
+                    else:
+                        self._set_job_display(stage=f"{name}: error", current=text, progress=0)
+                        self._set_status(f"{name} failed")
+                        messagebox.showerror(f"{name} Error", text)
+        except queue.Empty:
+            pass
+        finally:
+            self.after(120, self._poll_job_queue)
+
+    def cancel_current_job(self) -> None:
+        if self.job_thread is None or not self.job_thread.is_alive():
+            self._set_status("No running job.")
+            return
+        self.job_cancel_event.set()
+        self._set_job_display(current="Cancellation requested...")
+        self._set_status("Cancellation requested")
 
     def _ensure_camera(self) -> CameraService:
         index = int(self.camera_index_var.get())
@@ -358,8 +432,22 @@ class UnifiedScanApp(ctk.CTk):
         pil_image = Image.fromarray(resized)
         return ctk.CTkImage(light_image=pil_image, dark_image=pil_image, size=(new_w, new_h))
 
-    def _process_capture_frame(self, frame: np.ndarray, base_name: str) -> list[tuple[str, np.ndarray]]:
-        use_detector = self.detect_document_var.get() and not self.free_capture_var.get()
+    def _process_capture_frame(
+        self,
+        frame: np.ndarray,
+        base_name: str,
+        *,
+        detect_document: bool | None = None,
+        two_page_mode: bool | None = None,
+        free_capture: bool | None = None,
+        postprocess_name: str | None = None,
+    ) -> list[tuple[str, np.ndarray]]:
+        detect_document = bool(self.detect_document_var.get()) if detect_document is None else detect_document
+        two_page_mode = bool(self.two_page_mode_var.get()) if two_page_mode is None else two_page_mode
+        free_capture = bool(self.free_capture_var.get()) if free_capture is None else free_capture
+        postprocess_name = self.postprocess_var.get() if postprocess_name is None else postprocess_name
+
+        use_detector = detect_document and not free_capture
         working = frame
         if use_detector:
             scan_output = scan_with_document_detector(
@@ -373,8 +461,9 @@ class UnifiedScanApp(ctk.CTk):
                 )
             working = scan_output.warped
 
-        processed = self._apply_postprocess(working)
-        pages = split_spread(processed) if self.two_page_mode_var.get() else [processed]
+        postprocess_fn = POSTPROCESSING_OPTIONS.get(postprocess_name, POSTPROCESSING_OPTIONS["None"])
+        processed = postprocess_fn(working)
+        pages = split_spread(processed) if two_page_mode else [processed]
         if len(pages) == 1:
             return [(base_name, pages[0])]
         return [(f"{base_name}_{idx}", page) for idx, page in enumerate(pages, start=1)]
@@ -396,18 +485,62 @@ class UnifiedScanApp(ctk.CTk):
 
     def capture_burst(self) -> None:
         try:
-            camera = self._ensure_camera()
             shots = int(self.camera_shots_var.get())
             delay_sec = float(self.camera_delay_var.get())
-            frames = camera.capture_burst(shots=shots, delay_sec=delay_sec)
-            added_pages = 0
+            index = int(self.camera_index_var.get())
+            detect_document = bool(self.detect_document_var.get())
+            two_page_mode = bool(self.two_page_mode_var.get())
+            free_capture = bool(self.free_capture_var.get())
+            postprocess_name = self.postprocess_var.get()
             timestamp = datetime.now().strftime(r"%Y%m%d_%H%M%S")
-            for idx, frame in enumerate(frames, start=1):
-                items = self._process_capture_frame(frame, base_name=f"{timestamp}_{idx:03d}")
+
+            self.stop_preview()
+
+            def worker(emit, is_cancelled):
+                emit(stage="Burst capture", current=f"Opening camera {index}", progress=0)
+                camera = CameraService(index=index)
+                camera.open()
+                try:
+                    frames = camera.capture_burst(
+                        shots=shots,
+                        delay_sec=delay_sec,
+                        cancel_cb=is_cancelled,
+                        on_progress=lambda i, total: emit(
+                            stage="Burst capture",
+                            current=f"Shot {i}/{total}",
+                            progress=int((i / total) * 45),
+                        ),
+                    )
+                finally:
+                    camera.release()
+
+                items: list[tuple[str, np.ndarray]] = []
+                total_frames = len(frames)
+                for idx, frame in enumerate(frames, start=1):
+                    if is_cancelled():
+                        raise RuntimeError("Cancelled by user.")
+                    current_items = self._process_capture_frame(
+                        frame,
+                        base_name=f"{timestamp}_{idx:03d}",
+                        detect_document=detect_document,
+                        two_page_mode=two_page_mode,
+                        free_capture=free_capture,
+                        postprocess_name=postprocess_name,
+                    )
+                    items.extend(current_items)
+                    emit(
+                        stage="Processing burst",
+                        current=f"Frame {idx}/{total_frames}",
+                        progress=45 + int((idx / total_frames) * 55),
+                    )
+                return items
+
+            def on_done(items):
                 self.session.add_images(items)
-                added_pages += len(items)
-            self.refresh_page_list(keep_index=len(self.session) - 1)
-            self._set_status(f"Burst captured {added_pages} page(s). Session pages: {len(self.session)}")
+                self.refresh_page_list(keep_index=len(self.session) - 1)
+                self._set_status(f"Burst captured {len(items)} page(s). Session pages: {len(self.session)}")
+
+            self._start_background_job("Capture Burst", worker, on_done)
         except Exception as exc:
             messagebox.showerror("Burst Error", str(exc))
             self._set_status("Burst capture failed")
@@ -617,6 +750,50 @@ class UnifiedScanApp(ctk.CTk):
             command=self.export_to_files,
         ).grid(row=0, column=3, padx=(0, 10), pady=10)
 
+    def _build_jobs_tab(self, tab: ctk.CTkFrame) -> None:
+        tab.grid_columnconfigure(0, weight=1)
+
+        frame = ctk.CTkFrame(tab)
+        frame.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        frame.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(frame, text="Stage").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 2))
+        ctk.CTkLabel(frame, textvariable=self.job_stage_var, anchor="w").grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            padx=10,
+            pady=(0, 8),
+        )
+
+        ctk.CTkLabel(frame, text="Current").grid(row=2, column=0, sticky="w", padx=10, pady=(0, 2))
+        ctk.CTkLabel(frame, textvariable=self.job_current_var, anchor="w").grid(
+            row=3,
+            column=0,
+            sticky="ew",
+            padx=10,
+            pady=(0, 8),
+        )
+
+        self.job_progress = ctk.CTkProgressBar(frame)
+        self.job_progress.grid(row=4, column=0, sticky="ew", padx=10, pady=(2, 4))
+        self.job_progress.set(0.0)
+        ctk.CTkLabel(frame, textvariable=self.job_progress_var, anchor="e").grid(
+            row=5,
+            column=0,
+            sticky="e",
+            padx=10,
+            pady=(0, 10),
+        )
+
+        self.job_cancel_button = ctk.CTkButton(
+            frame,
+            text="Cancel Current Job",
+            command=self.cancel_current_job,
+            state="disabled",
+        )
+        self.job_cancel_button.grid(row=6, column=0, sticky="w", padx=10, pady=(0, 10))
+
     def choose_import_folder(self) -> None:
         path = filedialog.askdirectory(title="Select input folder")
         if path:
@@ -669,29 +846,47 @@ class UnifiedScanApp(ctk.CTk):
         pdf_dpi = int(self.import_pdf_dpi_var.get())
         if pdf_dpi < 72:
             raise RuntimeError("PDF DPI must be >= 72.")
-        self._set_status(f"Loading {len(paths)} input file(s)...")
-
-        loaded = load_input_items(
-            paths,
-            pdf_dpi=pdf_dpi,
-            on_progress=lambda i, total, name: self._set_status(f"Loading {i}/{total}: {name}"),
-        )
         pipeline_options = PipelineOptions(
             detect_document=bool(self.detect_document_var.get()),
             two_page_mode=bool(self.two_page_mode_var.get()),
             postprocess_name=self.postprocess_var.get(),
         )
-        pages = process_loaded_items(
-            loaded,
-            options=pipeline_options,
-            scanner_root=self.scanner_root,
-        )
-        items = [(f"{source_label}_{idx:05d}", page) for idx, page in enumerate(pages, start=1)]
-        self.session.add_images(items)
-        self.refresh_page_list(keep_index=len(self.session) - 1)
-        self._set_status(
-            f"Imported {len(paths)} file(s), added {len(items)} page(s). Session pages: {len(self.session)}"
-        )
+        self._set_status(f"Starting import for {len(paths)} file(s)...")
+
+        def worker(emit, is_cancelled):
+            emit(stage="Import loading", current=f"{len(paths)} input file(s)", progress=0)
+            loaded = load_input_items(
+                paths,
+                pdf_dpi=pdf_dpi,
+                on_progress=lambda i, total, name: emit(
+                    stage="Import loading",
+                    current=f"{i}/{total}: {name}",
+                    progress=int((i / total) * 45),
+                ),
+                cancel_cb=is_cancelled,
+            )
+            pages = process_loaded_items(
+                loaded,
+                options=pipeline_options,
+                scanner_root=self.scanner_root,
+                on_progress=lambda i, total, name: emit(
+                    stage="Import processing",
+                    current=f"{i}/{total}: {name}",
+                    progress=45 + int((i / total) * 55),
+                ),
+                cancel_cb=is_cancelled,
+            )
+            return pages
+
+        def on_done(pages):
+            items = [(f"{source_label}_{idx:05d}", page) for idx, page in enumerate(pages, start=1)]
+            self.session.add_images(items)
+            self.refresh_page_list(keep_index=len(self.session) - 1)
+            self._set_status(
+                f"Imported {len(paths)} file(s), added {len(items)} page(s). Session pages: {len(self.session)}"
+            )
+
+        self._start_background_job("Import", worker, on_done)
 
     def refresh_page_list(self, keep_index: int | None = None) -> None:
         self.page_listbox.delete(0, tk.END)
@@ -833,8 +1028,17 @@ class UnifiedScanApp(ctk.CTk):
             dpi = int(self.export_pdf_dpi_var.get())
             if dpi < 72:
                 raise RuntimeError("PDF DPI must be >= 72.")
-            out_path = export_pages_as_pdf(pages, out_pdf=Path(path_raw), dpi=dpi)
-            self._set_status(f"Exported {len(pages)} page(s) to PDF: {out_path}")
+
+            def worker(emit, _is_cancelled):
+                emit(stage="Export PDF", current=f"Writing {len(pages)} page(s)", progress=10)
+                out_path = export_pages_as_pdf(pages, out_pdf=Path(path_raw), dpi=dpi)
+                emit(stage="Export PDF", current="Finalizing", progress=100)
+                return out_path
+
+            def on_done(out_path):
+                self._set_status(f"Exported {len(pages)} page(s) to PDF: {out_path}")
+
+            self._start_background_job("Export PDF", worker, on_done)
         except Exception as exc:
             messagebox.showerror("Export PDF Error", str(exc))
             self._set_status("PDF export failed")
@@ -851,13 +1055,24 @@ class UnifiedScanApp(ctk.CTk):
                     return
                 path_raw = chosen
                 self.export_dir_var.set(chosen)
-            out_paths = export_pages_as_files(
-                pages,
-                output_dir=Path(path_raw),
-                ext=self.export_format_var.get(),
-                base_name="page",
-            )
-            self._set_status(f"Exported {len(out_paths)} file(s) to: {Path(path_raw)}")
+
+            fmt = self.export_format_var.get()
+
+            def worker(emit, _is_cancelled):
+                emit(stage="Export files", current=f"Writing {len(pages)} page(s)", progress=10)
+                out_paths = export_pages_as_files(
+                    pages,
+                    output_dir=Path(path_raw),
+                    ext=fmt,
+                    base_name="page",
+                )
+                emit(stage="Export files", current="Finalizing", progress=100)
+                return out_paths
+
+            def on_done(out_paths):
+                self._set_status(f"Exported {len(out_paths)} file(s) to: {Path(path_raw)}")
+
+            self._start_background_job("Export files", worker, on_done)
         except Exception as exc:
             messagebox.showerror("Export Files Error", str(exc))
             self._set_status("Files export failed")
