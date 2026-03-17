@@ -24,6 +24,7 @@ Deliver a PC-first Office Lens analogue:
 4. Office Lens style modes are active: `Document`, `Whiteboard`, `Photo`, `B/W`.
 5. In-place page replacement is active for selected page (`Replace Sel...` from image file).
 6. OCR core is active: dependency detection and optional searchable PDF export path.
+7. Camera health indicator is active (`Closed/Open/Previewing/Error`) in scan controls.
 
 ## Implementation Stages
 
@@ -42,7 +43,7 @@ Status: Mostly complete, memory regression benchmarking still open.
 Status: In progress.
 
 1. [x] `feat(ui-flow): switch to guided flow Scan -> Review -> Export`
-2. [ ] `feat(ui-scan): simplify capture controls and add camera health state`
+2. [x] `feat(ui-scan): simplify capture controls and add camera health state`
 3. [x] `feat(ui-review): faster filmstrip with thumbnails from disk cache`
 4. [~] `feat(ui-review): retake/replace page in-place` (replace from file done, camera retake pending)
 5. [x] `docs(ui): in-app guidance and quick tips`
