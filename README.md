@@ -1,66 +1,140 @@
-﻿# img_2_pdf
+# img_2_pdf
 
-Unified local toolkit for building convenient PDFs from photos/PDFs with optional OCR.
+This repository now contains a practical document-processing toolkit focused on one main goal:
 
-## Recommended entrypoint
+1. Accept camera captures or imported files/folders.
+2. Run document preprocessing and cleanup.
+3. Export a clean merged PDF.
+4. Add optional OCR later as a controlled extension.
 
-For your target workflow ("images folder or single file -> preprocessed PDF -> optional OCR"), run:
+## Current Main App
 
-```powershell
-python unified_pdf_tool.py
-```
-
-`unified_pdf_tool.py` combines the practical pieces into one GUI app:
-
-1. Input mode: `Images folder` or `Single file (image/PDF)`
-2. Image preprocessing: auto perspective, deskew + crop, optional spread split
-3. Output profiles: `Fast`, `Balanced`, `Best quality`
-4. Optional OCR stage via `ocrmypdf`
-
-## Script map
-
-| File | Purpose | Input -> Output | Main dependencies |
-|---|---|---|---|
-| `unified_pdf_tool.py` | Primary unified workflow for this repo | Images folder / image / PDF -> PDF (optional OCR) | `opencv-python`, `numpy`, `img2pdf`, optional `ocrmypdf` |
-| `fast.py` | Advanced OCR GUI with batch PDF mode and detailed OCRmyPDF integration | Images/PDF -> searchable PDF | `ocrmypdf`, `pypdf`, `img2pdf`, Tesseract, Ghostscript, qpdf |
-| `img_2_pdf.py` | Photo -> PDF app with OpenCV preprocessing and optional OCR | Images folder -> PDF | `opencv-python`, `numpy`, `img2pdf`, optional `ocrmypdf` |
-| `only_tesseract.py` | OCR pipeline without `ocrmypdf` (direct `tesseract.exe`) | Images/PDF -> searchable PDF | Tesseract, `pypdf`, Poppler (`pdftoppm`, `pdfunite`) |
-| `imgs_and_pdfs_ocr_fast_STABLE.py` | Stable previous version of OCR GUI | Images/PDF -> searchable PDF | `ocrmypdf`, `pypdf`, Tesseract |
-| `prepare pdf to tesseract.py` | PDF preconditioning (render + downscale + JPEG) | PDF -> prepared PDF | `PyMuPDF`, `Pillow` |
-| `naps2-7.5.3-win.exe` | NAPS2 installer | - | - |
-
-## Quick start
+Run:
 
 ```powershell
-python unified_pdf_tool.py
+python camscan_hybrid_tool.py
 ```
 
-Typical use:
+`camscan_hybrid_tool.py` is the current unified variant for your workflow.
 
-1. Choose input mode (`Images folder` or `Single file`).
-2. Select output PDF path.
-3. Keep profile as `Balanced` for default quality/speed.
-4. Leave preprocessing enabled for photo scans.
-5. Enable OCR only when searchable text is needed.
+## What The App Does
 
-## Dependencies
+`camscan_hybrid_tool.py` supports three source modes:
 
-Python packages (depending on selected script):
+1. `Import folder`
+2. `Import files`
+3. `Camera capture`
+
+Processing features:
+
+1. Document detection and perspective extraction using third-party logic from `camscan_suhren`:
+   `camscan.scanner.main`
+2. Postprocessing effects from `camscan_suhren`:
+   `None`, `Sharpen`, `Grayscale`, `Black and White`
+3. Optional two-page split (`left/right`) for book-like captures.
+4. Merged PDF export from all source modes.
+5. Quality profiles (`Fast`, `Balanced`, `Best quality`) for practical output control.
+
+Note:
+
+1. OCR is intentionally left as the next stage and is not active in `camscan_hybrid_tool.py` yet.
+
+## Processing Pipeline
+
+For `folder/files` mode:
+
+1. Load input images (and PDF pages if PDF files are provided and `pymupdf` is installed).
+2. Optionally detect and extract document contour.
+3. Apply selected postprocessing function.
+4. Optionally split each page into left/right halves.
+5. Convert processed pages into one merged PDF.
+
+For `camera` mode:
+
+1. Capture N shots from selected camera index.
+2. Wait configured delay between shots.
+3. Apply the same processing pipeline as above.
+4. Export merged PDF.
+
+## Setup
+
+Recommended Python:
+
+1. Python `3.11+`
+
+Install dependencies:
 
 ```powershell
-pip install ocrmypdf pypdf img2pdf opencv-python numpy pillow pymupdf
+pip install opencv-python numpy pillow img2pdf pymupdf
 ```
 
-External tools (required for OCR-heavy flows):
+If you plan to use legacy scripts with OCR, install additionally:
+
+```powershell
+pip install ocrmypdf pypdf
+```
+
+External OCR tools for legacy OCR scripts:
 
 1. Tesseract OCR
 2. Ghostscript
 3. qpdf
-4. Poppler (`pdftoppm`, `pdfunite`) for `only_tesseract.py` PDF mode
+4. Poppler (`pdftoppm`, `pdfunite`) for `only_tesseract.py` in PDF mode
 
-## Last modified by git history
+## How To Run
 
-Latest script update in repository history:
+Main app:
 
-1. `img_2_pdf.py` -> commit `0cfb6e7` (`2026-02-11 01:02:50 +03:00`)
-2. `fast.py`, `imgs_and_pdfs_ocr_fast_STABLE.py`, `only_tesseract.py`, `prepare pdf to tesseract.py` -> commit `5c408eb` (`2026-02-11 01:01:40 +03:00`)
+```powershell
+python camscan_hybrid_tool.py
+```
+
+Alternative app (images/file + optional OCR already integrated):
+
+```powershell
+python unified_pdf_tool.py
+```
+
+Legacy apps (kept for reference/fallback):
+
+```powershell
+python fast.py
+python img_2_pdf.py
+python only_tesseract.py
+python "prepare pdf to tesseract.py"
+```
+
+## Script Map
+
+| File | Role |
+|---|---|
+| `camscan_hybrid_tool.py` | Main hybrid app (`camera + files/folder`) using third-party processing logic from `camscan_suhren` |
+| `unified_pdf_tool.py` | Unified app for folder/file workflows with optional OCR path |
+| `fast.py` | OCR-focused GUI with batch PDF support |
+| `img_2_pdf.py` | Photo-to-PDF app with OpenCV preprocessing and optional OCR |
+| `only_tesseract.py` | OCR pipeline using direct `tesseract.exe` calls |
+| `imgs_and_pdfs_ocr_fast_STABLE.py` | Stable previous OCR GUI version |
+| `prepare pdf to tesseract.py` | PDF conditioning helper before OCR |
+| `camscan_suhren/` | Third-party camera scanner project used as source of preprocessing logic |
+
+## Known Limitations
+
+1. OCR in `camscan_hybrid_tool.py` is not enabled yet (planned next).
+2. Camera mode is shot-based capture (not a full continuous preview UI).
+3. PDF import in hybrid mode requires `pymupdf`.
+
+## Troubleshooting
+
+1. Error about missing `camscan` modules:
+   Ensure folder `camscan_suhren` exists directly inside repo root.
+2. Cannot open camera:
+   Check camera index and close other apps using webcam.
+3. PDF import error:
+   Install `pymupdf` (`pip install pymupdf`).
+
+## Short Roadmap
+
+1. Add optional OCR to `camscan_hybrid_tool.py` with toggle and language setting.
+2. Add stronger camera UX (preview/retake/selection before export).
+3. Add job queue for large folder batches.
+4. Add tests for hybrid pipeline stages.
