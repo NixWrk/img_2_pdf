@@ -870,32 +870,45 @@ class UnifiedScanApp(ctk.CTk):
         self._set_status(f"Starting import for {len(paths)} file(s)...")
 
         def worker(emit, is_cancelled):
-            emit(stage="Import loading", current=f"{len(paths)} input file(s)", progress=0)
-            loaded = load_input_items(
-                paths,
-                pdf_dpi=pdf_dpi,
-                on_progress=lambda i, total, name: emit(
-                    stage="Import loading",
-                    current=f"{i}/{total}: {name}",
-                    progress=int((i / total) * 45),
-                ),
-                cancel_cb=is_cancelled,
-            )
-            pages = process_loaded_items(
-                loaded,
-                options=pipeline_options,
-                scanner_root=self.scanner_root,
-                on_progress=lambda i, total, name: emit(
-                    stage="Import processing",
-                    current=f"{i}/{total}: {name}",
-                    progress=45 + int((i / total) * 55),
-                ),
-                cancel_cb=is_cancelled,
-            )
-            return pages
+            emit(stage="Import", current=f"{len(paths)} input file(s)", progress=0)
+            items: list[tuple[str, np.ndarray]] = []
+            counter = 1
+            total_paths = len(paths)
 
-        def on_done(pages):
-            items = [(f"{source_label}_{idx:05d}", page) for idx, page in enumerate(pages, start=1)]
+            for file_index, path in enumerate(paths, start=1):
+                if is_cancelled():
+                    raise RuntimeError("Cancelled by user.")
+
+                emit(
+                    stage="Import loading",
+                    current=f"{file_index}/{total_paths}: {path.name}",
+                    progress=int(((file_index - 1) / total_paths) * 45),
+                )
+                loaded = load_input_items(
+                    [path],
+                    pdf_dpi=pdf_dpi,
+                    cancel_cb=is_cancelled,
+                )
+                pages_for_file = process_loaded_items(
+                    loaded,
+                    options=pipeline_options,
+                    scanner_root=self.scanner_root,
+                    cancel_cb=is_cancelled,
+                )
+
+                for page in pages_for_file:
+                    items.append((f"{source_label}_{counter:05d}", page))
+                    counter += 1
+
+                emit(
+                    stage="Import processing",
+                    current=f"{file_index}/{total_paths}: {path.name}",
+                    progress=45 + int((file_index / total_paths) * 55),
+                )
+
+            return items
+
+        def on_done(items):
             self.session.add_images(items)
             self.refresh_page_list(keep_index=len(self.session) - 1)
             self._set_status(
