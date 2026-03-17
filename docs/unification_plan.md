@@ -83,3 +83,35 @@ Status: In progress.
 3. `feat(export): output naming templates and profile presets`
 4. `ci: add root lint/test workflow`
 5. `docs: user guide + troubleshooting`
+
+## Next Iteration Backlog
+
+### Priority 1: OCR Completion
+
+1. `feat(ocr-engines): wire searchable-pdf for paddleocr`
+2. `feat(ocr-engines): wire searchable-pdf for surya`
+3. `feat(ocr-engines): wire searchable-pdf for mineru`
+4. `test(ocr): add real fixture integration tests (rus/eng, mixed layouts)`
+5. `refactor(ocr): add unified OCR profile presets (fast/balanced/quality)`
+
+### Priority 2: Stability and Performance
+
+1. `test(memory): add high-volume memory regression suite`
+2. `perf(ui-review): virtualized filmstrip + lazy thumbnail decode`
+3. `perf(import): large-batch import stress optimization`
+4. `perf(export): chunked OCR/export progress + cancellation hardening`
+
+### Priority 3: UX and Product Readiness
+
+1. `feat(session): autosave + restore unfinished sessions`
+2. `feat(io): drag-and-drop import`
+3. `feat(io): clipboard image import`
+4. `feat(ui-flow): first-run onboarding + contextual tips`
+5. `feat(export): naming templates and export profiles`
+6. `feat(export): one-click presets (Document PDF, Archive PDF, OCR PDF)`
+
+### Priority 4: Delivery and Docs
+
+1. `ci: add full pipeline (lint + tests + smoke UI checks)`
+2. `docs: user guide + troubleshooting matrix by OCR engine`
+3. `build: create Windows release bundle (one-click launcher + dependency check)`
