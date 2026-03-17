@@ -373,6 +373,12 @@ class UnifiedScanApp(ctk.CTk):
             side=ctk.LEFT
         )
 
+        row_g = ctk.CTkFrame(left, fg_color="transparent")
+        row_g.pack(fill=ctk.X, padx=10, pady=(0, 4))
+        ctk.CTkButton(row_g, text="Retake Cam", width=226, command=self.retake_selected_page_from_camera).pack(
+            side=ctk.LEFT
+        )
+
         ctk.CTkButton(
             left,
             text="Apply Current Postprocess",
@@ -1349,6 +1355,38 @@ class UnifiedScanApp(ctk.CTk):
         except Exception as exc:
             messagebox.showerror("Replace Page Error", str(exc))
             self._set_status("Replace page failed")
+
+    def retake_selected_page_from_camera(self) -> None:
+        index, entry = self._single_selected_entry()
+        if entry is None or index is None:
+            self._set_status("Select exactly one page to retake.")
+            return
+
+        try:
+            camera = self._ensure_camera()
+            frame = camera.read_frame()
+            if frame is None:
+                raise RuntimeError("Could not capture an image from the camera.")
+
+            item_name = datetime.now().strftime(r"retake_%Y%m%d_%H%M%S")
+            items = self._process_capture_frame(frame, base_name=item_name)
+            if len(items) != 1:
+                raise RuntimeError("Retake requires one output page. Disable two-page split and retry.")
+
+            _, image = items[0]
+            ok = self.session.replace_entry_image(
+                entry.entry_id,
+                original_image=image,
+                current_image=image,
+            )
+            if not ok:
+                raise RuntimeError("Selected page was not found in session.")
+
+            self.refresh_page_list(keep_index=index)
+            self._set_status(f"Retook page {index + 1} from camera.")
+        except Exception as exc:
+            messagebox.showerror("Retake Page Error", str(exc))
+            self._set_status("Retake page failed")
 
     def open_manual_corners_editor(self) -> None:
         index, entry = self._single_selected_entry()
