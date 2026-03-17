@@ -35,7 +35,12 @@ from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.scanner_adapter import ScanAdapterError, scan_with_document_detector
 from uniscan.io import CameraService
 from uniscan.io.loaders import IMG_EXTS, PDF_EXTS, imread_unicode, list_supported_in_folder, load_input_items
-from uniscan.ocr import detect_ocr_dependencies
+from uniscan.ocr import (
+    OCR_ENGINE_LABELS,
+    OCR_ENGINE_PYTESSERACT,
+    OCR_ENGINE_VALUES,
+    detect_ocr_engine_status,
+)
 from uniscan.session import CaptureSession
 from uniscan.ui.camera_health import camera_health_state
 
@@ -98,6 +103,7 @@ class UnifiedScanApp(ctk.CTk):
         self.export_format_var = tk.StringVar(value="png")
         self.export_pdf_dpi_var = tk.IntVar(value=300)
         self.export_ocr_enable_var = tk.BooleanVar(value=False)
+        self.export_ocr_engine_var = tk.StringVar(value=OCR_ENGINE_PYTESSERACT)
         self.export_ocr_lang_var = tk.StringVar(value="eng")
         self.export_ocr_status_var = tk.StringVar(value="OCR: checking...")
         self.job_stage_var = tk.StringVar(value="Idle")
@@ -435,27 +441,43 @@ class UnifiedScanApp(ctk.CTk):
             self.camera_health_label.configure(text_color=state.color)
 
     def refresh_ocr_status(self) -> None:
-        status = detect_ocr_dependencies()
-        if status.ready:
-            self.export_ocr_status_var.set("OCR ready: tesseract + pytesseract + pypdf")
-        else:
+        engine = self.export_ocr_engine_var.get().strip().lower()
+        status = detect_ocr_engine_status(engine)
+        label = OCR_ENGINE_LABELS.get(engine, engine)
+        if not status.ready:
             missing = ", ".join(status.missing) if status.missing else "unknown"
-            self.export_ocr_status_var.set(f"OCR missing: {missing}")
+            self.export_ocr_status_var.set(f"{label}: missing {missing}")
             if self.export_ocr_enable_var.get():
                 self.export_ocr_enable_var.set(False)
+            return
+        if status.searchable_pdf:
+            self.export_ocr_status_var.set(f"{label}: ready for searchable PDF")
+        else:
+            self.export_ocr_status_var.set(f"{label}: detected, searchable PDF not wired yet")
+            if self.export_ocr_enable_var.get():
+                self.export_ocr_enable_var.set(False)
+
+    def _on_ocr_engine_change(self, _value: str) -> None:
+        self.refresh_ocr_status()
 
     def _on_toggle_ocr_export(self) -> None:
         if not self.export_ocr_enable_var.get():
             return
-        status = detect_ocr_dependencies()
-        if status.ready:
+        engine = self.export_ocr_engine_var.get().strip().lower()
+        status = detect_ocr_engine_status(engine)
+        if status.ready and status.searchable_pdf:
             return
-        missing = ", ".join(status.missing) if status.missing else "unknown"
         self.export_ocr_enable_var.set(False)
-        self.export_ocr_status_var.set(f"OCR missing: {missing}")
+        self.refresh_ocr_status()
+        label = OCR_ENGINE_LABELS.get(engine, engine)
+        if not status.ready:
+            missing = ", ".join(status.missing) if status.missing else "unknown"
+            details = f"Missing dependencies: {missing}"
+        else:
+            details = "This engine is detected, but searchable PDF output is not wired yet in this build."
         messagebox.showwarning(
             "OCR Not Ready",
-            f"Cannot enable OCR export. Missing dependencies: {missing}",
+            f"Cannot enable OCR export for {label}. {details}",
         )
 
     def go_to_review_tab(self) -> None:
@@ -1003,6 +1025,14 @@ class UnifiedScanApp(ctk.CTk):
             variable=self.export_ocr_enable_var,
             command=self._on_toggle_ocr_export,
         ).pack(side=ctk.LEFT, padx=(10, 8), pady=10)
+        ctk.CTkLabel(row_ocr, text="Engine").pack(side=ctk.LEFT, padx=(0, 4), pady=10)
+        ctk.CTkOptionMenu(
+            row_ocr,
+            values=list(OCR_ENGINE_VALUES),
+            variable=self.export_ocr_engine_var,
+            command=self._on_ocr_engine_change,
+            width=120,
+        ).pack(side=ctk.LEFT, padx=(0, 8), pady=10)
         ctk.CTkLabel(row_ocr, text="Lang").pack(side=ctk.LEFT, padx=(0, 4), pady=10)
         ctk.CTkEntry(row_ocr, textvariable=self.export_ocr_lang_var, width=90).pack(
             side=ctk.LEFT,
@@ -1618,11 +1648,15 @@ class UnifiedScanApp(ctk.CTk):
                 path_raw = chosen
                 self.export_pdf_path_var.set(chosen)
             use_ocr = bool(self.export_ocr_enable_var.get())
+            ocr_engine = self.export_ocr_engine_var.get().strip().lower()
             ocr_lang = self.export_ocr_lang_var.get().strip() or "eng"
-            ocr_status = detect_ocr_dependencies() if use_ocr else None
-            if ocr_status is not None and not ocr_status.ready:
-                missing = ", ".join(ocr_status.missing) if ocr_status.missing else "unknown"
-                raise RuntimeError(f"OCR dependencies are not ready: {missing}")
+            ocr_status = detect_ocr_engine_status(ocr_engine) if use_ocr else None
+            if ocr_status is not None:
+                if not ocr_status.ready:
+                    missing = ", ".join(ocr_status.missing) if ocr_status.missing else "unknown"
+                    raise RuntimeError(f"OCR engine '{ocr_engine}' is not ready: {missing}")
+                if not ocr_status.searchable_pdf:
+                    raise RuntimeError(f"OCR engine '{ocr_engine}' does not support searchable PDF in this build.")
 
             dpi = int(self.export_pdf_dpi_var.get())
             if not use_ocr and dpi < 72:
@@ -1631,11 +1665,16 @@ class UnifiedScanApp(ctk.CTk):
 
             def worker(emit, _is_cancelled):
                 if use_ocr:
-                    emit(stage="Export OCR PDF", current=f"OCR {len(image_paths)} page(s), lang={ocr_lang}", progress=10)
+                    emit(
+                        stage="Export OCR PDF",
+                        current=f"OCR {len(image_paths)} page(s), engine={ocr_engine}, lang={ocr_lang}",
+                        progress=10,
+                    )
                     out_path = export_image_paths_as_searchable_pdf(
                         image_paths,
                         out_pdf=Path(path_raw),
                         lang=ocr_lang,
+                        engine_name=ocr_engine,
                     )
                     emit(stage="Export OCR PDF", current="Finalizing", progress=100)
                 else:
@@ -1647,7 +1686,7 @@ class UnifiedScanApp(ctk.CTk):
             def on_done(out_path):
                 if use_ocr:
                     self._set_status(
-                        f"Exported searchable PDF ({len(image_paths)} page(s), lang={ocr_lang}): {out_path}"
+                        f"Exported searchable PDF ({len(image_paths)} page(s), engine={ocr_engine}, lang={ocr_lang}): {out_path}"
                     )
                 else:
                     self._set_status(f"Exported {len(image_paths)} page(s) to PDF: {out_path}")

@@ -85,11 +85,17 @@ def export_image_paths_as_searchable_pdf(
     *,
     out_pdf: Path,
     lang: str = "eng",
+    engine_name: str = "pytesseract",
 ) -> Path:
     """Export image paths to searchable PDF via OCR."""
     if len(image_paths) == 0:
         raise ValueError("No image paths to export.")
-    return image_paths_to_searchable_pdf([Path(p) for p in image_paths], out_pdf=out_pdf, lang=lang)
+    return image_paths_to_searchable_pdf(
+        [Path(p) for p in image_paths],
+        out_pdf=out_pdf,
+        lang=lang,
+        engine_name=engine_name,
+    )
 
 
 def export_image_paths_as_files(
