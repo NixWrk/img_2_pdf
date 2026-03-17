@@ -12,13 +12,14 @@ import customtkinter as ctk
 import cv2
 import numpy as np
 import tkinter as tk
-from PIL import Image
+from PIL import Image, ImageTk
 from tkinter import filedialog, messagebox
 
 from uniscan.export import (
     export_image_paths_as_files,
     export_image_paths_as_pdf,
 )
+from uniscan.core.geometry import warp_perspective_from_points
 from uniscan.core.pipeline import PipelineOptions, process_loaded_items, split_spread
 from uniscan.core.preprocess import PREPROCESS_PRESETS, PreprocessSettings, apply_enhancements
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
@@ -289,6 +290,15 @@ class UnifiedScanApp(ctk.CTk):
         row_c.pack(fill=ctk.X, padx=10, pady=(0, 4))
         ctk.CTkButton(row_c, text="Delete Sel", width=110, command=self.delete_selected_pages).pack(side=ctk.LEFT)
         ctk.CTkButton(row_c, text="Refresh", width=110, command=self.refresh_page_list).pack(side=ctk.LEFT, padx=6)
+
+        row_d = ctk.CTkFrame(left, fg_color="transparent")
+        row_d.pack(fill=ctk.X, padx=10, pady=(0, 4))
+        ctk.CTkButton(
+            row_d,
+            text="Manual Corners",
+            width=226,
+            command=self.open_manual_corners_editor,
+        ).pack(side=ctk.LEFT)
 
         ctk.CTkButton(
             left,
@@ -1074,6 +1084,14 @@ class UnifiedScanApp(ctk.CTk):
             return None
         return selected[0]
 
+    def _single_selected_entry(self):
+        index = self._single_selected_index()
+        if index is None:
+            return None, None
+        if index < 0 or index >= len(self.session.entries):
+            return None, None
+        return index, self.session.entries[index]
+
     def move_selected_up(self) -> None:
         index = self._single_selected_index()
         if index is None:
@@ -1120,6 +1138,133 @@ class UnifiedScanApp(ctk.CTk):
             return
         self.refresh_page_list()
         self._set_status(f"Deleted {removed} page(s). Session pages: {len(self.session)}")
+
+    def open_manual_corners_editor(self) -> None:
+        index, entry = self._single_selected_entry()
+        if entry is None or index is None:
+            self._set_status("Select exactly one page for manual corner edit.")
+            return
+
+        image = entry.original_image
+        if image is None or image.size == 0:
+            messagebox.showerror("Manual Corners", "Selected page image is empty.")
+            return
+
+        if len(image.shape) == 2:
+            rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        else:
+            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        src_h, src_w = rgb.shape[:2]
+        max_w, max_h = 980, 700
+        scale = min(max_w / src_w, max_h / src_h, 1.0)
+        view_w = max(1, int(src_w * scale))
+        view_h = max(1, int(src_h * scale))
+        view_img = cv2.resize(rgb, (view_w, view_h), interpolation=cv2.INTER_AREA)
+
+        points = [
+            [0.0, 0.0],
+            [float(src_w - 1), 0.0],
+            [float(src_w - 1), float(src_h - 1)],
+            [0.0, float(src_h - 1)],
+        ]
+        labels = ["TL", "TR", "BR", "BL"]
+        drag = {"idx": None}
+
+        win = ctk.CTkToplevel(self)
+        win.title(f"Manual Corners - {entry.name}")
+        win.geometry(f"{view_w + 60}x{view_h + 130}")
+        win.minsize(480, 360)
+
+        title = ctk.CTkLabel(
+            win,
+            text="Drag corner points, then Apply",
+            anchor="w",
+        )
+        title.pack(fill=ctk.X, padx=10, pady=(10, 4))
+
+        canvas = tk.Canvas(win, width=view_w, height=view_h, bg="black", highlightthickness=0)
+        canvas.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
+        tk_img = ImageTk.PhotoImage(Image.fromarray(view_img))
+        canvas.create_image(0, 0, image=tk_img, anchor=tk.NW)
+        canvas.image = tk_img
+
+        def _scaled_points():
+            return [(x * scale, y * scale) for x, y in points]
+
+        def _redraw():
+            canvas.delete("overlay")
+            spts = _scaled_points()
+            flat = [coord for pt in spts for coord in pt]
+            canvas.create_line(*flat, flat[0], flat[1], fill="#00ff66", width=2, tags="overlay")
+            for idx_p, (sx, sy) in enumerate(spts):
+                r = 7
+                canvas.create_oval(sx - r, sy - r, sx + r, sy + r, fill="#ff3355", outline="", tags="overlay")
+                canvas.create_text(sx + 14, sy - 10, text=labels[idx_p], fill="#ffffff", tags="overlay")
+
+        def _nearest_handle(px: float, py: float) -> int | None:
+            spts = _scaled_points()
+            best_i = None
+            best_d2 = 14.0 * 14.0
+            for idx_p, (sx, sy) in enumerate(spts):
+                d2 = (sx - px) ** 2 + (sy - py) ** 2
+                if d2 <= best_d2:
+                    best_i = idx_p
+                    best_d2 = d2
+            return best_i
+
+        def _on_down(event):
+            drag["idx"] = _nearest_handle(event.x, event.y)
+
+        def _on_move(event):
+            idx_p = drag["idx"]
+            if idx_p is None:
+                return
+            x = float(event.x) / max(1e-6, scale)
+            y = float(event.y) / max(1e-6, scale)
+            x = max(0.0, min(float(src_w - 1), x))
+            y = max(0.0, min(float(src_h - 1), y))
+            points[idx_p][0] = x
+            points[idx_p][1] = y
+            _redraw()
+
+        def _on_up(_event):
+            drag["idx"] = None
+
+        def _reset():
+            points[0][:] = [0.0, 0.0]
+            points[1][:] = [float(src_w - 1), 0.0]
+            points[2][:] = [float(src_w - 1), float(src_h - 1)]
+            points[3][:] = [0.0, float(src_h - 1)]
+            _redraw()
+
+        def _apply():
+            try:
+                warped = warp_perspective_from_points(image, np.array(points, dtype=np.float32))
+                if warped is None or warped.size == 0:
+                    raise RuntimeError("Perspective transform returned empty image.")
+                entry.original_image = warped
+                entry.current_image = self._apply_postprocess(warped)
+                self.refresh_page_list(keep_index=index)
+                self._set_status("Manual corner correction applied.")
+                win.destroy()
+            except Exception as exc:
+                messagebox.showerror("Manual Corners Error", str(exc))
+
+        canvas.bind("<Button-1>", _on_down)
+        canvas.bind("<B1-Motion>", _on_move)
+        canvas.bind("<ButtonRelease-1>", _on_up)
+
+        btns = ctk.CTkFrame(win)
+        btns.pack(fill=ctk.X, padx=10, pady=(0, 10))
+        ctk.CTkButton(btns, text="Reset", command=_reset, width=100).pack(side=ctk.LEFT)
+        ctk.CTkButton(btns, text="Apply", command=_apply, width=120).pack(side=ctk.LEFT, padx=8)
+        ctk.CTkButton(btns, text="Close", command=win.destroy, width=100).pack(side=ctk.LEFT)
+
+        _redraw()
+        win.attributes("-topmost", True)
+        win.lift()
+        win.attributes("-topmost", False)
 
     def apply_postprocess_to_session(self) -> None:
         try:

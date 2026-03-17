@@ -41,6 +41,10 @@ class CaptureEntry:
     def original_image(self) -> np.ndarray:
         return self.store.read_image(self.original_path)
 
+    @original_image.setter
+    def original_image(self, image: np.ndarray) -> None:
+        self.store.write_image(self.original_path, image)
+
     @property
     def current_image(self) -> np.ndarray:
         return self.store.read_image(self.current_path)

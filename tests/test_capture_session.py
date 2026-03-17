@@ -46,3 +46,15 @@ def test_session_entries_are_disk_backed(tmp_path) -> None:
     assert entry.current_path.exists()
     assert entry.thumb_path.exists()
     session.close()
+
+
+def test_entry_original_image_setter_writes_to_disk(tmp_path) -> None:
+    session = CaptureSession(store=PageStore(root_dir=tmp_path))
+    entry = session.add_image(name="orig", image=_img(10))
+    replacement = _img(200)
+    entry.original_image = replacement
+
+    reloaded = entry.original_image
+    assert reloaded.shape == replacement.shape
+    assert int(reloaded[0, 0, 0]) == 200
+    session.close()
