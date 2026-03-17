@@ -11,12 +11,13 @@ import cv2
 import numpy as np
 import tkinter as tk
 from PIL import Image
-from tkinter import messagebox
+from tkinter import filedialog, messagebox
 
-from uniscan.core.pipeline import split_spread
+from uniscan.core.pipeline import PipelineOptions, process_loaded_items, split_spread
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.scanner_adapter import ScanAdapterError, scan_with_document_detector
 from uniscan.io import CameraService
+from uniscan.io.loaders import IMG_EXTS, PDF_EXTS, list_supported_in_folder, load_input_items
 from uniscan.session import CaptureSession
 
 PREVIEW_WAIT_MS = 80
@@ -60,6 +61,9 @@ class UnifiedScanApp(ctk.CTk):
         self.two_page_mode_var = tk.BooleanVar(value=False)
         self.free_capture_var = tk.BooleanVar(value=False)
         self.postprocess_var = tk.StringVar(value="None")
+        self.import_folder_var = tk.StringVar()
+        self.import_files_var = tk.StringVar()
+        self.import_pdf_dpi_var = tk.IntVar(value=300)
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -85,12 +89,8 @@ class UnifiedScanApp(ctk.CTk):
         self.jobs_tab = self.tabs.add("Jobs")
 
         self._build_capture_tab(self.capture_tab)
-        for tab, name in (
-            (self.import_tab, "Import"),
-            (self.pages_tab, "Pages"),
-            (self.export_tab, "Export"),
-            (self.jobs_tab, "Jobs"),
-        ):
+        self._build_import_tab(self.import_tab)
+        for tab, name in ((self.pages_tab, "Pages"), (self.export_tab, "Export"), (self.jobs_tab, "Jobs")):
             body = ctk.CTkLabel(
                 tab,
                 text=f"{name} module: implementation in progress",
@@ -420,6 +420,142 @@ class UnifiedScanApp(ctk.CTk):
         window.attributes("-topmost", True)
         window.grab_set()
         window.attributes("-topmost", False)
+
+    def _build_import_tab(self, tab: ctk.CTkFrame) -> None:
+        tab.grid_columnconfigure(0, weight=1)
+
+        row_folder = ctk.CTkFrame(tab)
+        row_folder.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
+        row_folder.grid_columnconfigure(0, weight=1)
+        self.import_folder_entry = ctk.CTkEntry(row_folder, textvariable=self.import_folder_var)
+        self.import_folder_entry.grid(row=0, column=0, sticky="ew", padx=(10, 8), pady=10)
+        ctk.CTkButton(row_folder, text="Folder...", width=100, command=self.choose_import_folder).grid(
+            row=0,
+            column=1,
+            padx=(0, 6),
+            pady=10,
+        )
+        ctk.CTkButton(row_folder, text="Import Folder", width=130, command=self.import_from_folder).grid(
+            row=0,
+            column=2,
+            padx=(0, 10),
+            pady=10,
+        )
+
+        row_files = ctk.CTkFrame(tab)
+        row_files.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+        row_files.grid_columnconfigure(0, weight=1)
+        self.import_files_entry = ctk.CTkEntry(row_files, textvariable=self.import_files_var)
+        self.import_files_entry.grid(row=0, column=0, sticky="ew", padx=(10, 8), pady=10)
+        ctk.CTkButton(row_files, text="Files...", width=100, command=self.choose_import_files).grid(
+            row=0,
+            column=1,
+            padx=(0, 6),
+            pady=10,
+        )
+        ctk.CTkButton(row_files, text="Import Files", width=130, command=self.import_from_files).grid(
+            row=0,
+            column=2,
+            padx=(0, 10),
+            pady=10,
+        )
+
+        row_options = ctk.CTkFrame(tab)
+        row_options.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 8))
+        ctk.CTkLabel(row_options, text="PDF render DPI").pack(side=ctk.LEFT, padx=(10, 8), pady=10)
+        ctk.CTkEntry(row_options, textvariable=self.import_pdf_dpi_var, width=90).pack(
+            side=ctk.LEFT,
+            padx=(0, 12),
+            pady=10,
+        )
+        ctk.CTkLabel(
+            row_options,
+            text="Uses current processing options from Capture tab (detect/split/postprocess)",
+            anchor="w",
+        ).pack(side=ctk.LEFT, padx=(0, 10), pady=10)
+
+        row_actions = ctk.CTkFrame(tab)
+        row_actions.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 10))
+        ctk.CTkButton(row_actions, text="Import from Session Paths", command=self.import_from_files).pack(
+            side=ctk.LEFT,
+            padx=10,
+            pady=10,
+        )
+
+    def choose_import_folder(self) -> None:
+        path = filedialog.askdirectory(title="Select input folder")
+        if path:
+            self.import_folder_var.set(path)
+
+    def choose_import_files(self) -> None:
+        files = filedialog.askopenfilenames(
+            title="Select image/PDF files",
+            filetypes=[
+                (
+                    "Image and PDF",
+                    "*.jpg;*.jpeg;*.png;*.tif;*.tiff;*.webp;*.bmp;*.pdf",
+                ),
+                ("All files", "*.*"),
+            ],
+        )
+        if files:
+            self.import_files_var.set(";".join(files))
+
+    def import_from_folder(self) -> None:
+        try:
+            folder = Path(self.import_folder_var.get().strip())
+            paths = list_supported_in_folder(folder)
+            if not paths:
+                raise RuntimeError("No supported image/PDF files found in selected folder.")
+            self._import_paths(paths=paths, source_label=folder.name or "folder")
+        except Exception as exc:
+            messagebox.showerror("Import Error", str(exc))
+            self._set_status("Folder import failed")
+
+    def import_from_files(self) -> None:
+        try:
+            raw = [part.strip().strip('"') for part in self.import_files_var.get().split(";") if part.strip()]
+            if not raw:
+                raise RuntimeError("No files selected.")
+            paths = [Path(item) for item in raw]
+            missing = [path for path in paths if not path.exists() or not path.is_file()]
+            if missing:
+                raise RuntimeError("Some selected files do not exist:\n" + "\n".join(map(str, missing)))
+            unsupported = [path for path in paths if path.suffix.lower() not in (IMG_EXTS | PDF_EXTS)]
+            if unsupported:
+                raise RuntimeError("Unsupported file type(s):\n" + "\n".join(map(str, unsupported)))
+            paths.sort(key=lambda p: p.name.lower())
+            self._import_paths(paths=paths, source_label="files")
+        except Exception as exc:
+            messagebox.showerror("Import Error", str(exc))
+            self._set_status("File import failed")
+
+    def _import_paths(self, *, paths: list[Path], source_label: str) -> None:
+        pdf_dpi = int(self.import_pdf_dpi_var.get())
+        if pdf_dpi < 72:
+            raise RuntimeError("PDF DPI must be >= 72.")
+        self._set_status(f"Loading {len(paths)} input file(s)...")
+
+        loaded = load_input_items(
+            paths,
+            pdf_dpi=pdf_dpi,
+            on_progress=lambda i, total, name: self._set_status(f"Loading {i}/{total}: {name}"),
+        )
+        pipeline_options = PipelineOptions(
+            detect_document=bool(self.detect_document_var.get()),
+            two_page_mode=bool(self.two_page_mode_var.get()),
+            postprocess_name=self.postprocess_var.get(),
+        )
+        pages = process_loaded_items(
+            loaded,
+            options=pipeline_options,
+            scanner_root=self.scanner_root,
+        )
+        items = [(f"{source_label}_{idx:05d}", page) for idx, page in enumerate(pages, start=1)]
+        self.session.add_images(items)
+        self._set_status(
+            f"Imported {len(paths)} file(s), added {len(items)} page(s). Session pages: {len(self.session)}"
+        )
 
 
 def run_app() -> int:
