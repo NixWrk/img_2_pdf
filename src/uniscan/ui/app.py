@@ -21,7 +21,15 @@ from uniscan.export import (
 )
 from uniscan.core.geometry import warp_perspective_from_points
 from uniscan.core.pipeline import PipelineOptions, process_loaded_items, split_spread
-from uniscan.core.preprocess import PREPROCESS_PRESETS, PreprocessSettings, apply_enhancements, deskew_document
+from uniscan.core.preprocess import (
+    LENS_MODE_VALUES,
+    PREPROCESS_PRESETS,
+    PreprocessSettings,
+    apply_enhancements,
+    deskew_document,
+    infer_lens_mode,
+    resolve_lens_mode_profile,
+)
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.scanner_adapter import ScanAdapterError, scan_with_document_detector
 from uniscan.io import CameraService
@@ -71,6 +79,7 @@ class UnifiedScanApp(ctk.CTk):
         self.two_page_mode_var = tk.BooleanVar(value=False)
         self.free_capture_var = tk.BooleanVar(value=False)
         self.postprocess_var = tk.StringVar(value="None")
+        self.lens_mode_var = tk.StringVar(value="Document")
         self.preprocess_preset_var = tk.StringVar(value="Document")
         self.preprocess_contrast_var = tk.DoubleVar(value=1.25)
         self.preprocess_brightness_var = tk.IntVar(value=10)
@@ -90,9 +99,14 @@ class UnifiedScanApp(ctk.CTk):
         self.job_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.job_cancel_event = threading.Event()
         self.job_thread: threading.Thread | None = None
+        self.tab_scan_name = "1. Scan"
+        self.tab_import_name = "2. Import"
+        self.tab_review_name = "3. Review"
+        self.tab_export_name = "4. Export"
+        self.tab_jobs_name = "5. Jobs"
 
         self._build_ui()
-        self.on_preprocess_preset_change(self.preprocess_preset_var.get())
+        self.on_lens_mode_change(self.lens_mode_var.get())
         self.after(120, self._poll_job_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -107,14 +121,21 @@ class UnifiedScanApp(ctk.CTk):
         )
         title.pack(anchor="w", padx=12, pady=(12, 8))
 
+        flow_tip = ctk.CTkLabel(
+            container,
+            text="Flow: 1) Scan from camera or import files  2) Review and correct pages  3) Export PDF or images",
+            anchor="w",
+        )
+        flow_tip.pack(fill=ctk.X, padx=12, pady=(0, 6))
+
         self.tabs = ctk.CTkTabview(container)
         self.tabs.pack(fill=ctk.BOTH, expand=True, padx=12, pady=12)
 
-        self.capture_tab = self.tabs.add("Capture")
-        self.import_tab = self.tabs.add("Import")
-        self.pages_tab = self.tabs.add("Pages")
-        self.export_tab = self.tabs.add("Export")
-        self.jobs_tab = self.tabs.add("Jobs")
+        self.capture_tab = self.tabs.add(self.tab_scan_name)
+        self.import_tab = self.tabs.add(self.tab_import_name)
+        self.pages_tab = self.tabs.add(self.tab_review_name)
+        self.export_tab = self.tabs.add(self.tab_export_name)
+        self.jobs_tab = self.tabs.add(self.tab_jobs_name)
 
         self._build_capture_tab(self.capture_tab)
         self._build_import_tab(self.import_tab)
@@ -166,11 +187,21 @@ class UnifiedScanApp(ctk.CTk):
             variable=self.free_capture_var,
         ).pack(anchor="w", padx=10, pady=(2, 8))
 
+        ctk.CTkLabel(controls, text="Lens mode").pack(anchor="w", padx=10, pady=(4, 2))
+        self.lens_mode_menu = ctk.CTkOptionMenu(
+            controls,
+            values=list(LENS_MODE_VALUES),
+            variable=self.lens_mode_var,
+            command=self.on_lens_mode_change,
+        )
+        self.lens_mode_menu.pack(anchor="w", padx=10, pady=(0, 6))
+
         ctk.CTkLabel(controls, text="Postprocess").pack(anchor="w", padx=10, pady=(4, 2))
         self.postprocess_menu = ctk.CTkOptionMenu(
             controls,
             values=list(POSTPROCESSING_OPTIONS.keys()),
             variable=self.postprocess_var,
+            command=self._on_postprocess_mode_change,
         )
         self.postprocess_menu.pack(anchor="w", padx=10, pady=(0, 8))
 
@@ -244,6 +275,14 @@ class UnifiedScanApp(ctk.CTk):
             side=ctk.LEFT,
             padx=6,
         )
+        ctk.CTkButton(row_capture, text="Review", width=80, command=self.go_to_review_tab).pack(side=ctk.LEFT)
+
+        ctk.CTkLabel(
+            controls,
+            text="Tip: choose Lens mode -> capture/import -> review pages -> export.",
+            justify="left",
+            wraplength=250,
+        ).pack(anchor="w", padx=10, pady=(0, 8))
 
         preview_area = ctk.CTkFrame(tab)
         preview_area.grid(row=0, column=1, sticky="nsew", padx=(8, 10), pady=10)
@@ -319,6 +358,11 @@ class UnifiedScanApp(ctk.CTk):
             text="Apply Current Postprocess",
             command=self.apply_postprocess_to_session,
         ).pack(fill=ctk.X, padx=10, pady=(0, 10))
+        ctk.CTkButton(
+            left,
+            text="Go to Export",
+            command=self.go_to_export_tab,
+        ).pack(fill=ctk.X, padx=10, pady=(0, 10))
 
         right = ctk.CTkFrame(tab)
         right.grid(row=0, column=1, sticky="nsew", padx=(8, 12), pady=12)
@@ -354,6 +398,30 @@ class UnifiedScanApp(ctk.CTk):
     def _set_status(self, text: str) -> None:
         self.status_var.set(text)
 
+    def go_to_review_tab(self) -> None:
+        self.tabs.set(self.tab_review_name)
+
+    def go_to_export_tab(self) -> None:
+        self.tabs.set(self.tab_export_name)
+
+    def _sync_lens_mode_from_controls(self) -> None:
+        inferred = infer_lens_mode(self.preprocess_preset_var.get(), self.postprocess_var.get())
+        self.lens_mode_var.set(inferred)
+
+    def _on_postprocess_mode_change(self, _value: str) -> None:
+        self._sync_lens_mode_from_controls()
+
+    def on_lens_mode_change(self, mode_name: str) -> None:
+        profile = resolve_lens_mode_profile(mode_name)
+        if profile is None:
+            self._set_status("Lens mode set to Custom (manual controls).")
+            return
+
+        self.preprocess_preset_var.set(profile.preset_name)
+        self.postprocess_var.set(profile.postprocess_name)
+        self.on_preprocess_preset_change(profile.preset_name)
+        self._set_status(f"Lens mode set to {mode_name}.")
+
     def on_preprocess_preset_change(self, preset_name: str) -> None:
         preset = PREPROCESS_PRESETS.get(preset_name)
         if preset is None:
@@ -370,6 +438,7 @@ class UnifiedScanApp(ctk.CTk):
             self.postprocess_var.set("Grayscale")
         elif preset_name == "Photo" and self.postprocess_var.get() == "Black and White":
             self.postprocess_var.set("None")
+        self._sync_lens_mode_from_controls()
 
     def _set_job_display(self, *, stage: str | None = None, current: str | None = None, progress: int | None = None) -> None:
         if stage is not None:
@@ -611,6 +680,7 @@ class UnifiedScanApp(ctk.CTk):
             items = self._process_capture_frame(frame, base_name=timestamp)
             self.session.add_images(items)
             self.refresh_page_list(keep_index=len(self.session) - 1)
+            self.go_to_review_tab()
             self._set_status(f"Captured {len(items)} page(s). Session pages: {len(self.session)}")
         except Exception as exc:
             messagebox.showerror("Capture Error", str(exc))
@@ -673,6 +743,7 @@ class UnifiedScanApp(ctk.CTk):
             def on_done(items):
                 self.session.add_images(items)
                 self.refresh_page_list(keep_index=len(self.session) - 1)
+                self.go_to_review_tab()
                 self._set_status(f"Burst captured {len(items)} page(s). Session pages: {len(self.session)}")
 
             self._start_background_job("Capture Burst", worker, on_done)
@@ -802,7 +873,7 @@ class UnifiedScanApp(ctk.CTk):
         )
         ctk.CTkLabel(
             row_options,
-            text="Uses current processing options from Capture tab (detect/split/postprocess)",
+            text="Uses current Scan settings (lens mode, detect/split, postprocess)",
             anchor="w",
         ).pack(side=ctk.LEFT, padx=(0, 10), pady=10)
 
@@ -813,6 +884,7 @@ class UnifiedScanApp(ctk.CTk):
             padx=10,
             pady=10,
         )
+        ctk.CTkButton(row_actions, text="Review", command=self.go_to_review_tab).pack(side=ctk.LEFT, padx=0, pady=10)
 
     def _build_export_tab(self, tab: ctk.CTkFrame) -> None:
         tab.grid_columnconfigure(0, weight=1)
@@ -1037,6 +1109,7 @@ class UnifiedScanApp(ctk.CTk):
         def on_done(stats):
             files_count = int(stats["files"])
             pages_count = int(stats["pages"])
+            self.go_to_review_tab()
             self._set_status(
                 f"Imported {files_count} file(s), added {pages_count} page(s). Session pages: {len(self.session)}"
             )

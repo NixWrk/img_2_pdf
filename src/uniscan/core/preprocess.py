@@ -17,6 +17,12 @@ class PreprocessSettings:
     apply_threshold: bool = False
 
 
+@dataclass(slots=True, frozen=True)
+class LensModeProfile:
+    preset_name: str
+    postprocess_name: str
+
+
 PREPROCESS_PRESETS: dict[str, PreprocessSettings] = {
     "Custom": PreprocessSettings(),
     "Document": PreprocessSettings(contrast=1.25, brightness=10, denoise=4, threshold=170, apply_threshold=False),
@@ -30,6 +36,30 @@ PREPROCESS_PRESETS: dict[str, PreprocessSettings] = {
         apply_threshold=True,
     ),
 }
+
+
+LENS_MODE_PROFILES: dict[str, LensModeProfile] = {
+    "Document": LensModeProfile(preset_name="Document", postprocess_name="Grayscale"),
+    "Whiteboard": LensModeProfile(preset_name="Whiteboard", postprocess_name="Grayscale"),
+    "Photo": LensModeProfile(preset_name="Photo", postprocess_name="None"),
+    "B/W": LensModeProfile(preset_name="B/W High Contrast", postprocess_name="Black and White"),
+}
+
+LENS_MODE_CUSTOM = "Custom"
+LENS_MODE_VALUES: tuple[str, ...] = tuple([*LENS_MODE_PROFILES.keys(), LENS_MODE_CUSTOM])
+
+
+def resolve_lens_mode_profile(mode_name: str) -> LensModeProfile | None:
+    if mode_name == LENS_MODE_CUSTOM:
+        return None
+    return LENS_MODE_PROFILES.get(mode_name)
+
+
+def infer_lens_mode(preset_name: str, postprocess_name: str) -> str:
+    for mode_name, profile in LENS_MODE_PROFILES.items():
+        if profile.preset_name == preset_name and profile.postprocess_name == postprocess_name:
+            return mode_name
+    return LENS_MODE_CUSTOM
 
 
 def apply_enhancements(image: np.ndarray, settings: PreprocessSettings) -> np.ndarray:

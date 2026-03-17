@@ -1,7 +1,16 @@
 import cv2
 import numpy as np
 
-from uniscan.core.preprocess import PREPROCESS_PRESETS, PreprocessSettings, apply_enhancements, deskew_document
+from uniscan.core.preprocess import (
+    LENS_MODE_CUSTOM,
+    LENS_MODE_PROFILES,
+    PREPROCESS_PRESETS,
+    PreprocessSettings,
+    apply_enhancements,
+    deskew_document,
+    infer_lens_mode,
+    resolve_lens_mode_profile,
+)
 
 
 def _color_img() -> np.ndarray:
@@ -14,6 +23,26 @@ def test_preprocess_presets_exist() -> None:
     assert "Custom" in PREPROCESS_PRESETS
     assert "Document" in PREPROCESS_PRESETS
     assert "B/W High Contrast" in PREPROCESS_PRESETS
+
+
+def test_lens_mode_profiles_exist() -> None:
+    assert "Document" in LENS_MODE_PROFILES
+    assert "Whiteboard" in LENS_MODE_PROFILES
+    assert "Photo" in LENS_MODE_PROFILES
+    assert "B/W" in LENS_MODE_PROFILES
+
+
+def test_resolve_lens_mode_profile_handles_custom() -> None:
+    assert resolve_lens_mode_profile(LENS_MODE_CUSTOM) is None
+    profile = resolve_lens_mode_profile("Document")
+    assert profile is not None
+    assert profile.preset_name == "Document"
+    assert profile.postprocess_name == "Grayscale"
+
+
+def test_infer_lens_mode_returns_custom_for_non_profile_combo() -> None:
+    assert infer_lens_mode("Document", "None") == LENS_MODE_CUSTOM
+    assert infer_lens_mode("Photo", "None") == "Photo"
 
 
 def test_apply_enhancements_keeps_shape_for_color() -> None:

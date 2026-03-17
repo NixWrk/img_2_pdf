@@ -40,6 +40,13 @@ Or after installation:
 uniscan
 ```
 
+Quick workflow (Office Lens style):
+
+1. Open tab `1. Scan` and pick a `Lens mode` (`Document`, `Whiteboard`, `Photo`, `B/W`).
+2. Capture from camera or go to `2. Import` and load files/folder.
+3. App switches to `3. Review`: reorder, rotate, deskew, manual corners, before/after check.
+4. Open `4. Export` and save merged PDF or image files.
+
 Current implemented modules in this new app:
 
 1. `Capture`: live preview, single capture, burst capture, camera configuration
@@ -52,7 +59,7 @@ Implementation notes:
 
 1. Session pages are disk-backed (`uniscan` cache) with lazy reads to reduce RAM usage on large batches.
 2. `Pages` review now shows `Before/After` preview for preprocessing visibility.
-3. Capture preprocessing includes presets (`Document`, `Whiteboard`, `Photo`, `B/W High Contrast`) and tuning controls.
+3. Capture preprocessing includes Office Lens style modes (`Document`, `Whiteboard`, `Photo`, `B/W`) plus manual preset/sliders.
 
 ## What The App Does
 
