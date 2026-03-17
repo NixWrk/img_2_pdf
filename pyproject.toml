@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uniscan"
+version = "0.1.0"
+description = "Unified document scanner (camera + files/folder + PDF) toolkit."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "img_2_pdf contributors" }
+]
+dependencies = [
+  "opencv-python>=4.8",
+  "numpy>=1.26",
+  "pillow>=10.0",
+  "img2pdf>=0.5",
+  "pymupdf>=1.24",
+  "customtkinter>=5.2"
+]
+
+[project.optional-dependencies]
+ocr = [
+  "ocrmypdf>=16.0",
+  "pypdf>=4.0"
+]
+dev = [
+  "pytest>=8.0",
+  "pytest-cov>=5.0",
+  "ruff>=0.7"
+]
+
+[project.scripts]
+uniscan = "uniscan.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
