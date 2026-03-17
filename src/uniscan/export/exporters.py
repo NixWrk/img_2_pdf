@@ -12,6 +12,7 @@ import numpy as np
 
 from uniscan.core.pipeline import build_pdf_from_images
 from uniscan.io.loaders import imwrite_unicode
+from uniscan.ocr import image_paths_to_searchable_pdf
 
 
 def export_pages_as_pdf(
@@ -77,6 +78,18 @@ def export_image_paths_as_pdf(
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     build_pdf_from_images([Path(p) for p in image_paths], out_pdf=out_pdf, dpi=int(dpi))
     return out_pdf
+
+
+def export_image_paths_as_searchable_pdf(
+    image_paths: Sequence[Path],
+    *,
+    out_pdf: Path,
+    lang: str = "eng",
+) -> Path:
+    """Export image paths to searchable PDF via OCR."""
+    if len(image_paths) == 0:
+        raise ValueError("No image paths to export.")
+    return image_paths_to_searchable_pdf([Path(p) for p in image_paths], out_pdf=out_pdf, lang=lang)
 
 
 def export_image_paths_as_files(
