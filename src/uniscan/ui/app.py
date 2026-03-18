@@ -564,7 +564,7 @@ class UnifiedScanApp(ctk.CTk):
 
     def _poll_job_queue(self) -> None:
         try:
-            while True:
+            for _ in range(6):
                 kind, payload = self.job_queue.get_nowait()
                 if kind == "progress":
                     stage, current, progress = payload
@@ -572,10 +572,10 @@ class UnifiedScanApp(ctk.CTk):
                 elif kind == "import_chunk":
                     items = payload
                     if items:
-                        added = self.session.add_images(items)
-                        for entry in added:
-                            self._reprocess_entry_from_original(entry)
-                        self.refresh_page_list(keep_index=len(self.session) - 1)
+                        originals = [(name, original) for name, original, _processed in items]
+                        added = self.session.add_images(originals)
+                        for entry, (_name, _original, processed) in zip(added, items):
+                            entry.current_image = processed
                 elif kind == "done":
                     on_done, result, name = payload
                     try:
@@ -589,6 +589,8 @@ class UnifiedScanApp(ctk.CTk):
                     if "Cancelled by user." in text:
                         self._set_job_display(stage=f"{name}: cancelled", current=text, progress=0)
                         self._set_status(f"{name} cancelled")
+                        if name == "Import":
+                            self.refresh_page_list(keep_index=len(self.session) - 1)
                     else:
                         self._set_job_display(stage=f"{name}: error", current=text, progress=0)
                         self._set_status(f"{name} failed")
@@ -596,7 +598,7 @@ class UnifiedScanApp(ctk.CTk):
         except queue.Empty:
             pass
         finally:
-            self.after(120, self._poll_job_queue)
+            self.after(40, self._poll_job_queue)
 
     def cancel_current_job(self) -> None:
         if self.job_thread is None or not self.job_thread.is_alive():
@@ -1192,6 +1194,8 @@ class UnifiedScanApp(ctk.CTk):
             two_page_mode=bool(self.two_page_mode_var.get()),
             postprocess_name="None",
         )
+        postprocess_fn = POSTPROCESSING_OPTIONS.get(self.postprocess_var.get(), POSTPROCESSING_OPTIONS["None"])
+        preprocess_settings = self._current_preprocess_settings()
         self._set_status(f"Starting import for {len(paths)} file(s)...")
 
         def worker(emit, is_cancelled):
@@ -1221,11 +1225,16 @@ class UnifiedScanApp(ctk.CTk):
                     cancel_cb=is_cancelled,
                 )
 
-                items_chunk: list[tuple[str, np.ndarray]] = []
+                items_chunk: list[tuple[str, np.ndarray, np.ndarray]] = []
+                chunk_size = 4
                 for page in pages_for_file:
-                    items_chunk.append((f"{source_label}_{counter:05d}", page))
+                    processed = apply_enhancements(postprocess_fn(page), preprocess_settings)
+                    items_chunk.append((f"{source_label}_{counter:05d}", page, processed))
                     counter += 1
                     added_pages += 1
+                    if len(items_chunk) >= chunk_size:
+                        self.job_queue.put(("import_chunk", items_chunk))
+                        items_chunk = []
 
                 if items_chunk:
                     self.job_queue.put(("import_chunk", items_chunk))
@@ -1241,6 +1250,7 @@ class UnifiedScanApp(ctk.CTk):
         def on_done(stats):
             files_count = int(stats["files"])
             pages_count = int(stats["pages"])
+            self.refresh_page_list(keep_index=len(self.session) - 1)
             self.go_to_review_tab()
             self._set_status(
                 f"Imported {files_count} file(s), added {pages_count} page(s). Session pages: {len(self.session)}"
