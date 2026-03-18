@@ -98,6 +98,15 @@ class UnifiedScanApp(ctk.CTk):
         self.import_folder_var = tk.StringVar()
         self.import_files_var = tk.StringVar()
         self.import_pdf_dpi_var = tk.IntVar(value=300)
+        self.import_detect_document_var = tk.BooleanVar(value=True)
+        self.import_two_page_mode_var = tk.BooleanVar(value=False)
+        self.import_postprocess_var = tk.StringVar(value="None")
+        self.import_lens_mode_var = tk.StringVar(value="Document")
+        self.import_preprocess_preset_var = tk.StringVar(value="Document")
+        self.import_preprocess_contrast_var = tk.DoubleVar(value=1.25)
+        self.import_preprocess_brightness_var = tk.IntVar(value=10)
+        self.import_preprocess_denoise_var = tk.IntVar(value=4)
+        self.import_preprocess_threshold_var = tk.IntVar(value=170)
         self.export_scope_var = tk.StringVar(value="All pages")
         self.export_pdf_path_var = tk.StringVar()
         self.export_dir_var = tk.StringVar()
@@ -121,6 +130,7 @@ class UnifiedScanApp(ctk.CTk):
 
         self._build_ui()
         self.on_lens_mode_change(self.lens_mode_var.get())
+        self.on_import_lens_mode_change(self.import_lens_mode_var.get())
         self.refresh_ocr_status()
         self._update_camera_health()
         self.after(120, self._poll_job_queue)
@@ -529,6 +539,41 @@ class UnifiedScanApp(ctk.CTk):
             self.postprocess_var.set("None")
         self._sync_lens_mode_from_controls()
 
+    def _sync_import_lens_mode_from_controls(self) -> None:
+        inferred = infer_lens_mode(self.import_preprocess_preset_var.get(), self.import_postprocess_var.get())
+        self.import_lens_mode_var.set(inferred)
+
+    def _on_import_postprocess_mode_change(self, _value: str) -> None:
+        self._sync_import_lens_mode_from_controls()
+
+    def on_import_lens_mode_change(self, mode_name: str) -> None:
+        profile = resolve_lens_mode_profile(mode_name)
+        if profile is None:
+            self._set_status("Import mode set to Custom (manual controls).")
+            return
+
+        self.import_preprocess_preset_var.set(profile.preset_name)
+        self.import_postprocess_var.set(profile.postprocess_name)
+        self.on_import_preprocess_preset_change(profile.preset_name)
+        self._set_status(f"Import mode set to {mode_name}.")
+
+    def on_import_preprocess_preset_change(self, preset_name: str) -> None:
+        preset = PREPROCESS_PRESETS.get(preset_name)
+        if preset is None:
+            return
+        self.import_preprocess_contrast_var.set(float(preset.contrast))
+        self.import_preprocess_brightness_var.set(int(preset.brightness))
+        self.import_preprocess_denoise_var.set(int(preset.denoise))
+        self.import_preprocess_threshold_var.set(int(preset.threshold))
+
+        if preset_name == "B/W High Contrast":
+            self.import_postprocess_var.set("Black and White")
+        elif preset_name in {"Document", "Whiteboard"} and self.import_postprocess_var.get() == "None":
+            self.import_postprocess_var.set("Grayscale")
+        elif preset_name == "Photo" and self.import_postprocess_var.get() == "Black and White":
+            self.import_postprocess_var.set("None")
+        self._sync_import_lens_mode_from_controls()
+
     def _set_job_display(self, *, stage: str | None = None, current: str | None = None, progress: int | None = None) -> None:
         if stage is not None:
             self.job_stage_var.set(stage)
@@ -710,6 +755,18 @@ class UnifiedScanApp(ctk.CTk):
             brightness=int(self.preprocess_brightness_var.get()),
             denoise=int(self.preprocess_denoise_var.get()),
             threshold=int(self.preprocess_threshold_var.get()),
+            apply_threshold=apply_threshold,
+        )
+
+    def _current_import_preprocess_settings(self) -> PreprocessSettings:
+        preset_name = self.import_preprocess_preset_var.get()
+        preset = PREPROCESS_PRESETS.get(preset_name, PREPROCESS_PRESETS["Custom"])
+        apply_threshold = bool(preset.apply_threshold or self.import_postprocess_var.get() == "Black and White")
+        return PreprocessSettings(
+            contrast=float(self.import_preprocess_contrast_var.get()),
+            brightness=int(self.import_preprocess_brightness_var.get()),
+            denoise=int(self.import_preprocess_denoise_var.get()),
+            threshold=int(self.import_preprocess_threshold_var.get()),
             apply_threshold=apply_threshold,
         )
 
@@ -976,7 +1033,7 @@ class UnifiedScanApp(ctk.CTk):
         )
         ctk.CTkLabel(
             row_options,
-            text="Import keeps originals; apply postprocess/preprocess later in Review tab",
+            text="Import uses processing profile below; originals stay preserved for reprocessing in Review",
             anchor="w",
         ).pack(side=ctk.LEFT, padx=(0, 10), pady=10)
 
@@ -988,6 +1045,88 @@ class UnifiedScanApp(ctk.CTk):
             pady=10,
         )
         ctk.CTkButton(row_actions, text="Review", command=self.go_to_review_tab).pack(side=ctk.LEFT, padx=0, pady=10)
+
+        import_profile = ctk.CTkFrame(tab)
+        import_profile.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 8))
+        ctk.CTkLabel(import_profile, text="Import processing profile").pack(anchor="w", padx=10, pady=(10, 6))
+
+        row_flags = ctk.CTkFrame(import_profile, fg_color="transparent")
+        row_flags.pack(fill=ctk.X, padx=10, pady=(0, 6))
+        ctk.CTkCheckBox(
+            row_flags,
+            text="Detect document contour",
+            variable=self.import_detect_document_var,
+        ).pack(side=ctk.LEFT, padx=(0, 14))
+        ctk.CTkCheckBox(
+            row_flags,
+            text="Two-page split",
+            variable=self.import_two_page_mode_var,
+        ).pack(side=ctk.LEFT)
+
+        row_modes = ctk.CTkFrame(import_profile, fg_color="transparent")
+        row_modes.pack(fill=ctk.X, padx=10, pady=(0, 8))
+        ctk.CTkLabel(row_modes, text="Lens mode").pack(side=ctk.LEFT, padx=(0, 6))
+        ctk.CTkOptionMenu(
+            row_modes,
+            values=list(LENS_MODE_VALUES),
+            variable=self.import_lens_mode_var,
+            command=self.on_import_lens_mode_change,
+            width=130,
+        ).pack(side=ctk.LEFT, padx=(0, 12))
+        ctk.CTkLabel(row_modes, text="Postprocess").pack(side=ctk.LEFT, padx=(0, 6))
+        ctk.CTkOptionMenu(
+            row_modes,
+            values=list(POSTPROCESSING_OPTIONS.keys()),
+            variable=self.import_postprocess_var,
+            command=self._on_import_postprocess_mode_change,
+            width=150,
+        ).pack(side=ctk.LEFT, padx=(0, 12))
+        ctk.CTkLabel(row_modes, text="Preset").pack(side=ctk.LEFT, padx=(0, 6))
+        ctk.CTkOptionMenu(
+            row_modes,
+            values=list(PREPROCESS_PRESETS.keys()),
+            variable=self.import_preprocess_preset_var,
+            command=self.on_import_preprocess_preset_change,
+            width=160,
+        ).pack(side=ctk.LEFT)
+
+        row_sliders = ctk.CTkFrame(import_profile, fg_color="transparent")
+        row_sliders.pack(fill=ctk.X, padx=10, pady=(0, 10))
+        ctk.CTkLabel(row_sliders, text="Contrast").grid(row=0, column=0, sticky="w")
+        ctk.CTkSlider(
+            row_sliders,
+            from_=0.7,
+            to=2.0,
+            number_of_steps=26,
+            variable=self.import_preprocess_contrast_var,
+        ).grid(row=0, column=1, sticky="ew", padx=(8, 14))
+        ctk.CTkLabel(row_sliders, text="Brightness").grid(row=0, column=2, sticky="w")
+        ctk.CTkSlider(
+            row_sliders,
+            from_=-80,
+            to=80,
+            number_of_steps=160,
+            variable=self.import_preprocess_brightness_var,
+        ).grid(row=0, column=3, sticky="ew", padx=(8, 0))
+
+        ctk.CTkLabel(row_sliders, text="Denoise").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ctk.CTkSlider(
+            row_sliders,
+            from_=0,
+            to=20,
+            number_of_steps=20,
+            variable=self.import_preprocess_denoise_var,
+        ).grid(row=1, column=1, sticky="ew", padx=(8, 14), pady=(8, 0))
+        ctk.CTkLabel(row_sliders, text="B/W Threshold").grid(row=1, column=2, sticky="w", pady=(8, 0))
+        ctk.CTkSlider(
+            row_sliders,
+            from_=80,
+            to=240,
+            number_of_steps=160,
+            variable=self.import_preprocess_threshold_var,
+        ).grid(row=1, column=3, sticky="ew", padx=(8, 0), pady=(8, 0))
+        row_sliders.grid_columnconfigure(1, weight=1)
+        row_sliders.grid_columnconfigure(3, weight=1)
 
     def _build_export_tab(self, tab: ctk.CTkFrame) -> None:
         tab.grid_columnconfigure(0, weight=1)
@@ -1190,12 +1329,15 @@ class UnifiedScanApp(ctk.CTk):
         if pdf_dpi < 72:
             raise RuntimeError("PDF DPI must be >= 72.")
         pipeline_options = PipelineOptions(
-            detect_document=bool(self.detect_document_var.get()),
-            two_page_mode=bool(self.two_page_mode_var.get()),
+            detect_document=bool(self.import_detect_document_var.get()),
+            two_page_mode=bool(self.import_two_page_mode_var.get()),
             postprocess_name="None",
         )
-        postprocess_fn = POSTPROCESSING_OPTIONS.get(self.postprocess_var.get(), POSTPROCESSING_OPTIONS["None"])
-        preprocess_settings = self._current_preprocess_settings()
+        postprocess_fn = POSTPROCESSING_OPTIONS.get(
+            self.import_postprocess_var.get(),
+            POSTPROCESSING_OPTIONS["None"],
+        )
+        preprocess_settings = self._current_import_preprocess_settings()
         self._set_status(f"Starting import for {len(paths)} file(s)...")
 
         def worker(emit, is_cancelled):

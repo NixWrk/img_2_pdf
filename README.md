@@ -62,6 +62,7 @@ Implementation notes:
 2. `Pages` review now shows `Before/After` preview for preprocessing visibility.
 3. Capture and import keep originals first; preprocessing is applied after ingest, not in live preview.
 4. Export tab supports OCR engine selection with dependency status checks.
+5. `Import` and `Scan` tabs now have independent processing settings/profiles.
 5. Searchable PDF is currently wired for `pytesseract`, `OCRmyPDF`, and `PyMuPDF OCR`.
 6. `PaddleOCR`, `Surya`, and `MinerU` are available as selectable OCR backends with readiness checks (searchable-PDF wiring pending).
 
