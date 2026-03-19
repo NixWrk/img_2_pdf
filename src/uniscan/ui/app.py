@@ -32,6 +32,7 @@ from uniscan.core.preprocess import (
     resolve_lens_mode_profile,
 )
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
+from uniscan.core.scanner_adapter import ScanAdapterError, scan_with_document_detector
 from uniscan.io import CameraService
 from uniscan.io.loaders import IMG_EXTS, PDF_EXTS, imread_unicode, list_supported_in_folder, load_input_items
 from uniscan.ocr import (
@@ -44,6 +45,8 @@ from uniscan.session import CaptureSession
 from uniscan.ui.camera_health import camera_health_state
 
 PREVIEW_WAIT_MS = 25
+LIGHTWEIGHT_PREVIEW_MAX_WIDTH = 1920
+LIGHTWEIGHT_PREVIEW_MAX_HEIGHT = 1080
 RESOLUTIONS = [
     "3264x2448",
     "3264x1836",
@@ -74,12 +77,15 @@ class UnifiedScanApp(ctk.CTk):
         self.page_preview_before_photo: ctk.CTkImage | None = None
         self.page_preview_after_photo: ctk.CTkImage | None = None
         self.review_processing_window: ctk.CTkToplevel | None = None
+        self.corner_editor_window: ctk.CTkToplevel | None = None
 
         self.status_var = tk.StringVar(value="Ready")
         self.camera_health_var = tk.StringVar(value="Camera: Closed")
         self.camera_index_var = tk.IntVar(value=0)
         self.camera_shots_var = tk.IntVar(value=1)
         self.camera_delay_var = tk.DoubleVar(value=1.0)
+        self.apply_changes_to_all_var = tk.BooleanVar(value=False)
+        self.lightweight_preview_var = tk.BooleanVar(value=True)
         self.postprocess_var = tk.StringVar(value="None")
         self.lens_mode_var = tk.StringVar(value="Document")
         self.preprocess_preset_var = tk.StringVar(value="Document")
@@ -277,6 +283,10 @@ class UnifiedScanApp(ctk.CTk):
             width=110,
             command=self.open_manual_corners_editor,
         ).pack(side=ctk.LEFT)
+        ctk.CTkButton(row_d, text="Auto Crop...", width=110, command=self.open_auto_crop_editor).pack(
+            side=ctk.LEFT,
+            padx=6,
+        )
         ctk.CTkButton(row_d, text="Replace Sel...", width=110, command=self.replace_selected_page_from_file).pack(
             side=ctk.LEFT,
             padx=6,
@@ -305,6 +315,17 @@ class UnifiedScanApp(ctk.CTk):
         processing = ctk.CTkFrame(left)
         processing.pack(fill=ctk.X, padx=10, pady=(6, 8))
         ctk.CTkLabel(processing, text="Review Processing").pack(anchor="w", padx=8, pady=(8, 6))
+
+        ctk.CTkCheckBox(
+            processing,
+            text="Apply all changes to all files",
+            variable=self.apply_changes_to_all_var,
+        ).pack(anchor="w", padx=8, pady=(0, 4))
+        ctk.CTkCheckBox(
+            processing,
+            text="Use lightweight previews (Full HD)",
+            variable=self.lightweight_preview_var,
+        ).pack(anchor="w", padx=8, pady=(0, 8))
 
         row_modes = ctk.CTkFrame(processing, fg_color="transparent")
         row_modes.pack(fill=ctk.X, padx=8, pady=(0, 6))
@@ -347,21 +368,11 @@ class UnifiedScanApp(ctk.CTk):
             width=102,
             command=self.open_review_processing_dialog,
         ).pack(side=ctk.LEFT, padx=6)
-
-        row_process_b = ctk.CTkFrame(processing, fg_color="transparent")
-        row_process_b.pack(fill=ctk.X, padx=8, pady=(0, 8))
         ctk.CTkButton(
-            row_process_b,
-            text="Apply To Sel",
-            width=102,
-            command=self.apply_postprocess_to_selected,
-        ).pack(side=ctk.LEFT)
-        ctk.CTkButton(
-            row_process_b,
-            text="Apply To All",
-            width=102,
-            command=self.apply_postprocess_to_session,
-        ).pack(side=ctk.LEFT, padx=6)
+            processing,
+            text="Apply Changes",
+            command=self.apply_review_changes,
+        ).pack(fill=ctk.X, padx=8, pady=(0, 8))
 
         ctk.CTkButton(
             left,
@@ -670,6 +681,23 @@ class UnifiedScanApp(ctk.CTk):
         fn = POSTPROCESSING_OPTIONS.get(mode, POSTPROCESSING_OPTIONS["None"])
         out = fn(image)
         return apply_enhancements(out, self._current_preprocess_settings())
+
+    def _review_preview_image(self, image: np.ndarray) -> np.ndarray:
+        if not self.lightweight_preview_var.get():
+            return image
+
+        height, width = image.shape[:2]
+        scale = min(
+            LIGHTWEIGHT_PREVIEW_MAX_WIDTH / max(1, width),
+            LIGHTWEIGHT_PREVIEW_MAX_HEIGHT / max(1, height),
+            1.0,
+        )
+        if scale >= 1.0:
+            return image
+
+        new_w = max(1, int(width * scale))
+        new_h = max(1, int(height * scale))
+        return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
     def _show_in_preview(self, image: np.ndarray) -> None:
         photo = self._to_ctk_photo_for_label(image, self.preview_label)
@@ -1052,7 +1080,7 @@ class UnifiedScanApp(ctk.CTk):
             paths = list_supported_in_folder(folder)
             if not paths:
                 raise RuntimeError("No supported image/PDF files found in selected folder.")
-            self._import_paths(paths=paths, source_label=folder.name or "folder")
+            self._import_paths(paths=paths)
         except Exception as exc:
             messagebox.showerror("Import Error", str(exc))
             self._set_status("Folder import failed")
@@ -1070,13 +1098,12 @@ class UnifiedScanApp(ctk.CTk):
             unsupported = [path for path in paths if path.suffix.lower() not in (IMG_EXTS | PDF_EXTS)]
             if unsupported:
                 raise RuntimeError("Unsupported file type(s):\n" + "\n".join(map(str, unsupported)))
-            paths.sort(key=lambda p: p.name.lower())
-            self._import_paths(paths=paths, source_label="files")
+            self._import_paths(paths=paths)
         except Exception as exc:
             messagebox.showerror("Import Error", str(exc))
             self._set_status("File import failed")
 
-    def _import_paths(self, *, paths: list[Path], source_label: str) -> None:
+    def _import_paths(self, *, paths: list[Path]) -> None:
         pdf_dpi = int(self.import_pdf_dpi_var.get())
         if pdf_dpi < 72:
             raise RuntimeError("PDF DPI must be >= 72.")
@@ -1084,7 +1111,6 @@ class UnifiedScanApp(ctk.CTk):
 
         def worker(emit, is_cancelled):
             emit(stage="Import", current=f"{len(paths)} input file(s)", progress=0)
-            counter = 1
             total_paths = len(paths)
             added_pages = 0
 
@@ -1104,9 +1130,8 @@ class UnifiedScanApp(ctk.CTk):
                 )
                 items_chunk: list[tuple[str, np.ndarray]] = []
                 chunk_size = 4
-                for _name, page in loaded:
-                    items_chunk.append((f"{source_label}_{counter:05d}", page))
-                    counter += 1
+                for name, page in loaded:
+                    items_chunk.append((name, page))
                     added_pages += 1
                     if len(items_chunk) >= chunk_size:
                         self.job_queue.put(("import_chunk", items_chunk))
@@ -1172,11 +1197,11 @@ class UnifiedScanApp(ctk.CTk):
             return
 
         entry = self.session.entries[index]
-        before = entry.original_image
+        before = self._review_preview_image(entry.original_image)
         try:
             after = self._apply_postprocess(before)
         except Exception:
-            after = entry.current_image
+            after = self._review_preview_image(entry.current_image)
 
         before_photo = self._to_ctk_photo_for_label(before, self.page_preview_before_label)
         after_photo = self._to_ctk_photo_for_label(after, self.page_preview_after_label)
@@ -1273,7 +1298,7 @@ class UnifiedScanApp(ctk.CTk):
                 entry.entry_id,
                 original_image=image,
                 current_image=image,
-                name=image_path.stem,
+                name=image_path.name,
             )
             if not ok:
                 raise RuntimeError("Selected page was not found in session.")
@@ -1313,74 +1338,171 @@ class UnifiedScanApp(ctk.CTk):
             messagebox.showerror("Retake Page Error", str(exc))
             self._set_status("Retake page failed")
 
-    def open_manual_corners_editor(self) -> None:
-        index, entry = self._single_selected_entry()
-        if entry is None or index is None:
-            self._set_status("Select exactly one page for manual corner edit.")
+    def _default_corner_points(self, image: np.ndarray) -> np.ndarray:
+        height, width = image.shape[:2]
+        return np.array(
+            [
+                [0.0, 0.0],
+                [float(max(0, width - 1)), 0.0],
+                [float(max(0, width - 1)), float(max(0, height - 1))],
+                [0.0, float(max(0, height - 1))],
+            ],
+            dtype=np.float32,
+        )
+
+    def _detect_corner_points(self, image: np.ndarray) -> np.ndarray | None:
+        try:
+            scan_output = scan_with_document_detector(image, enabled=True)
+        except ScanAdapterError:
+            return None
+
+        contour = scan_output.contour
+        if contour is None:
+            return None
+
+        points = np.array(contour, dtype=np.float32).reshape(-1, 2)
+        if points.shape[0] < 4:
+            return None
+        return points[:4]
+
+    def _open_corner_editor_dialog(self, indices: list[int], *, auto_detect: bool) -> None:
+        if not indices:
+            self._set_status("Select page(s) for corner editing.")
             return
 
-        image = entry.original_image
-        if image is None or image.size == 0:
-            messagebox.showerror("Manual Corners", "Selected page image is empty.")
+        entries = [self.session.entries[idx] for idx in indices if 0 <= idx < len(self.session.entries)]
+        if not entries:
+            self._set_status("No valid pages available for corner editing.")
             return
 
-        if len(image.shape) == 2:
-            rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-        else:
-            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        src_h, src_w = rgb.shape[:2]
-        max_w, max_h = 980, 700
-        scale = min(max_w / src_w, max_h / src_h, 1.0)
-        view_w = max(1, int(src_w * scale))
-        view_h = max(1, int(src_h * scale))
-        view_img = cv2.resize(rgb, (view_w, view_h), interpolation=cv2.INTER_AREA)
-
-        points = [
-            [0.0, 0.0],
-            [float(src_w - 1), 0.0],
-            [float(src_w - 1), float(src_h - 1)],
-            [0.0, float(src_h - 1)],
-        ]
-        labels = ["TL", "TR", "BR", "BL"]
-        drag = {"idx": None}
+        state = {"index": 0}
+        points_by_entry: dict[str, np.ndarray] = {}
 
         win = ctk.CTkToplevel(self)
-        win.title(f"Manual Corners - {entry.name}")
-        win.geometry(f"{view_w + 60}x{view_h + 130}")
-        win.minsize(480, 360)
+        win.title("Auto Crop" if auto_detect else "Manual Corners")
+        win.geometry("1120x860")
+        win.minsize(760, 580)
 
-        title = ctk.CTkLabel(
+        header = ctk.CTkLabel(
             win,
-            text="Drag corner points, then Apply",
+            text="Browse pages, adjust corners, then apply changes to the current page or all loaded pages.",
             anchor="w",
         )
-        title.pack(fill=ctk.X, padx=10, pady=(10, 4))
+        header.pack(fill=ctk.X, padx=12, pady=(12, 6))
 
-        canvas = tk.Canvas(win, width=view_w, height=view_h, bg="black", highlightthickness=0)
-        canvas.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
-        tk_img = ImageTk.PhotoImage(Image.fromarray(view_img))
-        canvas.create_image(0, 0, image=tk_img, anchor=tk.NW)
-        canvas.image = tk_img
+        meta_var = tk.StringVar(value="")
+        meta_label = ctk.CTkLabel(win, textvariable=meta_var, anchor="w")
+        meta_label.pack(fill=ctk.X, padx=12, pady=(0, 8))
 
-        def _scaled_points():
-            return [(x * scale, y * scale) for x, y in points]
+        canvas_frame = ctk.CTkFrame(win)
+        canvas_frame.pack(fill=ctk.BOTH, expand=True, padx=12, pady=(0, 10))
+        canvas_frame.grid_rowconfigure(0, weight=1)
+        canvas_frame.grid_columnconfigure(0, weight=1)
 
-        def _redraw():
+        canvas = tk.Canvas(canvas_frame, bg="black", highlightthickness=0)
+        canvas.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+
+        labels = ["TL", "TR", "BR", "BL"]
+        drag = {"idx": None}
+        canvas_image_ref = {"photo": None}
+        view_state = {
+            "source_shape": None,
+            "display_shape": None,
+            "scale_x": 1.0,
+            "scale_y": 1.0,
+            "points": self._default_corner_points(entries[0].original_image),
+        }
+
+        def _map_display_points_to_source(points: np.ndarray, source_shape: tuple[int, int], display_shape: tuple[int, int]) -> np.ndarray:
+            source_h, source_w = source_shape
+            display_h, display_w = display_shape
+            mapped = np.array(points, dtype=np.float32).copy()
+            mapped[:, 0] *= source_w / max(1, display_w)
+            mapped[:, 1] *= source_h / max(1, display_h)
+            return mapped
+
+        def _current_entry() -> tuple[int, object]:
+            entry_index = indices[state["index"]]
+            return entry_index, self.session.entries[entry_index]
+
+        def _display_image_for(entry_image: np.ndarray) -> np.ndarray:
+            return self._review_preview_image(entry_image)
+
+        def _init_points_for(entry) -> np.ndarray:
+            cached = points_by_entry.get(entry.entry_id)
+            if cached is not None:
+                return cached
+
+            display_image = _display_image_for(entry.original_image)
+            detected: np.ndarray | None = None
+            if auto_detect:
+                detected = self._detect_corner_points(display_image)
+            points = detected if detected is not None else self._default_corner_points(display_image)
+            source_shape = entry.original_image.shape[:2]
+            display_shape = display_image.shape[:2]
+            points = _map_display_points_to_source(points, source_shape, display_shape)
+            points_by_entry[entry.entry_id] = points
+            return points
+
+        def _redraw() -> None:
             canvas.delete("overlay")
-            spts = _scaled_points()
-            flat = [coord for pt in spts for coord in pt]
-            canvas.create_line(*flat, flat[0], flat[1], fill="#00ff66", width=2, tags="overlay")
-            for idx_p, (sx, sy) in enumerate(spts):
-                r = 7
-                canvas.create_oval(sx - r, sy - r, sx + r, sy + r, fill="#ff3355", outline="", tags="overlay")
-                canvas.create_text(sx + 14, sy - 10, text=labels[idx_p], fill="#ffffff", tags="overlay")
+            points = view_state["points"]
+            scale_x = float(view_state["scale_x"])
+            scale_y = float(view_state["scale_y"])
+            display_w = int(view_state["display_shape"][1]) if view_state["display_shape"] is not None else 1
+            display_h = int(view_state["display_shape"][0]) if view_state["display_shape"] is not None else 1
+            line_points = []
+            for pt in points:
+                x = float(pt[0]) / max(scale_x, 1e-6)
+                y = float(pt[1]) / max(scale_y, 1e-6)
+                line_points.extend([x, y])
+            canvas.create_line(*line_points, line_points[0], line_points[1], fill="#00ff66", width=2, tags="overlay")
+            for idx_p, pt in enumerate(points):
+                sx = float(pt[0]) / max(scale_x, 1e-6)
+                sy = float(pt[1]) / max(scale_y, 1e-6)
+                if 0 <= sx <= display_w and 0 <= sy <= display_h:
+                    r = 7
+                    canvas.create_oval(sx - r, sy - r, sx + r, sy + r, fill="#ff3355", outline="", tags="overlay")
+                    canvas.create_text(sx + 14, sy - 10, text=labels[idx_p], fill="#ffffff", tags="overlay")
+
+        def _load_current_entry() -> None:
+            entry_index, entry = _current_entry()
+            source_image = entry.original_image
+            if source_image is None or source_image.size == 0:
+                raise RuntimeError(f"Selected page is empty: {entry.name}")
+
+            display_image = _display_image_for(source_image)
+            display_h, display_w = display_image.shape[:2]
+            source_h, source_w = source_image.shape[:2]
+            view_h = max(1, int(display_h))
+            view_w = max(1, int(display_w))
+            rgb = cv2.cvtColor(display_image, cv2.COLOR_GRAY2RGB) if len(display_image.shape) == 2 else cv2.cvtColor(
+                display_image, cv2.COLOR_BGR2RGB
+            )
+            tk_img = ImageTk.PhotoImage(Image.fromarray(rgb))
+            canvas.configure(width=view_w, height=view_h)
+            canvas.delete("all")
+            canvas.create_image(0, 0, image=tk_img, anchor=tk.NW)
+            canvas_image_ref["photo"] = tk_img
+
+            points = _init_points_for(entry)
+            view_state["points"] = points
+            view_state["source_shape"] = (source_h, source_w)
+            view_state["display_shape"] = (display_h, display_w)
+            view_state["scale_x"] = source_w / max(1, display_w)
+            view_state["scale_y"] = source_h / max(1, display_h)
+            meta_var.set(f"{state['index'] + 1}/{len(entries)}  {entry.name}")
+            _redraw()
 
         def _nearest_handle(px: float, py: float) -> int | None:
-            spts = _scaled_points()
+            points = view_state["points"]
+            scale_x = float(view_state["scale_x"])
+            scale_y = float(view_state["scale_y"])
             best_i = None
             best_d2 = 14.0 * 14.0
-            for idx_p, (sx, sy) in enumerate(spts):
+            for idx_p, pt in enumerate(points):
+                sx = float(pt[0]) / max(scale_x, 1e-6)
+                sy = float(pt[1]) / max(scale_y, 1e-6)
                 d2 = (sx - px) ** 2 + (sy - py) ** 2
                 if d2 <= best_d2:
                     best_i = idx_p
@@ -1394,10 +1516,14 @@ class UnifiedScanApp(ctk.CTk):
             idx_p = drag["idx"]
             if idx_p is None:
                 return
-            x = float(event.x) / max(1e-6, scale)
-            y = float(event.y) / max(1e-6, scale)
-            x = max(0.0, min(float(src_w - 1), x))
-            y = max(0.0, min(float(src_h - 1), y))
+            scale_x = float(view_state["scale_x"])
+            scale_y = float(view_state["scale_y"])
+            source_h, source_w = view_state["source_shape"]
+            x = float(event.x) * max(scale_x, 1e-6)
+            y = float(event.y) * max(scale_y, 1e-6)
+            x = max(0.0, min(float(source_w - 1), x))
+            y = max(0.0, min(float(source_h - 1), y))
+            points = view_state["points"]
             points[idx_p][0] = x
             points[idx_p][1] = y
             _redraw()
@@ -1406,39 +1532,117 @@ class UnifiedScanApp(ctk.CTk):
             drag["idx"] = None
 
         def _reset():
-            points[0][:] = [0.0, 0.0]
-            points[1][:] = [float(src_w - 1), 0.0]
-            points[2][:] = [float(src_w - 1), float(src_h - 1)]
-            points[3][:] = [0.0, float(src_h - 1)]
+            source_h, source_w = view_state["source_shape"]
+            points = view_state["points"]
+            points[:] = self._default_corner_points(np.zeros((source_h, source_w, 3), dtype=np.uint8))
             _redraw()
 
-        def _apply():
+        def _auto_detect_current():
+            entry_index, entry = _current_entry()
+            display_image = _display_image_for(entry.original_image)
+            detected = self._detect_corner_points(display_image)
+            if detected is None:
+                messagebox.showwarning("Auto Crop", f"Document boundaries were not detected for {entry.name}.")
+                return
+            mapped = _map_display_points_to_source(detected, entry.original_image.shape[:2], display_image.shape[:2])
+            points_by_entry[entry.entry_id] = mapped
+            view_state["points"] = mapped
+            _redraw()
+
+        def _apply_entry(entry_index: int, entry, points: np.ndarray) -> None:
+            source_image = entry.original_image
+            if source_image is None or source_image.size == 0:
+                raise RuntimeError(f"Selected page is empty: {entry.name}")
+            warped = warp_perspective_from_points(source_image, points.astype(np.float32))
+            if warped is None or warped.size == 0:
+                raise RuntimeError("Perspective transform returned empty image.")
+            entry.original_image = warped
+            entry.current_image = self._apply_postprocess(warped)
+
+        def _apply_current():
             try:
-                warped = warp_perspective_from_points(image, np.array(points, dtype=np.float32))
-                if warped is None or warped.size == 0:
-                    raise RuntimeError("Perspective transform returned empty image.")
-                entry.original_image = warped
-                entry.current_image = self._apply_postprocess(warped)
-                self.refresh_page_list(keep_index=index)
-                self._set_status("Manual corner correction applied.")
-                win.destroy()
+                entry_index, entry = _current_entry()
+                points = view_state["points"]
+                _apply_entry(entry_index, entry, points)
+                self.refresh_page_list(keep_index=entry_index)
+                self._set_status(f"Applied crop to {entry.name}.")
             except Exception as exc:
-                messagebox.showerror("Manual Corners Error", str(exc))
+                messagebox.showerror("Auto Crop Error", str(exc))
+
+        def _apply_all():
+            try:
+                for idx_offset, entry in enumerate(entries):
+                    points = points_by_entry.get(entry.entry_id)
+                    if points is None:
+                        current_display = _display_image_for(entry.original_image)
+                        detected = self._detect_corner_points(current_display)
+                        points = detected if detected is not None else self._default_corner_points(current_display)
+                        points = _map_display_points_to_source(
+                            points,
+                            entry.original_image.shape[:2],
+                            current_display.shape[:2],
+                        )
+                    _apply_entry(indices[idx_offset], entry, points)
+                self.refresh_page_list(keep_index=indices[min(state["index"], len(indices) - 1)])
+                self._set_status(f"Applied crop to {len(entries)} page(s).")
+            except Exception as exc:
+                messagebox.showerror("Auto Crop Error", str(exc))
+
+        def _prev_page():
+            if state["index"] > 0:
+                state["index"] -= 1
+                _load_current_entry()
+
+        def _next_page():
+            if state["index"] < len(entries) - 1:
+                state["index"] += 1
+                _load_current_entry()
 
         canvas.bind("<Button-1>", _on_down)
         canvas.bind("<B1-Motion>", _on_move)
         canvas.bind("<ButtonRelease-1>", _on_up)
 
-        btns = ctk.CTkFrame(win)
-        btns.pack(fill=ctk.X, padx=10, pady=(0, 10))
-        ctk.CTkButton(btns, text="Reset", command=_reset, width=100).pack(side=ctk.LEFT)
-        ctk.CTkButton(btns, text="Apply", command=_apply, width=120).pack(side=ctk.LEFT, padx=8)
-        ctk.CTkButton(btns, text="Close", command=win.destroy, width=100).pack(side=ctk.LEFT)
+        controls = ctk.CTkFrame(win)
+        controls.pack(fill=ctk.X, padx=12, pady=(0, 12))
+        ctk.CTkButton(controls, text="Prev", width=90, command=_prev_page).pack(side=ctk.LEFT)
+        ctk.CTkButton(controls, text="Next", width=90, command=_next_page).pack(side=ctk.LEFT, padx=6)
+        ctk.CTkButton(controls, text="Auto Detect", width=110, command=_auto_detect_current).pack(
+            side=ctk.LEFT,
+            padx=6,
+        )
+        ctk.CTkButton(controls, text="Reset", width=90, command=_reset).pack(side=ctk.LEFT, padx=6)
+        ctk.CTkButton(controls, text="Apply Current", width=120, command=_apply_current).pack(
+            side=ctk.LEFT,
+            padx=6,
+        )
+        ctk.CTkButton(controls, text="Apply All", width=100, command=_apply_all).pack(side=ctk.LEFT, padx=6)
+        ctk.CTkButton(
+            controls,
+            text="Close",
+            width=90,
+            command=win.destroy,
+        ).pack(side=ctk.RIGHT)
 
-        _redraw()
+        _load_current_entry()
         win.attributes("-topmost", True)
         win.lift()
         win.attributes("-topmost", False)
+
+    def open_manual_corners_editor(self) -> None:
+        index, entry = self._single_selected_entry()
+        if entry is None or index is None:
+            self._set_status("Select exactly one page for manual corner edit.")
+            return
+        self._open_corner_editor_dialog([index], auto_detect=False)
+
+    def open_auto_crop_editor(self) -> None:
+        indices = self._selected_entry_indices()
+        if not indices:
+            indices = list(range(len(self.session.entries)))
+        if not indices:
+            self._set_status("No pages available for auto crop.")
+            return
+        self._open_corner_editor_dialog(indices, auto_detect=True)
 
     def _reprocess_entry_from_original(self, entry) -> None:
         postprocess_fn = POSTPROCESSING_OPTIONS.get(self.postprocess_var.get(), POSTPROCESSING_OPTIONS["None"])
@@ -1578,25 +1782,25 @@ class UnifiedScanApp(ctk.CTk):
         window.grab_set()
         window.attributes("-topmost", False)
 
-    def apply_postprocess_to_selected(self) -> None:
+    def apply_review_changes(self) -> None:
         indices = self._selected_entry_indices()
-        if not indices:
-            self._set_status("Select page(s) to apply processing.")
-            return
-        try:
-            for idx in indices:
-                self._reprocess_entry_from_original(self.session.entries[idx])
-            self.refresh_page_list(keep_index=indices[-1])
-            self._set_status(f"Reprocessed {len(indices)} selected page(s).")
-        except Exception as exc:
-            messagebox.showerror("Postprocess Error", str(exc))
+        if self.apply_changes_to_all_var.get():
+            target_entries = list(enumerate(self.session.entries))
+            if not target_entries:
+                self._set_status("No pages available to process.")
+                return
+        else:
+            if not indices:
+                self._set_status("Select page(s) to apply processing.")
+                return
+            target_entries = [(idx, self.session.entries[idx]) for idx in indices]
 
-    def apply_postprocess_to_session(self) -> None:
         try:
-            for entry in self.session.entries:
+            for _idx, entry in target_entries:
                 self._reprocess_entry_from_original(entry)
-            self.update_page_preview()
-            self._set_status("Postprocess reapplied to session")
+            self.refresh_page_list(keep_index=target_entries[-1][0])
+            scope = "all pages" if self.apply_changes_to_all_var.get() else "selected pages"
+            self._set_status(f"Reprocessed {len(target_entries)} {scope}.")
         except Exception as exc:
             messagebox.showerror("Postprocess Error", str(exc))
 

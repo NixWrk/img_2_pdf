@@ -64,7 +64,7 @@ def render_pdf_pages(pdf_path: Path, dpi: int) -> list[LoadedItem]:
                 arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
             else:
                 arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-            pages.append((f"{pdf_path.stem}_p{page_index:04d}.png", arr))
+            pages.append((f"{pdf_path.name} [p{page_index:04d}]", arr))
     finally:
         doc.close()
 

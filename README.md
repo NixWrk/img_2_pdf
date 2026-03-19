@@ -44,9 +44,9 @@ Quick workflow (Office Lens style):
 
 1. Open tab `1. Import` (main mode) and load files/folder, or use `2. Scan` for camera capture.
 2. `Import` and `Scan` are acquisition-only: they load/capture raw pages into session.
-3. App switches to `3. Review`: reorder, rotate, deskew, manual corners, and side-by-side `Before/After` preview.
-4. All processing controls are in `Review`: quick dropdowns (`Lens`, `Post`, `Preset`) and `Advanced...` popup sliders.
-5. Apply processing to selected pages or all pages from `Review`.
+3. App switches to `3. Review`: reorder, rotate, deskew, auto crop, manual corners, and side-by-side `Before/After` preview.
+4. All processing controls are in `Review`: quick dropdowns (`Lens`, `Post`, `Preset`), `Advanced...` popup sliders, and an `Apply all changes to all files` scope checkbox.
+5. Review uses lightweight previews by default (`Full HD`); uncheck it to work directly with full-resolution previews.
 6. Open `4. Export`, choose OCR engine if needed, then save merged PDF or image files.
 
 Current implemented modules in this new app:
@@ -63,6 +63,7 @@ Implementation notes:
 3. Capture/import keep originals first; processing is only applied from `Review`.
 4. Export tab supports OCR engine selection with dependency status checks.
 5. `Import` supports multi-file selection and background loading.
+6. Import order is preserved end-to-end: folder order, document page order, and mixed import order are kept as selected.
 7. Searchable PDF is currently wired for `pytesseract`, `OCRmyPDF`, and `PyMuPDF OCR`.
 8. `PaddleOCR`, `Surya`, and `MinerU` are available as selectable OCR backends with readiness checks (searchable-PDF wiring pending).
 
