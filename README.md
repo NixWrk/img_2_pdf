@@ -43,10 +43,11 @@ uniscan
 Quick workflow (Office Lens style):
 
 1. Open tab `1. Import` (main mode) and load files/folder, or use `2. Scan` for camera capture.
-2. Camera opens at max configured preset resolution; preview is optimized for low latency.
-3. App switches to `3. Review`: reorder, rotate, deskew, manual corners, before/after check.
-4. Postprocess/preprocess is applied after capture/import and can be reapplied in `Review`.
-5. Open `4. Export`, choose OCR engine if needed, then save merged PDF or image files.
+2. `Import` and `Scan` are acquisition-only: they load/capture raw pages into session.
+3. App switches to `3. Review`: reorder, rotate, deskew, manual corners, and side-by-side `Before/After` preview.
+4. All processing controls are in `Review`: quick dropdowns (`Lens`, `Post`, `Preset`) and `Advanced...` popup sliders.
+5. Apply processing to selected pages or all pages from `Review`.
+6. Open `4. Export`, choose OCR engine if needed, then save merged PDF or image files.
 
 Current implemented modules in this new app:
 
@@ -59,10 +60,9 @@ Implementation notes:
 
 1. Session pages are disk-backed (`uniscan` cache) with lazy reads to reduce RAM usage on large batches.
 2. `Pages` review now shows `Before/After` preview for preprocessing visibility.
-3. Capture and import keep originals first; preprocessing is applied after ingest, not in live preview.
+3. Capture/import keep originals first; processing is only applied from `Review`.
 4. Export tab supports OCR engine selection with dependency status checks.
-5. `Import` and `Scan` tabs now have independent processing settings/profiles.
-6. `Import` tab includes `Before/After` sample preview for current import profile.
+5. `Import` supports multi-file selection and background loading.
 7. Searchable PDF is currently wired for `pytesseract`, `OCRmyPDF`, and `PyMuPDF OCR`.
 8. `PaddleOCR`, `Surya`, and `MinerU` are available as selectable OCR backends with readiness checks (searchable-PDF wiring pending).
 

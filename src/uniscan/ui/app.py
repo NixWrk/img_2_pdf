@@ -22,7 +22,6 @@ from uniscan.export import (
     export_image_paths_as_searchable_pdf,
 )
 from uniscan.core.geometry import warp_perspective_from_points
-from uniscan.core.pipeline import PipelineOptions, process_loaded_items, split_spread
 from uniscan.core.preprocess import (
     LENS_MODE_VALUES,
     PREPROCESS_PRESETS,
@@ -33,7 +32,6 @@ from uniscan.core.preprocess import (
     resolve_lens_mode_profile,
 )
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
-from uniscan.core.scanner_adapter import ScanAdapterError, scan_with_document_detector
 from uniscan.io import CameraService
 from uniscan.io.loaders import IMG_EXTS, PDF_EXTS, imread_unicode, list_supported_in_folder, load_input_items
 from uniscan.ocr import (
@@ -69,28 +67,19 @@ class UnifiedScanApp(ctk.CTk):
         self.geometry("1280x800")
         self.minsize(1024, 680)
 
-        self.project_root = Path(__file__).resolve().parents[3]
-        candidate_scanner_root = self.project_root / "camscan_suhren"
-        self.scanner_root = candidate_scanner_root if candidate_scanner_root.exists() else None
-
         self.session = CaptureSession()
         self.camera: CameraService | None = None
         self.preview_job: str | None = None
         self.preview_photo: ctk.CTkImage | None = None
         self.page_preview_before_photo: ctk.CTkImage | None = None
         self.page_preview_after_photo: ctk.CTkImage | None = None
-        self.import_preview_before_photo: ctk.CTkImage | None = None
-        self.import_preview_after_photo: ctk.CTkImage | None = None
+        self.review_processing_window: ctk.CTkToplevel | None = None
 
         self.status_var = tk.StringVar(value="Ready")
         self.camera_health_var = tk.StringVar(value="Camera: Closed")
         self.camera_index_var = tk.IntVar(value=0)
         self.camera_shots_var = tk.IntVar(value=1)
         self.camera_delay_var = tk.DoubleVar(value=1.0)
-        self.detect_document_var = tk.BooleanVar(value=True)
-        self.two_page_mode_var = tk.BooleanVar(value=False)
-        self.free_capture_var = tk.BooleanVar(value=False)
-        self.live_contour_preview_var = tk.BooleanVar(value=False)
         self.postprocess_var = tk.StringVar(value="None")
         self.lens_mode_var = tk.StringVar(value="Document")
         self.preprocess_preset_var = tk.StringVar(value="Document")
@@ -102,15 +91,6 @@ class UnifiedScanApp(ctk.CTk):
         self.import_files_var = tk.StringVar()
         self.import_pdf_dpi_var = tk.IntVar(value=300)
         self.import_selected_files: list[str] = []
-        self.import_detect_document_var = tk.BooleanVar(value=True)
-        self.import_two_page_mode_var = tk.BooleanVar(value=False)
-        self.import_postprocess_var = tk.StringVar(value="None")
-        self.import_lens_mode_var = tk.StringVar(value="Document")
-        self.import_preprocess_preset_var = tk.StringVar(value="Document")
-        self.import_preprocess_contrast_var = tk.DoubleVar(value=1.25)
-        self.import_preprocess_brightness_var = tk.IntVar(value=10)
-        self.import_preprocess_denoise_var = tk.IntVar(value=4)
-        self.import_preprocess_threshold_var = tk.IntVar(value=170)
         self.export_scope_var = tk.StringVar(value="All pages")
         self.export_pdf_path_var = tk.StringVar()
         self.export_dir_var = tk.StringVar()
@@ -130,7 +110,6 @@ class UnifiedScanApp(ctk.CTk):
 
         self._build_ui()
         self.on_lens_mode_change(self.lens_mode_var.get())
-        self.on_import_lens_mode_change(self.import_lens_mode_var.get())
         self.refresh_ocr_status()
         self._update_camera_health()
         self.after(120, self._poll_job_queue)
@@ -149,7 +128,7 @@ class UnifiedScanApp(ctk.CTk):
 
         flow_tip = ctk.CTkLabel(
             container,
-            text="Flow: 1) Import files (main) or scan camera  2) Review and correct pages  3) Export PDF or images",
+            text="Flow: 1) Import files (main) or scan camera  2) Review: all processing/editing  3) Export PDF or images",
             anchor="w",
         )
         flow_tip.pack(fill=ctk.X, padx=12, pady=(0, 6))
@@ -203,88 +182,11 @@ class UnifiedScanApp(ctk.CTk):
             pady=(6, 8),
         )
 
-        ctk.CTkCheckBox(
+        ctk.CTkLabel(
             controls,
-            text="Detect document contour",
-            variable=self.detect_document_var,
-        ).pack(anchor="w", padx=10, pady=(2, 2))
-        ctk.CTkCheckBox(
-            controls,
-            text="Two-page split",
-            variable=self.two_page_mode_var,
-        ).pack(anchor="w", padx=10, pady=(2, 2))
-        ctk.CTkCheckBox(
-            controls,
-            text="Free capture mode",
-            variable=self.free_capture_var,
-        ).pack(anchor="w", padx=10, pady=(2, 8))
-        ctk.CTkCheckBox(
-            controls,
-            text="Live contour in preview (slower)",
-            variable=self.live_contour_preview_var,
-        ).pack(anchor="w", padx=10, pady=(0, 8))
-
-        ctk.CTkLabel(controls, text="Lens mode").pack(anchor="w", padx=10, pady=(4, 2))
-        self.lens_mode_menu = ctk.CTkOptionMenu(
-            controls,
-            values=list(LENS_MODE_VALUES),
-            variable=self.lens_mode_var,
-            command=self.on_lens_mode_change,
-        )
-        self.lens_mode_menu.pack(anchor="w", padx=10, pady=(0, 6))
-
-        ctk.CTkLabel(controls, text="Postprocess").pack(anchor="w", padx=10, pady=(4, 2))
-        self.postprocess_menu = ctk.CTkOptionMenu(
-            controls,
-            values=list(POSTPROCESSING_OPTIONS.keys()),
-            variable=self.postprocess_var,
-            command=self._on_postprocess_mode_change,
-        )
-        self.postprocess_menu.pack(anchor="w", padx=10, pady=(0, 8))
-
-        ctk.CTkLabel(controls, text="Preset").pack(anchor="w", padx=10, pady=(0, 2))
-        self.preprocess_preset_menu = ctk.CTkOptionMenu(
-            controls,
-            values=list(PREPROCESS_PRESETS.keys()),
-            variable=self.preprocess_preset_var,
-            command=self.on_preprocess_preset_change,
-        )
-        self.preprocess_preset_menu.pack(anchor="w", padx=10, pady=(0, 6))
-
-        ctk.CTkLabel(controls, text="Contrast").pack(anchor="w", padx=10, pady=(0, 2))
-        ctk.CTkSlider(
-            controls,
-            from_=0.7,
-            to=2.0,
-            number_of_steps=26,
-            variable=self.preprocess_contrast_var,
-        ).pack(fill=ctk.X, padx=10, pady=(0, 6))
-
-        ctk.CTkLabel(controls, text="Brightness").pack(anchor="w", padx=10, pady=(0, 2))
-        ctk.CTkSlider(
-            controls,
-            from_=-80,
-            to=80,
-            number_of_steps=160,
-            variable=self.preprocess_brightness_var,
-        ).pack(fill=ctk.X, padx=10, pady=(0, 6))
-
-        ctk.CTkLabel(controls, text="Denoise").pack(anchor="w", padx=10, pady=(0, 2))
-        ctk.CTkSlider(
-            controls,
-            from_=0,
-            to=20,
-            number_of_steps=20,
-            variable=self.preprocess_denoise_var,
-        ).pack(fill=ctk.X, padx=10, pady=(0, 6))
-
-        ctk.CTkLabel(controls, text="B/W Threshold").pack(anchor="w", padx=10, pady=(0, 2))
-        ctk.CTkSlider(
-            controls,
-            from_=80,
-            to=240,
-            number_of_steps=160,
-            variable=self.preprocess_threshold_var,
+            text="Scan only acquires raw images.\nAll processing is in Review tab.",
+            justify="left",
+            anchor="w",
         ).pack(fill=ctk.X, padx=10, pady=(0, 8))
 
         ctk.CTkLabel(controls, text="Burst shots").pack(anchor="w", padx=10, pady=(4, 2))
@@ -316,7 +218,7 @@ class UnifiedScanApp(ctk.CTk):
 
         ctk.CTkLabel(
             controls,
-            text="Tip: choose Lens mode -> capture/import -> review pages -> export.",
+            text="Tip: capture first, then open Review to process pages.",
             justify="left",
             wraplength=250,
         ).pack(anchor="w", padx=10, pady=(0, 8))
@@ -400,11 +302,67 @@ class UnifiedScanApp(ctk.CTk):
             side=ctk.LEFT
         )
 
+        processing = ctk.CTkFrame(left)
+        processing.pack(fill=ctk.X, padx=10, pady=(6, 8))
+        ctk.CTkLabel(processing, text="Review Processing").pack(anchor="w", padx=8, pady=(8, 6))
+
+        row_modes = ctk.CTkFrame(processing, fg_color="transparent")
+        row_modes.pack(fill=ctk.X, padx=8, pady=(0, 6))
+        ctk.CTkLabel(row_modes, text="Lens").pack(side=ctk.LEFT, padx=(0, 4))
+        ctk.CTkOptionMenu(
+            row_modes,
+            values=list(LENS_MODE_VALUES),
+            variable=self.lens_mode_var,
+            command=self.on_lens_mode_change,
+            width=90,
+        ).pack(side=ctk.LEFT, padx=(0, 6))
+        ctk.CTkLabel(row_modes, text="Post").pack(side=ctk.LEFT, padx=(0, 4))
+        ctk.CTkOptionMenu(
+            row_modes,
+            values=list(POSTPROCESSING_OPTIONS.keys()),
+            variable=self.postprocess_var,
+            command=self._on_postprocess_mode_change,
+            width=105,
+        ).pack(side=ctk.LEFT, padx=(0, 6))
+        ctk.CTkLabel(row_modes, text="Preset").pack(side=ctk.LEFT, padx=(0, 4))
+        ctk.CTkOptionMenu(
+            row_modes,
+            values=list(PREPROCESS_PRESETS.keys()),
+            variable=self.preprocess_preset_var,
+            command=self.on_preprocess_preset_change,
+            width=105,
+        ).pack(side=ctk.LEFT)
+
+        row_process_a = ctk.CTkFrame(processing, fg_color="transparent")
+        row_process_a.pack(fill=ctk.X, padx=8, pady=(0, 6))
         ctk.CTkButton(
-            left,
-            text="Apply Current Postprocess",
+            row_process_a,
+            text="Preview Selected",
+            width=102,
+            command=self.update_page_preview,
+        ).pack(side=ctk.LEFT)
+        ctk.CTkButton(
+            row_process_a,
+            text="Advanced...",
+            width=102,
+            command=self.open_review_processing_dialog,
+        ).pack(side=ctk.LEFT, padx=6)
+
+        row_process_b = ctk.CTkFrame(processing, fg_color="transparent")
+        row_process_b.pack(fill=ctk.X, padx=8, pady=(0, 8))
+        ctk.CTkButton(
+            row_process_b,
+            text="Apply To Sel",
+            width=102,
+            command=self.apply_postprocess_to_selected,
+        ).pack(side=ctk.LEFT)
+        ctk.CTkButton(
+            row_process_b,
+            text="Apply To All",
+            width=102,
             command=self.apply_postprocess_to_session,
-        ).pack(fill=ctk.X, padx=10, pady=(0, 10))
+        ).pack(side=ctk.LEFT, padx=6)
+
         ctk.CTkButton(
             left,
             text="Go to Export",
@@ -429,7 +387,9 @@ class UnifiedScanApp(ctk.CTk):
         after_frame.grid(row=0, column=1, sticky="nsew", padx=(4, 8), pady=8)
         after_frame.grid_rowconfigure(1, weight=1)
         after_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(after_frame, text="After (Processed)").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
+        ctk.CTkLabel(after_frame, text="After (Review Settings Preview)").grid(
+            row=0, column=0, sticky="w", padx=8, pady=(8, 4)
+        )
         self.page_preview_after_label = ctk.CTkLabel(after_frame, text="No page selected")
         self.page_preview_after_label.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
         self.refresh_page_list()
@@ -437,6 +397,9 @@ class UnifiedScanApp(ctk.CTk):
     def _on_close(self) -> None:
         self.stop_preview()
         self.job_cancel_event.set()
+        if self.review_processing_window is not None and self.review_processing_window.winfo_exists():
+            self.review_processing_window.destroy()
+            self.review_processing_window = None
         if self.camera is not None:
             self.camera.release()
         self.session.close()
@@ -507,17 +470,20 @@ class UnifiedScanApp(ctk.CTk):
 
     def _on_postprocess_mode_change(self, _value: str) -> None:
         self._sync_lens_mode_from_controls()
+        self.update_page_preview()
 
     def on_lens_mode_change(self, mode_name: str) -> None:
         profile = resolve_lens_mode_profile(mode_name)
         if profile is None:
             self._set_status("Lens mode set to Custom (manual controls).")
+            self.update_page_preview()
             return
 
         self.preprocess_preset_var.set(profile.preset_name)
         self.postprocess_var.set(profile.postprocess_name)
         self.on_preprocess_preset_change(profile.preset_name)
         self._set_status(f"Lens mode set to {mode_name}.")
+        self.update_page_preview()
 
     def on_preprocess_preset_change(self, preset_name: str) -> None:
         preset = PREPROCESS_PRESETS.get(preset_name)
@@ -536,44 +502,7 @@ class UnifiedScanApp(ctk.CTk):
         elif preset_name == "Photo" and self.postprocess_var.get() == "Black and White":
             self.postprocess_var.set("None")
         self._sync_lens_mode_from_controls()
-
-    def _sync_import_lens_mode_from_controls(self) -> None:
-        inferred = infer_lens_mode(self.import_preprocess_preset_var.get(), self.import_postprocess_var.get())
-        self.import_lens_mode_var.set(inferred)
-
-    def _on_import_postprocess_mode_change(self, _value: str) -> None:
-        self._sync_import_lens_mode_from_controls()
-        self.preview_import_processing()
-
-    def on_import_lens_mode_change(self, mode_name: str) -> None:
-        profile = resolve_lens_mode_profile(mode_name)
-        if profile is None:
-            self._set_status("Import mode set to Custom (manual controls).")
-            self.preview_import_processing()
-            return
-
-        self.import_preprocess_preset_var.set(profile.preset_name)
-        self.import_postprocess_var.set(profile.postprocess_name)
-        self.on_import_preprocess_preset_change(profile.preset_name)
-        self._set_status(f"Import mode set to {mode_name}.")
-
-    def on_import_preprocess_preset_change(self, preset_name: str) -> None:
-        preset = PREPROCESS_PRESETS.get(preset_name)
-        if preset is None:
-            return
-        self.import_preprocess_contrast_var.set(float(preset.contrast))
-        self.import_preprocess_brightness_var.set(int(preset.brightness))
-        self.import_preprocess_denoise_var.set(int(preset.denoise))
-        self.import_preprocess_threshold_var.set(int(preset.threshold))
-
-        if preset_name == "B/W High Contrast":
-            self.import_postprocess_var.set("Black and White")
-        elif preset_name in {"Document", "Whiteboard"} and self.import_postprocess_var.get() == "None":
-            self.import_postprocess_var.set("Grayscale")
-        elif preset_name == "Photo" and self.import_postprocess_var.get() == "Black and White":
-            self.import_postprocess_var.set("None")
-        self._sync_import_lens_mode_from_controls()
-        self.preview_import_processing()
+        self.update_page_preview()
 
     def _set_job_display(self, *, stage: str | None = None, current: str | None = None, progress: int | None = None) -> None:
         parts: list[str] = []
@@ -619,10 +548,7 @@ class UnifiedScanApp(ctk.CTk):
                 elif kind == "import_chunk":
                     items = payload
                     if items:
-                        originals = [(name, original) for name, original, _processed in items]
-                        added = self.session.add_images(originals)
-                        for entry, (_name, _original, processed) in zip(added, items):
-                            entry.current_image = processed
+                        self.session.add_images(items)
                 elif kind == "done":
                     on_done, result, name = payload
                     try:
@@ -725,26 +651,7 @@ class UnifiedScanApp(ctk.CTk):
         self.preview_job = self.after(PREVIEW_WAIT_MS, self._preview_loop)
 
     def _preview_image_with_contour(self, frame: np.ndarray) -> np.ndarray:
-        image = frame
-        if self.live_contour_preview_var.get() and self.detect_document_var.get() and not self.free_capture_var.get():
-            try:
-                scan_output = scan_with_document_detector(
-                    frame,
-                    enabled=True,
-                    scanner_root=self.scanner_root,
-                )
-            except ScanAdapterError:
-                return image
-            contour = scan_output.contour
-            if contour is not None:
-                image = self._draw_contour(image, contour)
-        return image
-
-    def _draw_contour(self, image: np.ndarray, contour: np.ndarray) -> np.ndarray:
-        out = image.copy()
-        points = np.array(contour, dtype=np.int32).reshape((-1, 1, 2))
-        cv2.polylines(out, [points], isClosed=True, color=(0, 255, 0), thickness=3)
-        return out
+        return frame
 
     def _current_preprocess_settings(self) -> PreprocessSettings:
         preset_name = self.preprocess_preset_var.get()
@@ -755,18 +662,6 @@ class UnifiedScanApp(ctk.CTk):
             brightness=int(self.preprocess_brightness_var.get()),
             denoise=int(self.preprocess_denoise_var.get()),
             threshold=int(self.preprocess_threshold_var.get()),
-            apply_threshold=apply_threshold,
-        )
-
-    def _current_import_preprocess_settings(self) -> PreprocessSettings:
-        preset_name = self.import_preprocess_preset_var.get()
-        preset = PREPROCESS_PRESETS.get(preset_name, PREPROCESS_PRESETS["Custom"])
-        apply_threshold = bool(preset.apply_threshold or self.import_postprocess_var.get() == "Black and White")
-        return PreprocessSettings(
-            contrast=float(self.import_preprocess_contrast_var.get()),
-            brightness=int(self.import_preprocess_brightness_var.get()),
-            denoise=int(self.import_preprocess_denoise_var.get()),
-            threshold=int(self.import_preprocess_threshold_var.get()),
             apply_threshold=apply_threshold,
         )
 
@@ -802,33 +697,8 @@ class UnifiedScanApp(ctk.CTk):
         self,
         frame: np.ndarray,
         base_name: str,
-        *,
-        detect_document: bool | None = None,
-        two_page_mode: bool | None = None,
-        free_capture: bool | None = None,
     ) -> list[tuple[str, np.ndarray]]:
-        detect_document = bool(self.detect_document_var.get()) if detect_document is None else detect_document
-        two_page_mode = bool(self.two_page_mode_var.get()) if two_page_mode is None else two_page_mode
-        free_capture = bool(self.free_capture_var.get()) if free_capture is None else free_capture
-
-        use_detector = detect_document and not free_capture
-        working = frame
-        if use_detector:
-            scan_output = scan_with_document_detector(
-                frame,
-                enabled=True,
-                scanner_root=self.scanner_root,
-            )
-            if scan_output.warped is None:
-                raise RuntimeError(
-                    "Could not extract the document image from camera. Enable 'Free capture mode' to keep full frame."
-                )
-            working = scan_output.warped
-
-        pages = split_spread(working) if two_page_mode else [working]
-        if len(pages) == 1:
-            return [(base_name, pages[0])]
-        return [(f"{base_name}_{idx}", page) for idx, page in enumerate(pages, start=1)]
+        return [(base_name, frame)]
 
     def capture_one(self) -> None:
         try:
@@ -838,12 +708,10 @@ class UnifiedScanApp(ctk.CTk):
                 raise RuntimeError("Could not capture an image from the camera.")
             timestamp = datetime.now().strftime(r"%Y%m%d_%H%M%S_%f")
             items = self._process_capture_frame(frame, base_name=timestamp)
-            added = self.session.add_images(items)
-            for entry in added:
-                self._reprocess_entry_from_original(entry)
+            self.session.add_images(items)
             self.refresh_page_list(keep_index=len(self.session) - 1)
             self.go_to_review_tab()
-            self._set_status(f"Captured {len(items)} page(s). Session pages: {len(self.session)}")
+            self._set_status(f"Captured {len(items)} raw page(s). Session pages: {len(self.session)}")
         except Exception as exc:
             messagebox.showerror("Capture Error", str(exc))
             self._set_status("Capture failed")
@@ -853,16 +721,13 @@ class UnifiedScanApp(ctk.CTk):
             shots = int(self.camera_shots_var.get())
             delay_sec = float(self.camera_delay_var.get())
             index = int(self.camera_index_var.get())
-            detect_document = bool(self.detect_document_var.get())
-            two_page_mode = bool(self.two_page_mode_var.get())
-            free_capture = bool(self.free_capture_var.get())
             timestamp = datetime.now().strftime(r"%Y%m%d_%H%M%S")
 
             self.stop_preview()
 
             def worker(emit, is_cancelled):
                 emit(stage="Burst capture", current=f"Opening camera {index}", progress=0)
-                camera = CameraService(index=index)
+                camera = CameraService(index=index, resolution=self._max_camera_resolution())
                 camera.open()
                 try:
                     frames = camera.capture_burst(
@@ -886,9 +751,6 @@ class UnifiedScanApp(ctk.CTk):
                     current_items = self._process_capture_frame(
                         frame,
                         base_name=f"{timestamp}_{idx:03d}",
-                        detect_document=detect_document,
-                        two_page_mode=two_page_mode,
-                        free_capture=free_capture,
                     )
                     items.extend(current_items)
                     emit(
@@ -899,12 +761,10 @@ class UnifiedScanApp(ctk.CTk):
                 return items
 
             def on_done(items):
-                added = self.session.add_images(items)
-                for entry in added:
-                    self._reprocess_entry_from_original(entry)
+                self.session.add_images(items)
                 self.refresh_page_list(keep_index=len(self.session) - 1)
                 self.go_to_review_tab()
-                self._set_status(f"Burst captured {len(items)} page(s). Session pages: {len(self.session)}")
+                self._set_status(f"Burst captured {len(items)} raw page(s). Session pages: {len(self.session)}")
 
             self._start_background_job("Capture Burst", worker, on_done)
         except Exception as exc:
@@ -1033,140 +893,18 @@ class UnifiedScanApp(ctk.CTk):
         )
         ctk.CTkLabel(
             row_options,
-            text="Import uses processing profile below; originals stay preserved for reprocessing in Review",
+            text="Import loads raw pages only. Open Review for all processing.",
             anchor="w",
         ).pack(side=ctk.LEFT, padx=(0, 10), pady=10)
 
         row_actions = ctk.CTkFrame(tab)
         row_actions.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 10))
-        ctk.CTkButton(row_actions, text="Import from Session Paths", command=self.import_from_files).pack(
+        ctk.CTkButton(row_actions, text="Import from Listed Paths", command=self.import_from_files).pack(
             side=ctk.LEFT,
             padx=10,
             pady=10,
         )
         ctk.CTkButton(row_actions, text="Review", command=self.go_to_review_tab).pack(side=ctk.LEFT, padx=0, pady=10)
-
-        import_profile = ctk.CTkFrame(tab)
-        import_profile.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 8))
-        ctk.CTkLabel(import_profile, text="Import processing profile").pack(anchor="w", padx=10, pady=(10, 6))
-
-        row_flags = ctk.CTkFrame(import_profile, fg_color="transparent")
-        row_flags.pack(fill=ctk.X, padx=10, pady=(0, 6))
-        ctk.CTkCheckBox(
-            row_flags,
-            text="Detect document contour",
-            variable=self.import_detect_document_var,
-        ).pack(side=ctk.LEFT, padx=(0, 14))
-        ctk.CTkCheckBox(
-            row_flags,
-            text="Two-page split",
-            variable=self.import_two_page_mode_var,
-        ).pack(side=ctk.LEFT)
-
-        row_modes = ctk.CTkFrame(import_profile, fg_color="transparent")
-        row_modes.pack(fill=ctk.X, padx=10, pady=(0, 8))
-        ctk.CTkLabel(row_modes, text="Lens mode").pack(side=ctk.LEFT, padx=(0, 6))
-        ctk.CTkOptionMenu(
-            row_modes,
-            values=list(LENS_MODE_VALUES),
-            variable=self.import_lens_mode_var,
-            command=self.on_import_lens_mode_change,
-            width=130,
-        ).pack(side=ctk.LEFT, padx=(0, 12))
-        ctk.CTkLabel(row_modes, text="Postprocess").pack(side=ctk.LEFT, padx=(0, 6))
-        ctk.CTkOptionMenu(
-            row_modes,
-            values=list(POSTPROCESSING_OPTIONS.keys()),
-            variable=self.import_postprocess_var,
-            command=self._on_import_postprocess_mode_change,
-            width=150,
-        ).pack(side=ctk.LEFT, padx=(0, 12))
-        ctk.CTkLabel(row_modes, text="Preset").pack(side=ctk.LEFT, padx=(0, 6))
-        ctk.CTkOptionMenu(
-            row_modes,
-            values=list(PREPROCESS_PRESETS.keys()),
-            variable=self.import_preprocess_preset_var,
-            command=self.on_import_preprocess_preset_change,
-            width=160,
-        ).pack(side=ctk.LEFT)
-
-        row_sliders = ctk.CTkFrame(import_profile, fg_color="transparent")
-        row_sliders.pack(fill=ctk.X, padx=10, pady=(0, 10))
-        ctk.CTkLabel(row_sliders, text="Contrast").grid(row=0, column=0, sticky="w")
-        ctk.CTkSlider(
-            row_sliders,
-            from_=0.7,
-            to=2.0,
-            number_of_steps=26,
-            variable=self.import_preprocess_contrast_var,
-        ).grid(row=0, column=1, sticky="ew", padx=(8, 14))
-        ctk.CTkLabel(row_sliders, text="Brightness").grid(row=0, column=2, sticky="w")
-        ctk.CTkSlider(
-            row_sliders,
-            from_=-80,
-            to=80,
-            number_of_steps=160,
-            variable=self.import_preprocess_brightness_var,
-        ).grid(row=0, column=3, sticky="ew", padx=(8, 0))
-
-        ctk.CTkLabel(row_sliders, text="Denoise").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ctk.CTkSlider(
-            row_sliders,
-            from_=0,
-            to=20,
-            number_of_steps=20,
-            variable=self.import_preprocess_denoise_var,
-        ).grid(row=1, column=1, sticky="ew", padx=(8, 14), pady=(8, 0))
-        ctk.CTkLabel(row_sliders, text="B/W Threshold").grid(row=1, column=2, sticky="w", pady=(8, 0))
-        ctk.CTkSlider(
-            row_sliders,
-            from_=80,
-            to=240,
-            number_of_steps=160,
-            variable=self.import_preprocess_threshold_var,
-        ).grid(row=1, column=3, sticky="ew", padx=(8, 0), pady=(8, 0))
-        row_sliders.grid_columnconfigure(1, weight=1)
-        row_sliders.grid_columnconfigure(3, weight=1)
-
-        row_preview_controls = ctk.CTkFrame(import_profile, fg_color="transparent")
-        row_preview_controls.pack(fill=ctk.X, padx=10, pady=(0, 8))
-        ctk.CTkButton(
-            row_preview_controls,
-            text="Preview Import Settings",
-            command=self.preview_import_processing,
-            width=200,
-        ).pack(side=ctk.LEFT)
-        ctk.CTkLabel(
-            row_preview_controls,
-            text="Shows first selected file/folder item.",
-            anchor="w",
-        ).pack(side=ctk.LEFT, padx=(10, 0))
-
-        preview_grid = ctk.CTkFrame(import_profile)
-        preview_grid.pack(fill=ctk.BOTH, expand=True, padx=10, pady=(0, 10))
-        preview_grid.grid_rowconfigure(1, weight=1)
-        preview_grid.grid_columnconfigure(0, weight=1)
-        preview_grid.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(preview_grid, text="Before (import sample)").grid(
-            row=0,
-            column=0,
-            sticky="w",
-            padx=8,
-            pady=(8, 4),
-        )
-        ctk.CTkLabel(preview_grid, text="After (import profile)").grid(
-            row=0,
-            column=1,
-            sticky="w",
-            padx=8,
-            pady=(8, 4),
-        )
-
-        self.import_preview_before_label = ctk.CTkLabel(preview_grid, text="Select file/folder and click preview")
-        self.import_preview_before_label.grid(row=1, column=0, sticky="nsew", padx=(8, 4), pady=(0, 8))
-        self.import_preview_after_label = ctk.CTkLabel(preview_grid, text="Select file/folder and click preview")
-        self.import_preview_after_label.grid(row=1, column=1, sticky="nsew", padx=(4, 8), pady=(0, 8))
 
     def _build_export_tab(self, tab: ctk.CTkFrame) -> None:
         tab.grid_columnconfigure(0, weight=1)
@@ -1272,24 +1010,6 @@ class UnifiedScanApp(ctk.CTk):
             command=self.export_to_files,
         ).grid(row=0, column=3, padx=(0, 10), pady=10)
 
-    def _resolve_import_preview_source_path(self) -> Path | None:
-        raw_files = self._parse_import_files_text(self.import_files_var.get())
-        for item in raw_files:
-            path = Path(item)
-            if path.exists() and path.is_file() and path.suffix.lower() in (IMG_EXTS | PDF_EXTS):
-                return path
-
-        folder_raw = self.import_folder_var.get().strip()
-        if folder_raw:
-            folder = Path(folder_raw)
-            try:
-                paths = list_supported_in_folder(folder)
-            except Exception:
-                return None
-            if paths:
-                return paths[0]
-        return None
-
     def _parse_import_files_text(self, raw_text: str) -> list[str]:
         parts = [part.strip().strip('"') for part in re.split(r"[;\n\r]+", raw_text) if part.strip()]
         return parts
@@ -1305,61 +1025,10 @@ class UnifiedScanApp(ctk.CTk):
             unique.append(key)
         return unique
 
-    def preview_import_processing(self) -> None:
-        path = self._resolve_import_preview_source_path()
-        if path is None:
-            self.import_preview_before_label.configure(image=None, text="Select file/folder and click preview")
-            self.import_preview_after_label.configure(image=None, text="Select file/folder and click preview")
-            self.import_preview_before_photo = None
-            self.import_preview_after_photo = None
-            return
-
-        try:
-            pdf_dpi = int(self.import_pdf_dpi_var.get())
-            if pdf_dpi < 72:
-                raise RuntimeError("PDF DPI must be >= 72.")
-
-            loaded = load_input_items([path], pdf_dpi=pdf_dpi)
-            pipeline_options = PipelineOptions(
-                detect_document=bool(self.import_detect_document_var.get()),
-                two_page_mode=bool(self.import_two_page_mode_var.get()),
-                postprocess_name="None",
-            )
-            pages = process_loaded_items(
-                loaded,
-                options=pipeline_options,
-                scanner_root=self.scanner_root,
-            )
-            if not pages:
-                raise RuntimeError("No pages produced for preview.")
-
-            before = pages[0]
-            postprocess_fn = POSTPROCESSING_OPTIONS.get(
-                self.import_postprocess_var.get(),
-                POSTPROCESSING_OPTIONS["None"],
-            )
-            after = apply_enhancements(postprocess_fn(before), self._current_import_preprocess_settings())
-
-            before_photo = self._to_ctk_photo_for_label(before, self.import_preview_before_label)
-            after_photo = self._to_ctk_photo_for_label(after, self.import_preview_after_label)
-
-            self.import_preview_before_photo = before_photo
-            self.import_preview_after_photo = after_photo
-            self.import_preview_before_label.configure(image=before_photo, text="")
-            self.import_preview_after_label.configure(image=after_photo, text="")
-            self._set_status(f"Import preview updated for: {path.name}")
-        except Exception as exc:
-            self.import_preview_before_label.configure(image=None, text="Preview failed")
-            self.import_preview_after_label.configure(image=None, text=str(exc))
-            self.import_preview_before_photo = None
-            self.import_preview_after_photo = None
-            self._set_status("Import preview failed")
-
     def choose_import_folder(self) -> None:
         path = filedialog.askdirectory(title="Select input folder")
         if path:
             self.import_folder_var.set(path)
-            self.preview_import_processing()
 
     def choose_import_files(self) -> None:
         files = filedialog.askopenfilenames(
@@ -1376,7 +1045,6 @@ class UnifiedScanApp(ctk.CTk):
         if files:
             self.import_selected_files = self._normalize_selected_files(files)
             self.import_files_var.set("\n".join(self.import_selected_files))
-            self.preview_import_processing()
 
     def import_from_folder(self) -> None:
         try:
@@ -1412,16 +1080,6 @@ class UnifiedScanApp(ctk.CTk):
         pdf_dpi = int(self.import_pdf_dpi_var.get())
         if pdf_dpi < 72:
             raise RuntimeError("PDF DPI must be >= 72.")
-        pipeline_options = PipelineOptions(
-            detect_document=bool(self.import_detect_document_var.get()),
-            two_page_mode=bool(self.import_two_page_mode_var.get()),
-            postprocess_name="None",
-        )
-        postprocess_fn = POSTPROCESSING_OPTIONS.get(
-            self.import_postprocess_var.get(),
-            POSTPROCESSING_OPTIONS["None"],
-        )
-        preprocess_settings = self._current_import_preprocess_settings()
         self._set_status(f"Starting import for {len(paths)} file(s)...")
 
         def worker(emit, is_cancelled):
@@ -1444,18 +1102,10 @@ class UnifiedScanApp(ctk.CTk):
                     pdf_dpi=pdf_dpi,
                     cancel_cb=is_cancelled,
                 )
-                pages_for_file = process_loaded_items(
-                    loaded,
-                    options=pipeline_options,
-                    scanner_root=self.scanner_root,
-                    cancel_cb=is_cancelled,
-                )
-
-                items_chunk: list[tuple[str, np.ndarray, np.ndarray]] = []
+                items_chunk: list[tuple[str, np.ndarray]] = []
                 chunk_size = 4
-                for page in pages_for_file:
-                    processed = apply_enhancements(postprocess_fn(page), preprocess_settings)
-                    items_chunk.append((f"{source_label}_{counter:05d}", page, processed))
+                for _name, page in loaded:
+                    items_chunk.append((f"{source_label}_{counter:05d}", page))
                     counter += 1
                     added_pages += 1
                     if len(items_chunk) >= chunk_size:
@@ -1466,7 +1116,7 @@ class UnifiedScanApp(ctk.CTk):
                     self.job_queue.put(("import_chunk", items_chunk))
 
                 emit(
-                    stage="Import processing",
+                    stage="Import ingest",
                     current=f"{file_index}/{total_paths}: {path.name}",
                     progress=45 + int((file_index / total_paths) * 55),
                 )
@@ -1479,7 +1129,7 @@ class UnifiedScanApp(ctk.CTk):
             self.refresh_page_list(keep_index=len(self.session) - 1)
             self.go_to_review_tab()
             self._set_status(
-                f"Imported {files_count} file(s), added {pages_count} page(s). Session pages: {len(self.session)}"
+                f"Imported {files_count} file(s), added {pages_count} raw page(s). Session pages: {len(self.session)}"
             )
 
         self._start_background_job("Import", worker, on_done)
@@ -1523,7 +1173,10 @@ class UnifiedScanApp(ctk.CTk):
 
         entry = self.session.entries[index]
         before = entry.original_image
-        after = entry.current_image
+        try:
+            after = self._apply_postprocess(before)
+        except Exception:
+            after = entry.current_image
 
         before_photo = self._to_ctk_photo_for_label(before, self.page_preview_before_label)
         after_photo = self._to_ctk_photo_for_label(after, self.page_preview_after_label)
@@ -1616,11 +1269,10 @@ class UnifiedScanApp(ctk.CTk):
             if image is None:
                 raise RuntimeError(f"Cannot read image: {image_path}")
 
-            processed = self._apply_postprocess(image)
             ok = self.session.replace_entry_image(
                 entry.entry_id,
                 original_image=image,
-                current_image=processed,
+                current_image=image,
                 name=image_path.stem,
             )
             if not ok:
@@ -1646,15 +1298,11 @@ class UnifiedScanApp(ctk.CTk):
 
             item_name = datetime.now().strftime(r"retake_%Y%m%d_%H%M%S")
             items = self._process_capture_frame(frame, base_name=item_name)
-            if len(items) != 1:
-                raise RuntimeError("Retake requires one output page. Disable two-page split and retry.")
-
             _, image = items[0]
-            processed = self._apply_postprocess(image)
             ok = self.session.replace_entry_image(
                 entry.entry_id,
                 original_image=image,
-                current_image=processed,
+                current_image=image,
             )
             if not ok:
                 raise RuntimeError("Selected page was not found in session.")
@@ -1846,6 +1494,102 @@ class UnifiedScanApp(ctk.CTk):
         self.refresh_page_list(keep_index=indices[-1])
         mean_angle = sum(angles) / max(1, len(angles))
         self._set_status(f"Deskewed {len(indices)} page(s), avg angle {mean_angle:.1f} deg.")
+
+    def _on_review_processing_slider_change(self, _value: float) -> None:
+        self.update_page_preview()
+
+    def open_review_processing_dialog(self) -> None:
+        if self.review_processing_window is not None and self.review_processing_window.winfo_exists():
+            self.review_processing_window.lift()
+            self.review_processing_window.focus()
+            return
+
+        window = ctk.CTkToplevel(self)
+        window.title("Review Processing - Advanced")
+        window.resizable(width=False, height=False)
+        self.review_processing_window = window
+
+        ctk.CTkLabel(window, text="Tune processing settings for Review preview/apply.").pack(
+            anchor="w",
+            padx=12,
+            pady=(12, 8),
+        )
+
+        body = ctk.CTkFrame(window)
+        body.pack(fill=ctk.BOTH, expand=True, padx=12, pady=(0, 10))
+        body.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(body, text="Contrast").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
+        ctk.CTkSlider(
+            body,
+            from_=0.7,
+            to=2.0,
+            number_of_steps=26,
+            variable=self.preprocess_contrast_var,
+            command=self._on_review_processing_slider_change,
+        ).grid(row=0, column=1, sticky="ew", padx=8, pady=(8, 4))
+
+        ctk.CTkLabel(body, text="Brightness").grid(row=1, column=0, sticky="w", padx=8, pady=4)
+        ctk.CTkSlider(
+            body,
+            from_=-80,
+            to=80,
+            number_of_steps=160,
+            variable=self.preprocess_brightness_var,
+            command=self._on_review_processing_slider_change,
+        ).grid(row=1, column=1, sticky="ew", padx=8, pady=4)
+
+        ctk.CTkLabel(body, text="Denoise").grid(row=2, column=0, sticky="w", padx=8, pady=4)
+        ctk.CTkSlider(
+            body,
+            from_=0,
+            to=20,
+            number_of_steps=20,
+            variable=self.preprocess_denoise_var,
+            command=self._on_review_processing_slider_change,
+        ).grid(row=2, column=1, sticky="ew", padx=8, pady=4)
+
+        ctk.CTkLabel(body, text="B/W Threshold").grid(row=3, column=0, sticky="w", padx=8, pady=(4, 8))
+        ctk.CTkSlider(
+            body,
+            from_=80,
+            to=240,
+            number_of_steps=160,
+            variable=self.preprocess_threshold_var,
+            command=self._on_review_processing_slider_change,
+        ).grid(row=3, column=1, sticky="ew", padx=8, pady=(4, 8))
+
+        def _on_close() -> None:
+            self.review_processing_window = None
+            window.destroy()
+
+        actions = ctk.CTkFrame(window, fg_color="transparent")
+        actions.pack(fill=ctk.X, padx=12, pady=(0, 12))
+        ctk.CTkButton(
+            actions,
+            text="Use Preset Values",
+            command=lambda: self.on_preprocess_preset_change(self.preprocess_preset_var.get()),
+            width=140,
+        ).pack(side=ctk.LEFT)
+        ctk.CTkButton(actions, text="Close", command=_on_close, width=100).pack(side=ctk.LEFT, padx=8)
+
+        window.protocol("WM_DELETE_WINDOW", _on_close)
+        window.attributes("-topmost", True)
+        window.grab_set()
+        window.attributes("-topmost", False)
+
+    def apply_postprocess_to_selected(self) -> None:
+        indices = self._selected_entry_indices()
+        if not indices:
+            self._set_status("Select page(s) to apply processing.")
+            return
+        try:
+            for idx in indices:
+                self._reprocess_entry_from_original(self.session.entries[idx])
+            self.refresh_page_list(keep_index=indices[-1])
+            self._set_status(f"Reprocessed {len(indices)} selected page(s).")
+        except Exception as exc:
+            messagebox.showerror("Postprocess Error", str(exc))
 
     def apply_postprocess_to_session(self) -> None:
         try:
