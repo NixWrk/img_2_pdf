@@ -673,8 +673,8 @@ class UnifiedScanApp(ctk.CTk):
 
     def _show_in_preview(self, image: np.ndarray) -> None:
         photo = self._to_ctk_photo_for_label(image, self.preview_label)
-        self.preview_photo = photo
         self.preview_label.configure(image=photo, text="")
+        self.preview_photo = photo
 
     def _to_ctk_photo_for_label(self, image: np.ndarray, label: ctk.CTkLabel) -> ctk.CTkImage:
         if len(image.shape) == 2:
@@ -1181,10 +1181,10 @@ class UnifiedScanApp(ctk.CTk):
         before_photo = self._to_ctk_photo_for_label(before, self.page_preview_before_label)
         after_photo = self._to_ctk_photo_for_label(after, self.page_preview_after_label)
 
-        self.page_preview_before_photo = before_photo
-        self.page_preview_after_photo = after_photo
         self.page_preview_before_label.configure(image=before_photo, text="")
         self.page_preview_after_label.configure(image=after_photo, text="")
+        self.page_preview_before_photo = before_photo
+        self.page_preview_after_photo = after_photo
 
     def _single_selected_index(self) -> int | None:
         selected = self.page_listbox.curselection()
