@@ -4,7 +4,11 @@ import cv2
 import numpy as np
 
 from uniscan.core.scanner_adapter import (
+    DETECTOR_BACKEND_CV_HYBRID,
     DETECTOR_BACKEND_OPENCV,
+    DETECTOR_BACKEND_OPENCV_HOUGH,
+    DETECTOR_BACKEND_OPENCV_MINRECT,
+    DETECTOR_BACKEND_PADDLEOCR_UVDOC,
     DETECTOR_BACKEND_UVDOC,
     scan_with_document_detector,
 )
@@ -83,6 +87,76 @@ def test_scanner_adapter_supports_uvdoc_backend_without_contour(monkeypatch) -> 
     )
 
     assert result.backend == DETECTOR_BACKEND_UVDOC
+    assert result.detected is True
+    assert result.contour is None
+    assert np.array_equal(result.warped, expected)
+
+
+def test_scanner_adapter_detects_quad_with_cv_hybrid() -> None:
+    image = _perspective_doc()
+
+    result = scan_with_document_detector(
+        image,
+        enabled=True,
+        backends=(DETECTOR_BACKEND_CV_HYBRID,),
+    )
+
+    assert result.backend == DETECTOR_BACKEND_CV_HYBRID
+    assert result.detected is True
+    assert result.contour is not None
+    assert result.warped is not None
+
+
+def test_scanner_adapter_detects_quad_with_hough_backend() -> None:
+    image = _perspective_doc()
+
+    result = scan_with_document_detector(
+        image,
+        enabled=True,
+        backends=(DETECTOR_BACKEND_OPENCV_HOUGH,),
+    )
+
+    assert result.backend == DETECTOR_BACKEND_OPENCV_HOUGH
+    assert result.detected is True
+    assert result.contour is not None
+    assert result.warped is not None
+
+
+def test_scanner_adapter_detects_quad_with_minrect_backend() -> None:
+    image = _perspective_doc()
+
+    result = scan_with_document_detector(
+        image,
+        enabled=True,
+        backends=(DETECTOR_BACKEND_OPENCV_MINRECT,),
+    )
+
+    assert result.backend == DETECTOR_BACKEND_OPENCV_MINRECT
+    assert result.detected is True
+    assert result.contour is not None
+    assert result.warped is not None
+
+
+def test_scanner_adapter_supports_paddleocr_uvdoc_alias(monkeypatch) -> None:
+    image = _perspective_doc()
+    expected = np.full((280, 210, 3), 180, dtype=np.uint8)
+
+    class _FakeModel:
+        def predict(self, _input):
+            return [{"doctr_img": expected}]
+
+    monkeypatch.setattr(
+        "uniscan.core.scanner_adapter._load_uvdoc_model",
+        lambda _cache_home=None: _FakeModel(),
+    )
+
+    result = scan_with_document_detector(
+        image,
+        enabled=True,
+        backends=(DETECTOR_BACKEND_PADDLEOCR_UVDOC,),
+    )
+
+    assert result.backend == DETECTOR_BACKEND_PADDLEOCR_UVDOC
     assert result.detected is True
     assert result.contour is None
     assert np.array_equal(result.warped, expected)

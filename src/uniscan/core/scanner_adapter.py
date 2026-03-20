@@ -18,7 +18,11 @@ from .geometry import order_quad_points, warp_perspective_from_points
 
 DETECTOR_BACKEND_CAMSCAN = "camscan"
 DETECTOR_BACKEND_OPENCV = "opencv_quad"
+DETECTOR_BACKEND_CV_HYBRID = "cv_hybrid"
+DETECTOR_BACKEND_OPENCV_HOUGH = "opencv_hough"
+DETECTOR_BACKEND_OPENCV_MINRECT = "opencv_minrect"
 DETECTOR_BACKEND_UVDOC = "uvdoc"
+DETECTOR_BACKEND_PADDLEOCR_UVDOC = "paddleocr_uvdoc"
 
 
 class ScanAdapterError(RuntimeError):
@@ -118,6 +122,11 @@ def _candidate_maps(gray: np.ndarray) -> list[np.ndarray]:
     return closed_maps
 
 
+def _is_low_variance(image: np.ndarray) -> bool:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    return float(np.std(gray)) < 5.0
+
+
 def _contour_score(contour: np.ndarray, image_area: float) -> float:
     area = float(cv2.contourArea(contour))
     if area <= 0.0:
@@ -175,26 +184,169 @@ def _find_quad_contour(image: np.ndarray) -> np.ndarray | None:
     return best_rect
 
 
-def _opencv_document_detector(image: np.ndarray) -> ScanOutput:
+def _find_minrect_contour(image: np.ndarray) -> np.ndarray | None:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
-    if float(np.std(gray)) < 5.0:
+    image_area = float(gray.shape[0] * gray.shape[1])
+    min_area = image_area * 0.12
+    best_rect: np.ndarray | None = None
+    best_score = -1.0
+
+    for candidate_map in _candidate_maps(gray):
+        contours, _hierarchy = cv2.findContours(candidate_map, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area < min_area:
+                continue
+            hull = cv2.convexHull(contour)
+            rect = cv2.minAreaRect(hull)
+            points = order_quad_points(cv2.boxPoints(rect).astype(np.float32))
+            score = _contour_score(points.reshape(-1, 1, 2), image_area)
+            if score > best_score:
+                best_score = score
+                best_rect = points
+    return best_rect
+
+
+def _intersection_from_hough_lines(line_a: tuple[float, float], line_b: tuple[float, float]) -> np.ndarray | None:
+    rho1, theta1 = line_a
+    rho2, theta2 = line_b
+    matrix = np.array(
+        [[np.cos(theta1), np.sin(theta1)], [np.cos(theta2), np.sin(theta2)]],
+        dtype=np.float32,
+    )
+    if abs(np.linalg.det(matrix)) < 1e-6:
+        return None
+    vector = np.array([[rho1], [rho2]], dtype=np.float32)
+    x, y = np.linalg.solve(matrix, vector).flatten()
+    return np.array([x, y], dtype=np.float32)
+
+
+def _line_x_at_y(line: tuple[float, float], y: float) -> float | None:
+    rho, theta = line
+    cos_theta = float(np.cos(theta))
+    if abs(cos_theta) < 1e-6:
+        return None
+    return float((rho - (y * np.sin(theta))) / cos_theta)
+
+
+def _line_y_at_x(line: tuple[float, float], x: float) -> float | None:
+    rho, theta = line
+    sin_theta = float(np.sin(theta))
+    if abs(sin_theta) < 1e-6:
+        return None
+    return float((rho - (x * np.cos(theta))) / sin_theta)
+
+
+def _find_hough_quad_contour(image: np.ndarray) -> np.ndarray | None:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blurred, 50, 150)
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((5, 5), dtype=np.uint8), iterations=1)
+    height, width = gray.shape[:2]
+    min_side = min(height, width)
+
+    lines: np.ndarray | None = None
+    thresholds = [
+        max(60, int(min_side * 0.35)),
+        max(45, int(min_side * 0.25)),
+        max(30, int(min_side * 0.18)),
+    ]
+    for threshold in thresholds:
+        candidate = cv2.HoughLines(edges, 1, np.pi / 180, threshold)
+        if candidate is not None and len(candidate) >= 4:
+            lines = candidate.reshape(-1, 2)
+            break
+    if lines is None:
+        return None
+
+    vertical: list[tuple[float, float]] = []
+    horizontal: list[tuple[float, float]] = []
+    for rho, theta in lines:
+        angle = float(theta % np.pi)
+        if angle < np.pi / 6 or angle > 5 * np.pi / 6:
+            vertical.append((float(rho), float(theta)))
+        elif np.pi / 3 < angle < 2 * np.pi / 3:
+            horizontal.append((float(rho), float(theta)))
+
+    if len(vertical) < 2 or len(horizontal) < 2:
+        return None
+
+    center_x = width / 2.0
+    center_y = height / 2.0
+    vertical_positions = [(line, _line_x_at_y(line, center_y)) for line in vertical]
+    horizontal_positions = [(line, _line_y_at_x(line, center_x)) for line in horizontal]
+    vertical_positions = [(line, x_pos) for line, x_pos in vertical_positions if x_pos is not None]
+    horizontal_positions = [(line, y_pos) for line, y_pos in horizontal_positions if y_pos is not None]
+    if len(vertical_positions) < 2 or len(horizontal_positions) < 2:
+        return None
+
+    left = min(vertical_positions, key=lambda item: item[1])[0]
+    right = max(vertical_positions, key=lambda item: item[1])[0]
+    top = min(horizontal_positions, key=lambda item: item[1])[0]
+    bottom = max(horizontal_positions, key=lambda item: item[1])[0]
+
+    corners = [
+        _intersection_from_hough_lines(top, left),
+        _intersection_from_hough_lines(top, right),
+        _intersection_from_hough_lines(bottom, right),
+        _intersection_from_hough_lines(bottom, left),
+    ]
+    if any(corner is None for corner in corners):
+        return None
+
+    contour = order_quad_points(np.vstack(corners).astype(np.float32))
+    x_values = contour[:, 0]
+    y_values = contour[:, 1]
+    if x_values.min() < -0.15 * width or x_values.max() > 1.15 * width:
+        return None
+    if y_values.min() < -0.15 * height or y_values.max() > 1.15 * height:
+        return None
+    if float(cv2.contourArea(contour.reshape(-1, 1, 2))) < (height * width * 0.12):
+        return None
+    return contour
+
+
+def _select_best_contour(image: np.ndarray, *contours: np.ndarray | None) -> np.ndarray | None:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    image_area = float(gray.shape[0] * gray.shape[1])
+    best_contour: np.ndarray | None = None
+    best_score = -1.0
+
+    for contour in contours:
+        if contour is None:
+            continue
+        normalized = order_quad_points(np.asarray(contour, dtype=np.float32))
+        score = _contour_score(normalized.reshape(-1, 1, 2), image_area)
+        if score > best_score:
+            best_score = score
+            best_contour = normalized
+    return best_contour
+
+
+def _contour_detector_output(
+    image: np.ndarray,
+    *,
+    backend: str,
+    contour_finder,
+) -> ScanOutput:
+    if _is_low_variance(image):
         return ScanOutput(
             warped=image,
             contour=None,
             backend=None,
             detected=False,
-            raw_result={"opencv": "low_variance"},
+            raw_result={backend: "low_variance"},
         )
 
     resized, scale = _resize_for_detection(image)
-    contour = _find_quad_contour(resized)
+    contour = contour_finder(resized)
     if contour is None:
         return ScanOutput(
             warped=image,
             contour=None,
             backend=None,
             detected=False,
-            raw_result={"opencv": "no_contour"},
+            raw_result={backend: "no_contour"},
         )
 
     if scale != 1.0:
@@ -204,9 +356,46 @@ def _opencv_document_detector(image: np.ndarray) -> ScanOutput:
     return ScanOutput(
         warped=warped,
         contour=contour,
-        backend=DETECTOR_BACKEND_OPENCV,
+        backend=backend,
         detected=True,
         raw_result=None,
+    )
+
+
+def _opencv_document_detector(image: np.ndarray) -> ScanOutput:
+    return _contour_detector_output(
+        image,
+        backend=DETECTOR_BACKEND_OPENCV,
+        contour_finder=_find_quad_contour,
+    )
+
+
+def _opencv_minrect_document_detector(image: np.ndarray) -> ScanOutput:
+    return _contour_detector_output(
+        image,
+        backend=DETECTOR_BACKEND_OPENCV_MINRECT,
+        contour_finder=_find_minrect_contour,
+    )
+
+
+def _opencv_hough_document_detector(image: np.ndarray) -> ScanOutput:
+    return _contour_detector_output(
+        image,
+        backend=DETECTOR_BACKEND_OPENCV_HOUGH,
+        contour_finder=_find_hough_quad_contour,
+    )
+
+
+def _opencv_hybrid_document_detector(image: np.ndarray) -> ScanOutput:
+    return _contour_detector_output(
+        image,
+        backend=DETECTOR_BACKEND_CV_HYBRID,
+        contour_finder=lambda resized: _select_best_contour(
+            resized,
+            _find_quad_contour(resized),
+            _find_hough_quad_contour(resized),
+            _find_minrect_contour(resized),
+        ),
     )
 
 
@@ -267,6 +456,13 @@ def _uvdoc_document_detector(image: np.ndarray, *, cache_home: Path | None = Non
     )
 
 
+def _paddleocr_uvdoc_document_detector(image: np.ndarray, *, cache_home: Path | None = None) -> ScanOutput:
+    result = _uvdoc_document_detector(image, cache_home=cache_home)
+    if result.detected:
+        result.backend = DETECTOR_BACKEND_PADDLEOCR_UVDOC
+    return result
+
+
 def probe_detector_backend(
     backend: str,
     *,
@@ -277,9 +473,14 @@ def probe_detector_backend(
     if backend == DETECTOR_BACKEND_CAMSCAN:
         _import_scanner_with_optional_root(optional_root=scanner_root)
         return
-    if backend == DETECTOR_BACKEND_OPENCV:
+    if backend in (
+        DETECTOR_BACKEND_OPENCV,
+        DETECTOR_BACKEND_CV_HYBRID,
+        DETECTOR_BACKEND_OPENCV_HOUGH,
+        DETECTOR_BACKEND_OPENCV_MINRECT,
+    ):
         return
-    if backend == DETECTOR_BACKEND_UVDOC:
+    if backend in (DETECTOR_BACKEND_UVDOC, DETECTOR_BACKEND_PADDLEOCR_UVDOC):
         _load_uvdoc_model(str(uvdoc_cache_home) if uvdoc_cache_home is not None else None)
         return
     raise ScanAdapterError(f"Unsupported detector backend: {backend}")
@@ -310,8 +511,16 @@ def scan_with_document_detector(
                 result = _camscan_document_detector(image, scanner_root=scanner_root)
             elif backend == DETECTOR_BACKEND_OPENCV:
                 result = _opencv_document_detector(image)
+            elif backend == DETECTOR_BACKEND_CV_HYBRID:
+                result = _opencv_hybrid_document_detector(image)
+            elif backend == DETECTOR_BACKEND_OPENCV_HOUGH:
+                result = _opencv_hough_document_detector(image)
+            elif backend == DETECTOR_BACKEND_OPENCV_MINRECT:
+                result = _opencv_minrect_document_detector(image)
             elif backend == DETECTOR_BACKEND_UVDOC:
                 result = _uvdoc_document_detector(image, cache_home=uvdoc_cache_home)
+            elif backend == DETECTOR_BACKEND_PADDLEOCR_UVDOC:
+                result = _paddleocr_uvdoc_document_detector(image, cache_home=uvdoc_cache_home)
             else:
                 raise ScanAdapterError(f"Unsupported detector backend: {backend}")
         except Exception as exc:

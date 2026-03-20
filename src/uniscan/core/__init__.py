@@ -16,7 +16,11 @@ from .preprocess import (
 from .postprocess import POSTPROCESSING_OPTIONS
 from .scanner_adapter import (
     DETECTOR_BACKEND_CAMSCAN,
+    DETECTOR_BACKEND_CV_HYBRID,
     DETECTOR_BACKEND_OPENCV,
+    DETECTOR_BACKEND_OPENCV_HOUGH,
+    DETECTOR_BACKEND_OPENCV_MINRECT,
+    DETECTOR_BACKEND_PADDLEOCR_UVDOC,
     DETECTOR_BACKEND_UVDOC,
     ScanAdapterError,
     probe_detector_backend,
@@ -32,7 +36,11 @@ __all__ = [
     "POSTPROCESSING_OPTIONS",
     "PreprocessSettings",
     "DETECTOR_BACKEND_CAMSCAN",
+    "DETECTOR_BACKEND_CV_HYBRID",
     "DETECTOR_BACKEND_OPENCV",
+    "DETECTOR_BACKEND_OPENCV_HOUGH",
+    "DETECTOR_BACKEND_OPENCV_MINRECT",
+    "DETECTOR_BACKEND_PADDLEOCR_UVDOC",
     "DETECTOR_BACKEND_UVDOC",
     "ScanAdapterError",
     "apply_enhancements",
