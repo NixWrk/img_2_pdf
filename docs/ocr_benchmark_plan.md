@@ -2,81 +2,72 @@
 
 ## Goal
 
-Use the provided real-world fixture
+Run one benchmark flow that executes all registered OCR engines on the same sampled PDF pages and produces comparable artifacts and metrics.
+
+Canonical fixture:
 `J:\Imaging Edge Mobile\Imaging Edge Mobile_paddleocr_uvdoc.pdf`
-as the canonical benchmark document for OCR comparison work.
 
-This file is large, so the benchmark must work in a sampled / ranged mode:
+The fixture is large, so benchmark execution must stay sampled / ranged:
 
-1. Do not load the full document into memory in a single test.
-2. Use a bounded page window for automated tests.
-3. Keep the full document available for manual benchmark runs.
+1. Never materialize the full PDF into memory.
+2. Render only sampled windows for tests and routine benchmark runs.
+3. Keep full-document runs optional and explicit.
 
-## Benchmark Question
+## Engine Matrix
 
-For the same source document, compare:
+All engines must go through the benchmark runner:
 
-1. Recognition quality.
-2. Searchable PDF quality where supported.
-3. Runtime per page.
-4. Memory pressure.
-5. Failure mode clarity.
-
-## Engines In Scope
-
-### Searchable PDF engines
-
-1. `pytesseract`
-2. `ocrmypdf`
-3. `pymupdf`
-
-### Extraction / readiness engines
-
-1. `paddleocr`
-2. `surya`
-3. `mineru`
-
-## Fixture Contract
-
-1. The canonical PDF fixture stays outside git.
-2. Tests reference the file by absolute path or an overridable env var.
-3. Automated tests operate on a sample page range, not the whole document.
-4. Manual benchmark runs may use the full document.
-
-Recommended default sample window:
-
-1. First 5 pages.
-2. Middle 5 pages.
-3. Last 5 pages.
+1. `pytesseract` (searchable PDF)
+2. `ocrmypdf` (searchable PDF)
+3. `pymupdf` (searchable PDF)
+4. `paddleocr` (text extraction artifact)
+5. `surya` (text extraction artifact)
+6. `mineru` (text extraction artifact)
 
 ## Output Contract
 
-Each benchmark run should produce:
+Each run must generate:
 
-1. A per-engine PDF or text artifact.
-2. A small JSON or CSV report with timings.
-3. A summary of missing dependencies and unsupported modes.
+1. Per-engine artifact (`.pdf` for searchable engines, `.txt` for extraction engines).
+2. Unified JSON report with:
+   `engine`, `status`, `sample_pages`, `elapsed_seconds`, `text_chars`, `artifact_path`, `error`, `note`.
+3. Stable summary text for CLI output.
+
+## Execution Policy
+
+Default sampled window:
+
+1. First `N` pages.
+2. Middle `N` pages.
+3. Last `N` pages.
+
+Required behavior:
+
+1. Every engine is included in the report.
+2. Missing dependencies are explicit and machine-readable.
+3. Engine failures do not break the whole benchmark run.
+4. A strict mode can fail the CLI run when any engine is not `ok`.
 
 ## Commit Plan
 
-1. `docs(plan): add OCR benchmark fixture contract`
-Write the benchmark rules for the external PDF fixture, including the page-sampling policy and output contract.
+1. `docs(plan): define all-engine OCR benchmark contract`
+Expand benchmark requirements to all engines, add output contract and strict-mode rule.
 
-2. `feat(ocr-bench): add ranged PDF benchmark runner`
-Add a small runner that can take a PDF path, sample page ranges, and execute the selected OCR engines on those pages.
+2. `feat(ocr-bench): wire all-engine adapter runner`
+Route `paddleocr`, `surya`, and `mineru` through extraction adapters so each engine is executed by one unified runner.
 
-3. `test(ocr-bench): add fixture smoke tests`
-Use the provided PDF fixture in ranged mode and assert that the benchmark runner returns stable summaries.
+3. `feat(ocr-bench): add strict mode and readiness policy`
+Add CLI strict mode and deterministic handling for missing dependencies / per-engine failures.
 
-4. `perf(ocr-bench): add timing and memory metrics`
-Measure per-engine runtime and memory deltas on the sampled pages.
+4. `test(ocr-bench): cover all-engine routing`
+Add tests that verify searchable engines, extraction engines, and strict-mode behavior.
 
-5. `chore(ocr-bench): add benchmark report export`
-Persist the benchmark summary in a human-readable report so regressions can be compared over time.
+5. `perf(ocr-bench): add memory metric hook`
+Add per-engine memory delta metric where available (best-effort and optional).
 
 ## Exit Criteria
 
-1. The benchmark can run on the provided PDF without loading it wholly into RAM.
-2. The benchmark reports per-engine timings.
-3. The benchmark produces deterministic fixture-based smoke tests.
-4. The benchmark makes it obvious which engines are searchable-PDF capable and which are extraction-only.
+1. `benchmark-ocr` can run with all engines in one command.
+2. Every engine appears in JSON output with deterministic `ok/error` status.
+3. Searchable and extraction engines emit the correct artifact type.
+4. Tests cover all-engine routing and strict-mode exit behavior.
