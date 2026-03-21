@@ -10,7 +10,7 @@ import img2pdf
 import numpy as np
 
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
-from uniscan.core.scanner_adapter import scan_with_document_detector
+from uniscan.core.scanner_adapter import DEFAULT_ACTIVE_DOCUMENT_BACKENDS, scan_with_document_detector
 from uniscan.io.loaders import imwrite_unicode
 
 LoadedItem = tuple[str, np.ndarray]
@@ -61,6 +61,7 @@ def process_loaded_items(
         scan_output = scan_with_document_detector(
             image,
             enabled=options.detect_document,
+            backends=DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
             scanner_root=scanner_root,
         )
         working = scan_output.warped if scan_output.warped is not None else image

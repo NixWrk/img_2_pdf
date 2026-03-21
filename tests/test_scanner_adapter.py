@@ -52,6 +52,27 @@ def test_scanner_adapter_disabled_returns_original() -> None:
     assert np.array_equal(result.warped, image)
 
 
+def test_scanner_adapter_defaults_to_paddleocr_uvdoc(monkeypatch) -> None:
+    image = _perspective_doc()
+    expected = np.full((300, 240, 3), 195, dtype=np.uint8)
+
+    class _FakeModel:
+        def predict(self, _input):
+            return [{"doctr_img": expected}]
+
+    monkeypatch.setattr(
+        "uniscan.core.scanner_adapter._load_uvdoc_model",
+        lambda _cache_home=None: _FakeModel(),
+    )
+
+    result = scan_with_document_detector(image, enabled=True)
+
+    assert result.backend == DETECTOR_BACKEND_PADDLEOCR_UVDOC
+    assert result.detected is True
+    assert result.contour is None
+    assert np.array_equal(result.warped, expected)
+
+
 def test_scanner_adapter_gracefully_returns_no_contour() -> None:
     blank = np.zeros((240, 320, 3), dtype=np.uint8)
 

@@ -32,7 +32,11 @@ from uniscan.core.preprocess import (
     resolve_lens_mode_profile,
 )
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
-from uniscan.core.scanner_adapter import ScanAdapterError, scan_with_document_detector
+from uniscan.core.scanner_adapter import (
+    DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
+    ScanAdapterError,
+    scan_with_document_detector,
+)
 from uniscan.io import CameraService
 from uniscan.io.loaders import IMG_EXTS, PDF_EXTS, imread_unicode, list_supported_in_folder, load_input_items
 from uniscan.ocr import (
@@ -67,10 +71,6 @@ class UnifiedScanApp(ctk.CTk):
         self.title("UniScan")
         self.geometry("1280x800")
         self.minsize(1024, 680)
-
-        self.project_root = Path(__file__).resolve().parents[3]
-        candidate_scanner_root = self.project_root / "camscan_suhren"
-        self.scanner_root = candidate_scanner_root if candidate_scanner_root.exists() else None
 
         self.session = CaptureSession()
         self.camera: CameraService | None = None
@@ -1348,7 +1348,7 @@ class UnifiedScanApp(ctk.CTk):
             scan_output = scan_with_document_detector(
                 image,
                 enabled=True,
-                scanner_root=self.scanner_root,
+                backends=DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
             )
         except ScanAdapterError:
             return None

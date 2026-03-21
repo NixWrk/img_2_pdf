@@ -23,6 +23,7 @@ DETECTOR_BACKEND_OPENCV_HOUGH = "opencv_hough"
 DETECTOR_BACKEND_OPENCV_MINRECT = "opencv_minrect"
 DETECTOR_BACKEND_UVDOC = "uvdoc"
 DETECTOR_BACKEND_PADDLEOCR_UVDOC = "paddleocr_uvdoc"
+DEFAULT_ACTIVE_DOCUMENT_BACKENDS = (DETECTOR_BACKEND_PADDLEOCR_UVDOC,)
 
 
 class ScanAdapterError(RuntimeError):
@@ -502,7 +503,7 @@ def scan_with_document_detector(
     if not enabled:
         return ScanOutput(warped=image, contour=None, backend=None, detected=False, raw_result=None)
 
-    selected_backends = backends or (DETECTOR_BACKEND_CAMSCAN, DETECTOR_BACKEND_OPENCV)
+    selected_backends = backends or DEFAULT_ACTIVE_DOCUMENT_BACKENDS
     errors: list[str] = []
 
     for backend in selected_backends:
