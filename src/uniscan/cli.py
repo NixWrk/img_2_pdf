@@ -36,8 +36,7 @@ def main(argv: list[str] | None = None) -> int:
         nargs="+",
         default=None,
         help=(
-            "Backend names to run. Defaults to camscan opencv_quad cv_hybrid "
-            "opencv_hough opencv_minrect paddleocr_uvdoc."
+            "Backend names to run. Defaults to paddleocr_uvdoc."
         ),
     )
     benchmark_parser.add_argument(

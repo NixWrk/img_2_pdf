@@ -23,11 +23,6 @@ from uniscan.export.exporters import export_image_paths_as_pdf
 from uniscan.io.loaders import load_input_items, list_supported_in_folder, imwrite_unicode
 
 DEFAULT_BENCHMARK_BACKENDS = (
-    DETECTOR_BACKEND_CAMSCAN,
-    DETECTOR_BACKEND_OPENCV,
-    DETECTOR_BACKEND_CV_HYBRID,
-    DETECTOR_BACKEND_OPENCV_HOUGH,
-    DETECTOR_BACKEND_OPENCV_MINRECT,
     DETECTOR_BACKEND_PADDLEOCR_UVDOC,
 )
 
