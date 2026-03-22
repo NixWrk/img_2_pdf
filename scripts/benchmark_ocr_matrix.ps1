@@ -83,17 +83,27 @@ if ($Engines.Count -gt 0) {
 function Invoke-Logged {
     param(
         [string]$Exe,
-        [string[]]$Args,
+        [string[]]$ArgList,
         [string]$LogPath,
         [string]$StepName,
         [switch]$AllowFailure
     )
 
     "`n=== $StepName ===" | Tee-Object -FilePath $LogPath -Append | Out-Null
-    "$Exe $($Args -join ' ')" | Tee-Object -FilePath $LogPath -Append | Out-Null
+    if ($null -eq $ArgList) {
+        $ArgList = @()
+    }
+    "$Exe $($ArgList -join ' ')" | Tee-Object -FilePath $LogPath -Append | Out-Null
 
-    & $Exe @Args 2>&1 | Tee-Object -FilePath $LogPath -Append
-    $exitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Exe @ArgList 2>&1 | Tee-Object -FilePath $LogPath -Append
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
 
     if (($exitCode -ne 0) -and (-not $AllowFailure)) {
         throw "Step '$StepName' failed with exit code $exitCode."
@@ -140,10 +150,10 @@ foreach ($engine in $engineMatrix) {
 
         if (!(Test-Path $venvPython)) {
             if ($BootstrapPython -eq "py" -and -not [string]::IsNullOrWhiteSpace($BootstrapVersion)) {
-                $null = Invoke-Logged -Exe $BootstrapPython -Args @("-$BootstrapVersion", "-m", "venv", $venvPath) -LogPath $logPath -StepName "Create venv"
+                $null = Invoke-Logged -Exe $BootstrapPython -ArgList @("-$BootstrapVersion", "-m", "venv", $venvPath) -LogPath $logPath -StepName "Create venv"
             }
             else {
-                $null = Invoke-Logged -Exe $BootstrapPython -Args @("-m", "venv", $venvPath) -LogPath $logPath -StepName "Create venv"
+                $null = Invoke-Logged -Exe $BootstrapPython -ArgList @("-m", "venv", $venvPath) -LogPath $logPath -StepName "Create venv"
             }
         }
 
@@ -151,13 +161,13 @@ foreach ($engine in $engineMatrix) {
             throw "Python interpreter not found in venv: $venvPython"
         }
 
-        $null = Invoke-Logged -Exe $venvPython -Args @("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel") -LogPath $logPath -StepName "Install base tooling"
+        $null = Invoke-Logged -Exe $venvPython -ArgList @("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel") -LogPath $logPath -StepName "Install base tooling"
 
         if (-not $SkipEditableInstall) {
-            $null = Invoke-Logged -Exe $venvPython -Args @("-m", "pip", "install", "--upgrade", "-e", $RepoRoot) -LogPath $logPath -StepName "Install project editable"
+            $null = Invoke-Logged -Exe $venvPython -ArgList @("-m", "pip", "install", "--upgrade", "-e", $RepoRoot) -LogPath $logPath -StepName "Install project editable"
         }
 
-        $null = Invoke-Logged -Exe $venvPython -Args (@("-m", "pip", "install", "--upgrade") + $engineDeps) -LogPath $logPath -StepName "Install engine deps"
+        $null = Invoke-Logged -Exe $venvPython -ArgList (@("-m", "pip", "install", "--upgrade") + $engineDeps) -LogPath $logPath -StepName "Install engine deps"
         $entry.install_exit_code = 0
 
         $versionPkgs = @(
@@ -179,8 +189,8 @@ foreach ($engine in $engineMatrix) {
         )
         $versionsPath = Join-Path $engineOutput "versions.txt"
         $freezePath = Join-Path $engineOutput "requirements_freeze.txt"
-        $null = Invoke-Logged -Exe $venvPython -Args (@("-m", "pip", "show") + $versionPkgs) -LogPath $versionsPath -StepName "Version snapshot" -AllowFailure
-        $null = Invoke-Logged -Exe $venvPython -Args @("-m", "pip", "freeze") -LogPath $freezePath -StepName "Freeze snapshot" -AllowFailure
+        $null = Invoke-Logged -Exe $venvPython -ArgList (@("-m", "pip", "show") + $versionPkgs) -LogPath $versionsPath -StepName "Version snapshot" -AllowFailure
+        $null = Invoke-Logged -Exe $venvPython -ArgList @("-m", "pip", "freeze") -LogPath $freezePath -StepName "Freeze snapshot" -AllowFailure
 
         $env:Path = $toolPath
         $env:PADDLE_PDX_CACHE_HOME = $repoPaddleCache
@@ -200,7 +210,7 @@ foreach ($engine in $engineMatrix) {
             "--engines", $engineName,
             "--strict"
         )
-        $benchExit = Invoke-Logged -Exe $venvPython -Args $benchArgs -LogPath $logPath -StepName "Run benchmark" -AllowFailure
+        $benchExit = Invoke-Logged -Exe $venvPython -ArgList $benchArgs -LogPath $logPath -StepName "Run benchmark" -AllowFailure
         $entry.benchmark_exit_code = $benchExit
 
         $reportPath = Join-Path $engineOutput "${pdfStem}_ocr_benchmark.json"
