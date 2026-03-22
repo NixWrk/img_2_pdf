@@ -211,9 +211,47 @@ def _image_paths_to_searchable_pdf_pytesseract(
             pytesseract.image_to_pdf_or_hocr(str(src_path), extension="pdf", lang=lang)
         )
 
+    if hasattr(pypdf, "PdfWriter") and hasattr(pypdf, "PdfReader"):
+        writer = pypdf.PdfWriter()
+        streams = []
+        try:
+            for payload in page_pdf_bytes:
+                stream = BytesIO(payload)
+                streams.append(stream)
+                try:
+                    reader = pypdf.PdfReader(stream, strict=False)
+                except TypeError:
+                    reader = pypdf.PdfReader(stream)
+                for page in reader.pages:
+                    writer.add_page(page)
+            with out_pdf.open("wb") as fh:
+                writer.write(fh)
+            return out_pdf
+        except Exception as writer_exc:
+            # Fallback: PyMuPDF often tolerates malformed length metadata better than pypdf.
+            try:
+                fitz = import_module("fitz")
+                merged = fitz.open()
+                try:
+                    for payload in page_pdf_bytes:
+                        page_doc = fitz.open(stream=payload, filetype="pdf")
+                        try:
+                            merged.insert_pdf(page_doc)
+                        finally:
+                            page_doc.close()
+                    merged.save(str(out_pdf))
+                finally:
+                    merged.close()
+                return out_pdf
+            except Exception:
+                raise writer_exc
+        finally:
+            for stream in streams:
+                stream.close()
+
     if hasattr(pypdf, "PdfMerger"):
         merger = pypdf.PdfMerger()
-        streams: list[BytesIO] = []
+        streams = []
         try:
             for payload in page_pdf_bytes:
                 stream = BytesIO(payload)
@@ -221,27 +259,13 @@ def _image_paths_to_searchable_pdf_pytesseract(
                 merger.append(stream)
             with out_pdf.open("wb") as fh:
                 merger.write(fh)
+            return out_pdf
         finally:
             merger.close()
             for stream in streams:
                 stream.close()
-        return out_pdf
 
-    writer = pypdf.PdfWriter()
-    streams = []
-    try:
-        for payload in page_pdf_bytes:
-            stream = BytesIO(payload)
-            streams.append(stream)
-            reader = pypdf.PdfReader(stream)
-            for page in reader.pages:
-                writer.add_page(page)
-        with out_pdf.open("wb") as fh:
-            writer.write(fh)
-    finally:
-        for stream in streams:
-            stream.close()
-    return out_pdf
+    raise RuntimeError("pypdf does not provide PdfWriter/PdfReader or PdfMerger.")
 
 
 def _image_paths_to_searchable_pdf_ocrmypdf(

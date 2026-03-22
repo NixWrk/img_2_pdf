@@ -181,22 +181,25 @@ def test_image_paths_to_searchable_pdf_pytesseract_merges_pages(tmp_path: Path) 
             assert lang == "eng"
             return f"PDF:{Path(src).name}".encode("utf-8")
 
-    class FakeMerger:
+    class FakeReader:
+        def __init__(self, stream, strict=False) -> None:
+            assert strict is False
+            self.pages = [stream.read()]
+            stream.seek(0)
+
+    class FakeWriter:
         def __init__(self) -> None:
             self.pages: list[bytes] = []
 
-        def append(self, stream) -> None:
-            self.pages.append(stream.read())
-            stream.seek(0)
+        def add_page(self, page) -> None:
+            self.pages.append(page)
 
         def write(self, fh) -> None:
             fh.write(b"MERGED|" + b"|".join(self.pages))
 
-        def close(self) -> None:
-            return None
-
     class FakePypdf:
-        PdfMerger = FakeMerger
+        PdfReader = FakeReader
+        PdfWriter = FakeWriter
 
     def _importer(name: str):
         if name == "pytesseract":
