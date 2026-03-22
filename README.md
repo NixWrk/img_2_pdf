@@ -169,6 +169,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\benchmark_ocr_matrix.ps1 `
   -Recreate
 ```
 
+Build a readable comparison bundle (report + copied results + per-engine extracted text) in `.\outputs`:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\compare_ocr_results.py `
+  --input-root .\artifacts\ocr_latest_matrix_full_run_final `
+  --output-root .\outputs
+```
+
 If you plan to use legacy scripts with OCR, install additionally:
 
 ```powershell
@@ -217,6 +225,7 @@ python "prepare pdf to tesseract.py"
 | `imgs_and_pdfs_ocr_fast_STABLE.py` | Stable previous OCR GUI version |
 | `prepare pdf to tesseract.py` | PDF conditioning helper before OCR |
 | `scripts/benchmark_ocr_matrix.ps1` | Creates isolated venv per OCR engine, runs benchmark, writes matrix summary |
+| `scripts/compare_ocr_results.py` | Copies one benchmark run to `outputs`, extracts readable text per engine, writes markdown comparison report |
 | `camscan_suhren/` | Third-party camera scanner project used as source of preprocessing logic |
 
 ## Known Limitations
