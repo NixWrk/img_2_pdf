@@ -131,24 +131,17 @@ function Invoke-Logged {
     }
     "$Exe $($ArgList -join ' ')" | Tee-Object -FilePath $LogPath -Append | Out-Null
 
-    $stdoutPath = Join-Path $env:TEMP ("uniscan_ocr_matrix_stdout_{0}.log" -f ([guid]::NewGuid().ToString("N")))
     $stderrPath = Join-Path $env:TEMP ("uniscan_ocr_matrix_stderr_{0}.log" -f ([guid]::NewGuid().ToString("N")))
     try {
-        $proc = Start-Process -FilePath $Exe -ArgumentList $ArgList -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-
-        if (Test-Path $stdoutPath) {
-            Get-Content $stdoutPath | Tee-Object -FilePath $LogPath -Append | Out-Host
-        }
+        # Keep native argument semantics (paths with spaces remain intact),
+        # while redirecting stderr away from PowerShell error records.
+        & $Exe @ArgList 2> $stderrPath | Tee-Object -FilePath $LogPath -Append | Out-Host
         if (Test-Path $stderrPath) {
             Get-Content $stderrPath | Tee-Object -FilePath $LogPath -Append | Out-Host
         }
-
-        $exitCode = [int]$proc.ExitCode
+        $exitCode = [int]$LASTEXITCODE
     }
     finally {
-        if (Test-Path $stdoutPath) {
-            Remove-Item -Force $stdoutPath
-        }
         if (Test-Path $stderrPath) {
             Remove-Item -Force $stderrPath
         }
