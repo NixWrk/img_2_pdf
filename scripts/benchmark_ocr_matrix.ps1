@@ -86,6 +86,8 @@ $engineMatrix = @(
             "ftfy",
             "dill",
             "omegaconf",
+            "shapely",
+            "pyclipper",
             "requests",
             "transformers==4.57.1",
             "tokenizers==0.22.1",
