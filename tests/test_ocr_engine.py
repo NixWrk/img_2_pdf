@@ -4,6 +4,7 @@ import pytest
 
 from uniscan.ocr.engine import (
     OCR_ENGINE_LABELS,
+    OCR_ENGINE_CHANDRA,
     OCR_ENGINE_MINERU,
     OCR_ENGINE_OCRMYPDF,
     OCR_ENGINE_PADDLEOCR,
@@ -62,6 +63,7 @@ def test_ocr_engine_registry_is_stable() -> None:
         OCR_ENGINE_PYMUPDF,
         OCR_ENGINE_SURYA,
         OCR_ENGINE_MINERU,
+        OCR_ENGINE_CHANDRA,
     )
     assert SEARCHABLE_PDF_ENGINES == (
         OCR_ENGINE_PYTESSERACT,
@@ -80,13 +82,30 @@ def test_ocr_engine_registry_is_stable() -> None:
         (OCR_ENGINE_PYMUPDF, True),
         (OCR_ENGINE_SURYA, False),
         (OCR_ENGINE_MINERU, False),
+        (OCR_ENGINE_CHANDRA, False),
     ],
 )
 def test_detect_ocr_engine_status_ready_matrix(engine_name: str, expected_searchable_pdf: bool) -> None:
     status = detect_ocr_engine_status(
         engine_name,
-        import_module=_importer_factory({"pytesseract", "pypdf", "img2pdf", "fitz", "paddleocr", "surya", "marker", "mineru", "magic_pdf", "ftfy", "dill", "omegaconf"}),
-        which_fn=_which_factory({"tesseract", "ocrmypdf"}),
+        import_module=_importer_factory(
+            {
+                "pytesseract",
+                "pypdf",
+                "img2pdf",
+                "fitz",
+                "paddleocr",
+                "surya",
+                "marker",
+                "mineru",
+                "magic_pdf",
+                "ftfy",
+                "dill",
+                "omegaconf",
+                "chandra_ocr",
+            }
+        ),
+        which_fn=_which_factory({"tesseract", "ocrmypdf", "chandra"}),
     )
     assert status.ready
     assert status.searchable_pdf is expected_searchable_pdf
@@ -102,6 +121,7 @@ def test_detect_ocr_engine_status_ready_matrix(engine_name: str, expected_search
         (OCR_ENGINE_PYMUPDF, set(), set(), ["pymupdf(fitz)", "pypdf", "tesseract"]),
         (OCR_ENGINE_SURYA, set(), set(), ["surya/marker"]),
         (OCR_ENGINE_MINERU, set(), set(), ["mineru(magic_pdf)"]),
+        (OCR_ENGINE_CHANDRA, set(), set(), ["chandra-ocr(chandra)"]),
     ],
 )
 def test_detect_ocr_engine_status_missing_matrix(
@@ -151,8 +171,28 @@ def test_detect_ocr_engine_status_mineru_requires_runtime_modules() -> None:
     assert set(status.missing) == {"ftfy", "dill", "omegaconf"}
 
 
+def test_detect_ocr_engine_status_paddleocr_searchable_via_ocrmypdf_plugin() -> None:
+    status = detect_ocr_engine_status(
+        OCR_ENGINE_PADDLEOCR,
+        import_module=_importer_factory({"paddleocr", "img2pdf", "ocrmypdf_paddleocr"}),
+        which_fn=_which_factory({"ocrmypdf"}),
+    )
+    assert status.ready
+    assert status.searchable_pdf
+
+
+def test_detect_ocr_engine_status_chandra_ready_from_cli_only() -> None:
+    status = detect_ocr_engine_status(
+        OCR_ENGINE_CHANDRA,
+        import_module=_importer_factory(set()),
+        which_fn=_which_factory({"chandra"}),
+    )
+    assert status.ready
+    assert not status.searchable_pdf
+
+
 def test_image_paths_to_searchable_pdf_rejects_unwired_ocr_engines(tmp_path: Path) -> None:
-    for engine_name in (OCR_ENGINE_PADDLEOCR, OCR_ENGINE_SURYA, OCR_ENGINE_MINERU):
+    for engine_name in (OCR_ENGINE_PADDLEOCR, OCR_ENGINE_SURYA, OCR_ENGINE_MINERU, OCR_ENGINE_CHANDRA):
         try:
             image_paths_to_searchable_pdf(
                 [tmp_path / "page.png"],
@@ -164,7 +204,7 @@ def test_image_paths_to_searchable_pdf_rejects_unwired_ocr_engines(tmp_path: Pat
                     missing=[],
                     searchable_pdf=False,
                 ),
-                import_module=_importer_factory({"paddleocr", "surya", "marker", "mineru", "magic_pdf"}),
+                import_module=_importer_factory({"paddleocr", "surya", "marker", "mineru", "magic_pdf", "chandra_ocr"}),
                 which_fn=_which_factory({"tesseract", "ocrmypdf"}),
             )
         except NotImplementedError as exc:
@@ -312,6 +352,50 @@ def test_image_paths_to_searchable_pdf_pymupdf_no_ocr_support_raises(tmp_path: P
         assert "no OCR support" in str(exc)
     else:
         raise AssertionError("Expected RuntimeError for PyMuPDF without OCR support")
+
+
+def test_image_paths_to_searchable_pdf_paddleocr_via_ocrmypdf_plugin_calls_cli(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _run(cmd, capture_output, text):
+        assert capture_output
+        assert text
+        calls.append([str(x) for x in cmd])
+        out_path = Path(cmd[-1])
+        out_path.write_bytes(b"%PDF-PLUGIN")
+        return FakeProc()
+
+    def _build_pdf(_paths, out_pdf, dpi):
+        assert int(dpi) == 300
+        Path(out_pdf).write_bytes(b"%PDF-INPUT")
+
+    out = image_paths_to_searchable_pdf(
+        [tmp_path / "1.png"],
+        out_pdf=tmp_path / "paddle_plugin_out.pdf",
+        engine_name=OCR_ENGINE_PADDLEOCR,
+        lang="eng",
+        engine_status=OcrEngineStatus(
+            engine_name=OCR_ENGINE_PADDLEOCR,
+            ready=True,
+            missing=[],
+            searchable_pdf=True,
+        ),
+        import_module=_importer_factory({"img2pdf", "ocrmypdf_paddleocr"}),
+        which_fn=_which_factory({"ocrmypdf"}),
+        run_cmd=_run,
+        build_pdf_fn=_build_pdf,
+    )
+    assert out.exists()
+    assert calls
+    assert calls[0][0] == "ocrmypdf"
+    assert "--plugin" in calls[0]
+    plugin_index = calls[0].index("--plugin")
+    assert calls[0][plugin_index + 1] == "ocrmypdf_paddleocr"
 
 
 def test_image_paths_to_searchable_pdf_empty_raises(tmp_path: Path) -> None:

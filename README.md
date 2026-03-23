@@ -66,7 +66,7 @@ Implementation notes:
 5. `Import` supports multi-file selection and background loading.
 6. Import order is preserved end-to-end: folder order, document page order, and mixed import order are kept as selected.
 7. Searchable PDF is currently wired for `pytesseract`, `OCRmyPDF`, and `PyMuPDF OCR`.
-8. `PaddleOCR`, `Surya`, and `MinerU` are available as selectable OCR backends with readiness checks (searchable-PDF wiring pending).
+8. `PaddleOCR`, `Surya`, `MinerU`, and `Chandra` are available as selectable OCR backends. For searchable-PDF routes see `docs/searchable_pdf_strategy.md`.
 
 ## What The App Does
 
@@ -122,13 +122,20 @@ pip install opencv-python numpy pillow img2pdf pymupdf
 Optional OCR dependencies in the new app:
 
 ```powershell
-pip install pytesseract pypdf ocrmypdf paddleocr pymupdf
+pip install pytesseract pypdf ocrmypdf paddleocr pymupdf chandra-ocr
 ```
 
 Optional packages for full all-engine OCR benchmark (`surya`/`mineru` paths):
 
 ```powershell
 pip install surya-ocr mineru ftfy dill omegaconf doclayout-yolo ultralytics
+```
+
+Optional OCRmyPDF plugin packages from your local `OCRmypdf_plugins` folder:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e .\OCRmypdf_plugins\ocrmypdf-paddleocr-master
+.\.venv\Scripts\python.exe -m pip install -e .\OCRmypdf_plugins\ocrmypdf-doctr-master
 ```
 
 Known working stack for one-environment all-engine benchmark on Windows:
@@ -158,6 +165,7 @@ Benchmark note:
 Environment strategy and conflict notes:
 
 1. See `docs/ocr_env_strategy.md` for known dependency conflicts and the one-venv pin set.
+2. See `docs/searchable_pdf_strategy.md` for per-engine searchable-PDF paths (built-in and plugin-based).
 2. For latest-release comparisons, run isolated per-engine environments with:
 
 ```powershell

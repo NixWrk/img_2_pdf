@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import shutil
 import subprocess
 import tempfile
@@ -19,6 +20,7 @@ OCR_ENGINE_PADDLEOCR = "paddleocr"
 OCR_ENGINE_PYMUPDF = "pymupdf"
 OCR_ENGINE_SURYA = "surya"
 OCR_ENGINE_MINERU = "mineru"
+OCR_ENGINE_CHANDRA = "chandra"
 
 OCR_ENGINE_VALUES: tuple[str, ...] = (
     OCR_ENGINE_PYTESSERACT,
@@ -27,6 +29,7 @@ OCR_ENGINE_VALUES: tuple[str, ...] = (
     OCR_ENGINE_PYMUPDF,
     OCR_ENGINE_SURYA,
     OCR_ENGINE_MINERU,
+    OCR_ENGINE_CHANDRA,
 )
 
 OCR_ENGINE_LABELS: dict[str, str] = {
@@ -36,6 +39,7 @@ OCR_ENGINE_LABELS: dict[str, str] = {
     OCR_ENGINE_PYMUPDF: "PyMuPDF OCR",
     OCR_ENGINE_SURYA: "Surya",
     OCR_ENGINE_MINERU: "MinerU",
+    OCR_ENGINE_CHANDRA: "Chandra",
 }
 
 SEARCHABLE_PDF_ENGINES: tuple[str, ...] = (
@@ -43,6 +47,13 @@ SEARCHABLE_PDF_ENGINES: tuple[str, ...] = (
     OCR_ENGINE_OCRMYPDF,
     OCR_ENGINE_PYMUPDF,
 )
+
+OCRMYPDF_PLUGIN_CANDIDATES: dict[str, tuple[str, ...]] = {
+    OCR_ENGINE_PADDLEOCR: ("ocrmypdf_paddleocr",),
+    OCR_ENGINE_SURYA: ("ocrmypdf_surya", "ocrmypdf_with_surya"),
+    OCR_ENGINE_MINERU: ("ocrmypdf_mineru", "ocrmypdf_magic_pdf"),
+    OCR_ENGINE_CHANDRA: ("ocrmypdf_chandra",),
+}
 
 
 @dataclass(slots=True, frozen=True)
@@ -89,6 +100,34 @@ def _has_module(name: str, import_module) -> bool:
 
 def _has_command(name: str, which_fn) -> bool:
     return bool(which_fn(name) or which_fn(f"{name}.exe"))
+
+
+def _ocrmypdf_plugin_candidates_for_engine(engine: str) -> tuple[str, ...]:
+    env_key = f"UNISCAN_OCRMYPDF_PLUGIN_{engine.upper()}"
+    env_raw = (os.environ.get(env_key) or "").strip()
+    env_values: tuple[str, ...] = ()
+    if env_raw:
+        env_values = tuple(part.strip() for part in env_raw.split(",") if part.strip())
+    defaults = OCRMYPDF_PLUGIN_CANDIDATES.get(engine, ())
+    return tuple(dict.fromkeys([*env_values, *defaults]))
+
+
+def _detect_ocrmypdf_plugin_module(
+    engine: str,
+    *,
+    import_module,
+    which_fn,
+) -> str | None:
+    # OCRmyPDF plugin mode still needs OCRmyPDF binary and img2pdf in the runtime.
+    if not _has_command("ocrmypdf", which_fn):
+        return None
+    if not _has_module("img2pdf", import_module):
+        return None
+
+    for module_name in _ocrmypdf_plugin_candidates_for_engine(engine):
+        if _has_module(module_name, import_module):
+            return module_name
+    return None
 
 
 def detect_ocr_dependencies(
@@ -153,11 +192,12 @@ def detect_ocr_engine_status(
 
     if engine == OCR_ENGINE_PADDLEOCR:
         missing = [] if _has_module("paddleocr", import_module) else ["paddleocr"]
+        plugin_module = _detect_ocrmypdf_plugin_module(engine, import_module=import_module, which_fn=which_fn)
         return OcrEngineStatus(
             engine_name=engine,
             ready=not missing,
             missing=missing,
-            searchable_pdf=False,
+            searchable_pdf=plugin_module is not None,
         )
 
     if engine == OCR_ENGINE_SURYA:
@@ -165,27 +205,41 @@ def detect_ocr_engine_status(
         has_marker = _has_module("marker", import_module)
         has_surya_cli = _has_command("surya_ocr", which_fn) or _has_command("marker_single", which_fn) or _has_command("marker", which_fn)
         missing = [] if (has_surya or has_marker or has_surya_cli) else ["surya/marker"]
+        plugin_module = _detect_ocrmypdf_plugin_module(engine, import_module=import_module, which_fn=which_fn)
         return OcrEngineStatus(
             engine_name=engine,
             ready=not missing,
             missing=missing,
-            searchable_pdf=False,
+            searchable_pdf=plugin_module is not None,
         )
 
-    has_mineru = _has_module("mineru", import_module) or _has_module("magic_pdf", import_module)
-    has_mineru_cli = _has_command("mineru", which_fn) or _has_command("magic-pdf", which_fn)
-    missing: list[str] = []
-    if not (has_mineru or has_mineru_cli):
-        missing.append("mineru(magic_pdf)")
-    if has_mineru:
-        for module_name in ("ftfy", "dill", "omegaconf"):
-            if not _has_module(module_name, import_module):
-                missing.append(module_name)
+    if engine == OCR_ENGINE_MINERU:
+        has_mineru = _has_module("mineru", import_module) or _has_module("magic_pdf", import_module)
+        has_mineru_cli = _has_command("mineru", which_fn) or _has_command("magic-pdf", which_fn)
+        missing: list[str] = []
+        if not (has_mineru or has_mineru_cli):
+            missing.append("mineru(magic_pdf)")
+        if has_mineru:
+            for module_name in ("ftfy", "dill", "omegaconf"):
+                if not _has_module(module_name, import_module):
+                    missing.append(module_name)
+        plugin_module = _detect_ocrmypdf_plugin_module(engine, import_module=import_module, which_fn=which_fn)
+        return OcrEngineStatus(
+            engine_name=engine,
+            ready=not missing,
+            missing=missing,
+            searchable_pdf=plugin_module is not None,
+        )
+
+    has_chandra = _has_module("chandra_ocr", import_module) or _has_module("chandra", import_module)
+    has_chandra_cli = _has_command("chandra", which_fn)
+    missing = [] if (has_chandra or has_chandra_cli) else ["chandra-ocr(chandra)"]
+    plugin_module = _detect_ocrmypdf_plugin_module(engine, import_module=import_module, which_fn=which_fn)
     return OcrEngineStatus(
         engine_name=engine,
         ready=not missing,
         missing=missing,
-        searchable_pdf=False,
+        searchable_pdf=plugin_module is not None,
     )
 
 
@@ -359,6 +413,47 @@ def _image_paths_to_searchable_pdf_pymupdf(
     return out_pdf
 
 
+def _image_paths_to_searchable_pdf_ocrmypdf_plugin(
+    image_paths: Sequence[Path],
+    *,
+    out_pdf: Path,
+    lang: str,
+    plugin_module: str,
+    which_fn,
+    run_cmd,
+    build_pdf_fn,
+) -> Path:
+    ocrmypdf_cmd = which_fn("ocrmypdf") or which_fn("ocrmypdf.exe")
+    if not ocrmypdf_cmd:
+        raise RuntimeError("OCRmyPDF command was not found in PATH.")
+
+    with tempfile.TemporaryDirectory(prefix="uniscan_ocrmypdf_plugin_") as tmp:
+        tmp_pdf = Path(tmp) / "input.pdf"
+        build_pdf_fn([Path(p) for p in image_paths], out_pdf=tmp_pdf, dpi=300)
+        proc = run_cmd(
+            [
+                str(ocrmypdf_cmd),
+                "--plugin",
+                plugin_module,
+                "--force-ocr",
+                "--optimize",
+                "0",
+                "--language",
+                lang,
+                str(tmp_pdf),
+                str(out_pdf),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if int(getattr(proc, "returncode", 1)) != 0:
+            stderr = (getattr(proc, "stderr", "") or "").strip()
+            stdout = (getattr(proc, "stdout", "") or "").strip()
+            details = stderr or stdout or "unknown OCRmyPDF plugin error"
+            raise RuntimeError(f"OCRmyPDF plugin '{plugin_module}' failed: {details}")
+    return out_pdf
+
+
 def image_paths_to_searchable_pdf(
     image_paths: Sequence[Path],
     *,
@@ -432,7 +527,31 @@ def image_paths_to_searchable_pdf(
             import_module=import_module,
         )
 
+    plugin_module = _detect_ocrmypdf_plugin_module(
+        engine,
+        import_module=import_module,
+        which_fn=which_fn,
+    )
+    if plugin_module is not None:
+        return _image_paths_to_searchable_pdf_ocrmypdf_plugin(
+            image_paths,
+            out_pdf=out_pdf,
+            lang=lang,
+            plugin_module=plugin_module,
+            which_fn=which_fn,
+            run_cmd=run_cmd,
+            build_pdf_fn=build_pdf_fn,
+        )
+
     label = OCR_ENGINE_LABELS.get(engine, engine)
+    plugin_hint = ""
+    candidates = _ocrmypdf_plugin_candidates_for_engine(engine)
+    if candidates:
+        plugin_hint = (
+            " Install/activate OCRmyPDF plugin module(s): "
+            + ", ".join(candidates)
+            + f" (or set UNISCAN_OCRMYPDF_PLUGIN_{engine.upper()})."
+        )
     raise NotImplementedError(
-        f"Engine '{label}' is detected but searchable PDF export is not wired yet in this build."
+        f"Engine '{label}' is detected but searchable PDF export is not wired yet in this build.{plugin_hint}"
     )

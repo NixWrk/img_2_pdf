@@ -94,6 +94,13 @@ $engineMatrix = @(
             "tokenizers==0.22.1",
             "huggingface-hub==0.34.4"
         )
+    },
+    @{
+        name = "chandra"
+        deps = @(
+            "chandra-ocr",
+            "requests"
+        )
     }
 )
 
@@ -276,6 +283,10 @@ foreach ($engine in $engineMatrix) {
                     "tokenizers",
                     "huggingface-hub"
                 )
+                break
+            }
+            "chandra" {
+                $versionPkgs += @("chandra-ocr", "requests")
                 break
             }
         }

@@ -18,6 +18,7 @@ from uniscan.io import imwrite_unicode, render_pdf_page_indices
 
 from .engine import (
     OCR_ENGINE_LABELS,
+    OCR_ENGINE_CHANDRA,
     OCR_ENGINE_MINERU,
     OCR_ENGINE_PADDLEOCR,
     OCR_ENGINE_SURYA,
@@ -472,6 +473,63 @@ def _run_mineru_direct(
         raise
 
 
+def _run_chandra_direct(
+    image_paths: Sequence[Path],
+    *,
+    lang: str,
+    work_dir: Path,
+    which_fn=shutil.which,
+    run_cmd=subprocess.run,
+) -> tuple[str, int]:
+    if len(image_paths) == 0:
+        raise ValueError("No images for Chandra OCR.")
+
+    chandra_cmd = which_fn("chandra") or which_fn("chandra.exe")
+    if not chandra_cmd:
+        raise RuntimeError("Chandra CLI was not found in PATH.")
+
+    collected: list[str] = []
+    errors: list[str] = []
+    for image_path in image_paths:
+        page_output = work_dir / image_path.stem
+        page_output.mkdir(parents=True, exist_ok=True)
+        candidates = (
+            [str(chandra_cmd), str(image_path), str(page_output), "--method", "hf"],
+            [str(chandra_cmd), str(image_path), str(page_output)],
+        )
+        run_ok = False
+        for command in candidates:
+            proc = run_cmd(command, capture_output=True, text=True)
+            if int(getattr(proc, "returncode", 1)) == 0:
+                run_ok = True
+                break
+            stderr = (getattr(proc, "stderr", "") or "").strip()
+            stdout = (getattr(proc, "stdout", "") or "").strip()
+            details = stderr or stdout or "unknown cli error"
+            errors.append(details)
+
+        if not run_ok:
+            raise RuntimeError(
+                f"Chandra OCR failed on {image_path.name}: " + " | ".join(errors[-2:])
+            )
+
+        page_texts: list[str] = []
+        for pattern in ("*.md", "*.txt", "*.json", "*.html"):
+            for artifact in sorted(page_output.rglob(pattern)):
+                try:
+                    text = artifact.read_text(encoding="utf-8", errors="ignore").strip()
+                except Exception:
+                    continue
+                if text:
+                    page_texts.append(text)
+        if not page_texts:
+            raise RuntimeError(f"Chandra OCR produced no text artifacts for {image_path.name}.")
+        collected.append("\n".join(page_texts))
+
+    text = "\n".join(part for part in collected if part and not part.isspace())
+    return text, len(text)
+
+
 def _run_extraction_engine(
     engine: str,
     image_paths: Sequence[Path],
@@ -493,6 +551,14 @@ def _run_extraction_engine(
         )
     if engine == OCR_ENGINE_MINERU:
         return _run_mineru_direct(
+            image_paths,
+            lang=lang,
+            work_dir=work_dir,
+            which_fn=which_fn,
+            run_cmd=run_cmd,
+        )
+    if engine == OCR_ENGINE_CHANDRA:
+        return _run_chandra_direct(
             image_paths,
             lang=lang,
             work_dir=work_dir,
