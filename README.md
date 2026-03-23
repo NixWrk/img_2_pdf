@@ -192,6 +192,14 @@ Build a readable comparison bundle (report + copied results + per-engine extract
   --output-root .\outputs
 ```
 
+GUI path for full OCR comparison:
+
+1. Open tab `4. Export`.
+2. In section `OCR Compare (GUI)`, select benchmark PDF and output folder.
+3. Enable `Full run (all pages)` to benchmark all pages.
+4. Set `Compare pages` (for example `3,9`) to build canonical side-by-side comparison on exact pages.
+5. Click `Run OCR Compare`; after completion open the generated run folder with `Open Output`.
+
 If you plan to use legacy scripts with OCR, install additionally:
 
 ```powershell

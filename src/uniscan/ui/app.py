@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import queue
 import re
+import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -44,9 +45,14 @@ from uniscan.ocr import (
     OCR_ENGINE_PYTESSERACT,
     OCR_ENGINE_VALUES,
     detect_ocr_engine_status,
+    run_ocr_benchmark,
+    run_ocr_canonical_package,
+    summarize_ocr_benchmark,
+    summarize_ocr_canonical_package,
 )
 from uniscan.session import CaptureSession
 from uniscan.ui.camera_health import camera_health_state
+from uniscan.ui.page_parse import parse_page_numbers_text
 
 PREVIEW_WAIT_MS = 25
 RESOLUTIONS = [
@@ -108,6 +114,15 @@ class UnifiedScanApp(ctk.CTk):
         self.export_ocr_engine_var = tk.StringVar(value=OCR_ENGINE_PYTESSERACT)
         self.export_ocr_lang_var = tk.StringVar(value="eng")
         self.export_ocr_status_var = tk.StringVar(value="OCR: checking...")
+        self.ocr_compare_pdf_path_var = tk.StringVar()
+        self.ocr_compare_output_dir_var = tk.StringVar(
+            value=str((Path.cwd() / "outputs" / "ocr_compare_gui").resolve())
+        )
+        self.ocr_compare_pages_var = tk.StringVar(value="3,9")
+        self.ocr_compare_full_run_var = tk.BooleanVar(value=True)
+        self.ocr_compare_dpi_var = tk.IntVar(value=200)
+        self.ocr_compare_lang_var = tk.StringVar(value="eng")
+        self.ocr_compare_status_var = tk.StringVar(value="Not started")
         self.job_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.job_cancel_event = threading.Event()
         self.job_thread: threading.Thread | None = None
@@ -1031,6 +1046,99 @@ class UnifiedScanApp(ctk.CTk):
             command=self.export_to_files,
         ).grid(row=0, column=3, padx=(0, 10), pady=10)
 
+        row_compare_title = ctk.CTkFrame(tab)
+        row_compare_title.grid(row=4, column=0, sticky="ew", padx=12, pady=(8, 6))
+        ctk.CTkLabel(
+            row_compare_title,
+            text="OCR Compare (GUI): full benchmark + canonical per-page comparison",
+            anchor="w",
+        ).pack(fill=ctk.X, padx=10, pady=8)
+
+        row_compare_pdf = ctk.CTkFrame(tab)
+        row_compare_pdf.grid(row=5, column=0, sticky="ew", padx=12, pady=(0, 6))
+        row_compare_pdf.grid_columnconfigure(0, weight=1)
+        ctk.CTkEntry(row_compare_pdf, textvariable=self.ocr_compare_pdf_path_var).grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=(10, 8),
+            pady=10,
+        )
+        ctk.CTkButton(
+            row_compare_pdf,
+            text="Benchmark PDF...",
+            width=150,
+            command=self.choose_ocr_compare_pdf_path,
+        ).grid(row=0, column=1, padx=(0, 10), pady=10)
+
+        row_compare_output = ctk.CTkFrame(tab)
+        row_compare_output.grid(row=6, column=0, sticky="ew", padx=12, pady=(0, 6))
+        row_compare_output.grid_columnconfigure(0, weight=1)
+        ctk.CTkEntry(row_compare_output, textvariable=self.ocr_compare_output_dir_var).grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=(10, 8),
+            pady=10,
+        )
+        ctk.CTkButton(
+            row_compare_output,
+            text="Output Dir...",
+            width=120,
+            command=self.choose_ocr_compare_output_dir,
+        ).grid(row=0, column=1, padx=(0, 10), pady=10)
+
+        row_compare_opts = ctk.CTkFrame(tab)
+        row_compare_opts.grid(row=7, column=0, sticky="ew", padx=12, pady=(0, 6))
+        ctk.CTkCheckBox(
+            row_compare_opts,
+            text="Full run (all pages)",
+            variable=self.ocr_compare_full_run_var,
+        ).pack(side=ctk.LEFT, padx=(10, 8), pady=10)
+        ctk.CTkLabel(row_compare_opts, text="Compare pages").pack(side=ctk.LEFT, padx=(0, 4), pady=10)
+        ctk.CTkEntry(row_compare_opts, textvariable=self.ocr_compare_pages_var, width=120).pack(
+            side=ctk.LEFT,
+            padx=(0, 8),
+            pady=10,
+        )
+        ctk.CTkLabel(row_compare_opts, text="DPI").pack(side=ctk.LEFT, padx=(0, 4), pady=10)
+        ctk.CTkEntry(row_compare_opts, textvariable=self.ocr_compare_dpi_var, width=80).pack(
+            side=ctk.LEFT,
+            padx=(0, 8),
+            pady=10,
+        )
+        ctk.CTkLabel(row_compare_opts, text="Lang").pack(side=ctk.LEFT, padx=(0, 4), pady=10)
+        ctk.CTkEntry(row_compare_opts, textvariable=self.ocr_compare_lang_var, width=90).pack(
+            side=ctk.LEFT,
+            padx=(0, 8),
+            pady=10,
+        )
+        ctk.CTkLabel(
+            row_compare_opts,
+            text="(pages example: 3,9)",
+            anchor="w",
+        ).pack(side=ctk.LEFT, padx=(4, 8), pady=10)
+
+        row_compare_actions = ctk.CTkFrame(tab)
+        row_compare_actions.grid(row=8, column=0, sticky="ew", padx=12, pady=(0, 10))
+        ctk.CTkButton(
+            row_compare_actions,
+            text="Run OCR Compare",
+            width=160,
+            command=self.run_ocr_compare_benchmark,
+        ).pack(side=ctk.LEFT, padx=(10, 8), pady=10)
+        ctk.CTkButton(
+            row_compare_actions,
+            text="Open Output",
+            width=120,
+            command=self.open_ocr_compare_output_dir,
+        ).pack(side=ctk.LEFT, padx=(0, 8), pady=10)
+        ctk.CTkLabel(
+            row_compare_actions,
+            textvariable=self.ocr_compare_status_var,
+            anchor="w",
+        ).pack(side=ctk.LEFT, padx=(0, 10), pady=10)
+
     def _parse_import_files_text(self, raw_text: str) -> list[str]:
         parts = [part.strip().strip('"') for part in re.split(r"[;\n\r]+", raw_text) if part.strip()]
         return parts
@@ -1816,6 +1924,198 @@ class UnifiedScanApp(ctk.CTk):
         path = filedialog.askdirectory(title="Select output directory")
         if path:
             self.export_dir_var.set(path)
+
+    def choose_ocr_compare_pdf_path(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select benchmark PDF",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+        )
+        if path:
+            self.ocr_compare_pdf_path_var.set(path)
+
+    def choose_ocr_compare_output_dir(self) -> None:
+        path = filedialog.askdirectory(title="Select OCR compare output directory")
+        if path:
+            self.ocr_compare_output_dir_var.set(path)
+
+    def open_ocr_compare_output_dir(self) -> None:
+        raw = self.ocr_compare_output_dir_var.get().strip()
+        if not raw:
+            self._set_status("OCR compare output directory is empty.")
+            return
+        path = Path(raw)
+        if not path.exists():
+            self._set_status(f"OCR compare output directory does not exist: {path}")
+            return
+        try:
+            subprocess.run(["explorer", str(path)], check=False)
+        except Exception as exc:
+            messagebox.showerror("Open Output Error", str(exc))
+
+    def _pdf_page_count(self, pdf_path: Path) -> int:
+        import fitz  # type: ignore
+
+        doc = fitz.open(str(pdf_path))
+        try:
+            return int(doc.page_count)
+        finally:
+            doc.close()
+
+    def _validate_page_numbers(self, pages: tuple[int, ...], *, page_count: int) -> tuple[int, ...]:
+        for page in pages:
+            if page > page_count:
+                raise RuntimeError(
+                    f"Invalid page number {page}. PDF has {page_count} pages (valid range: 1..{page_count})."
+                )
+        return pages
+
+    def run_ocr_compare_benchmark(self) -> None:
+        try:
+            pdf_raw = self.ocr_compare_pdf_path_var.get().strip()
+            if not pdf_raw:
+                chosen = filedialog.askopenfilename(
+                    title="Select benchmark PDF",
+                    filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+                )
+                if not chosen:
+                    return
+                pdf_raw = chosen
+                self.ocr_compare_pdf_path_var.set(chosen)
+            pdf_path = Path(pdf_raw)
+            if not pdf_path.exists() or not pdf_path.is_file():
+                raise RuntimeError(f"Benchmark PDF not found: {pdf_path}")
+            if pdf_path.suffix.lower() != ".pdf":
+                raise RuntimeError("Benchmark input must be a PDF file.")
+
+            output_raw = self.ocr_compare_output_dir_var.get().strip()
+            if not output_raw:
+                chosen_out = filedialog.askdirectory(title="Select OCR compare output directory")
+                if not chosen_out:
+                    return
+                output_raw = chosen_out
+                self.ocr_compare_output_dir_var.set(chosen_out)
+            output_root = Path(output_raw)
+            output_root.mkdir(parents=True, exist_ok=True)
+
+            dpi = int(self.ocr_compare_dpi_var.get())
+            if dpi < 72:
+                raise RuntimeError("OCR compare DPI must be >= 72.")
+            lang = self.ocr_compare_lang_var.get().strip() or "eng"
+            full_run = bool(self.ocr_compare_full_run_var.get())
+            selected_pages = parse_page_numbers_text(self.ocr_compare_pages_var.get().strip())
+
+            page_count = self._pdf_page_count(pdf_path)
+            all_pages = tuple(range(1, page_count + 1))
+            if full_run:
+                benchmark_pages = all_pages
+            else:
+                if not selected_pages:
+                    raise RuntimeError("Specify compare pages (for example 3,9) or enable full run.")
+                benchmark_pages = self._validate_page_numbers(selected_pages, page_count=page_count)
+
+            if selected_pages:
+                compare_pages = self._validate_page_numbers(selected_pages, page_count=page_count)
+            else:
+                compare_pages = benchmark_pages
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_dir = output_root / f"run_{timestamp}"
+            raw_dir = run_dir / "raw_benchmark"
+            canonical_dir = run_dir / "canonical_compare"
+
+            self.ocr_compare_status_var.set("Running...")
+            self._set_status(
+                f"OCR compare queued: {pdf_path.name} | full_run={full_run} | compare_pages={list(compare_pages)}"
+            )
+
+            def worker(emit, _is_cancelled):
+                emit(stage="OCR compare", current="Preparing run folders", progress=2)
+                run_dir.mkdir(parents=True, exist_ok=True)
+                raw_dir.mkdir(parents=True, exist_ok=True)
+                canonical_dir.mkdir(parents=True, exist_ok=True)
+
+                emit(
+                    stage="OCR raw benchmark",
+                    current=f"{len(benchmark_pages)} page(s), all engines",
+                    progress=8,
+                )
+                raw_results = run_ocr_benchmark(
+                    pdf_path=pdf_path,
+                    output_dir=raw_dir,
+                    page_numbers=benchmark_pages,
+                    dpi=dpi,
+                    lang=lang,
+                )
+
+                emit(
+                    stage="OCR canonical compare",
+                    current=f"{len(compare_pages)} page(s), all engines",
+                    progress=55,
+                )
+                canonical_results = run_ocr_canonical_package(
+                    pdf_path=pdf_path,
+                    output_dir=canonical_dir,
+                    page_numbers=compare_pages,
+                    dpi=dpi,
+                    lang=lang,
+                )
+
+                summary_path = run_dir / "gui_ocr_compare_summary.md"
+                summary_lines = [
+                    "# GUI OCR Compare Summary",
+                    "",
+                    f"- PDF: `{pdf_path}`",
+                    f"- Full run: `{full_run}`",
+                    f"- Raw benchmark pages: `{list(benchmark_pages)}`",
+                    f"- Canonical compare pages: `{list(compare_pages)}`",
+                    f"- DPI: `{dpi}`",
+                    f"- Lang: `{lang}`",
+                    "",
+                    "## Raw benchmark",
+                    "```text",
+                    summarize_ocr_benchmark(raw_results),
+                    "```",
+                    "",
+                    "## Canonical compare",
+                    "```text",
+                    summarize_ocr_canonical_package(canonical_results),
+                    "```",
+                    "",
+                    f"- Raw artifacts: `{raw_dir}`",
+                    f"- Canonical artifacts: `{canonical_dir}`",
+                ]
+                summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
+                emit(stage="OCR compare", current="Finalizing", progress=100)
+                return {
+                    "run_dir": run_dir,
+                    "summary_path": summary_path,
+                    "raw_results": raw_results,
+                    "canonical_results": canonical_results,
+                }
+
+            def on_done(payload):
+                run_path = Path(payload["run_dir"])
+                self.ocr_compare_output_dir_var.set(str(run_path))
+                self.ocr_compare_status_var.set(f"Done: {run_path.name}")
+                self._set_status(f"OCR compare finished. Output: {run_path}")
+                raw_ok = sum(1 for item in payload["raw_results"] if item.status == "ok")
+                canon_ok = sum(1 for item in payload["canonical_results"] if item.status == "ok")
+                messagebox.showinfo(
+                    "OCR Compare Completed",
+                    (
+                        f"Run folder:\n{run_path}\n\n"
+                        f"Raw benchmark ok: {raw_ok}/{len(payload['raw_results'])}\n"
+                        f"Canonical compare ok: {canon_ok}/{len(payload['canonical_results'])}\n\n"
+                        f"Summary:\n{payload['summary_path']}"
+                    ),
+                )
+
+            if not self._start_background_job("OCR Compare", worker, on_done):
+                self.ocr_compare_status_var.set("Busy")
+        except Exception as exc:
+            self.ocr_compare_status_var.set("Failed")
+            messagebox.showerror("OCR Compare Error", str(exc))
+            self._set_status("OCR compare failed")
 
     def _entries_for_export(self):
         if self.export_scope_var.get() == "Selected pages":
