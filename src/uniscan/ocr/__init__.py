@@ -7,6 +7,7 @@ from .canonical import (
 )
 from .benchmark import (
     OcrBenchmarkResult,
+    resolve_pdf_page_indices,
     run_ocr_benchmark,
     sample_pdf_page_indices,
     summarize_ocr_benchmark,
@@ -45,6 +46,7 @@ __all__ = [
     "image_paths_to_searchable_pdf",
     "run_ocr_canonical_package",
     "run_ocr_benchmark",
+    "resolve_pdf_page_indices",
     "sample_pdf_page_indices",
     "summarize_ocr_canonical_package",
     "summarize_ocr_benchmark",

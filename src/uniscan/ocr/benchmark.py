@@ -82,6 +82,40 @@ def sample_pdf_page_indices(page_count: int, *, sample_size: int = 5) -> list[in
     return indices
 
 
+def resolve_pdf_page_indices(
+    page_count: int,
+    *,
+    sample_size: int = 5,
+    page_numbers: Sequence[int] | None = None,
+) -> list[int]:
+    """Resolve 0-based page indices either from explicit page numbers or sampled spread."""
+    if page_count <= 0:
+        return []
+
+    if page_numbers is not None:
+        resolved: list[int] = []
+        seen: set[int] = set()
+        for raw_page in page_numbers:
+            page = int(raw_page)
+            if page < 1:
+                raise ValueError(f"Invalid page number: {page}. Page numbers must be >= 1.")
+            page_index = page - 1
+            if page_index >= page_count:
+                raise ValueError(
+                    f"Invalid page number: {page}. PDF has {page_count} pages (valid range is 1..{page_count})."
+                )
+            if page_index in seen:
+                continue
+            seen.add(page_index)
+            resolved.append(page_index)
+
+        if not resolved:
+            raise ValueError("No valid page numbers were provided.")
+        return resolved
+
+    return sample_pdf_page_indices(page_count, sample_size=sample_size)
+
+
 def _pdf_page_count(pdf_path: Path) -> int:
     try:
         import fitz  # type: ignore
@@ -499,6 +533,7 @@ def run_ocr_benchmark(
     output_dir: Path,
     engines: Sequence[str] | None = None,
     sample_size: int = 5,
+    page_numbers: Sequence[int] | None = None,
     dpi: int = 160,
     lang: str = "eng",
     import_module=None,
@@ -511,7 +546,11 @@ def run_ocr_benchmark(
     resolved_output.mkdir(parents=True, exist_ok=True)
 
     page_count = _pdf_page_count(resolved_pdf)
-    sample_pages = sample_pdf_page_indices(page_count, sample_size=sample_size)
+    sample_pages = resolve_pdf_page_indices(
+        page_count,
+        sample_size=sample_size,
+        page_numbers=page_numbers,
+    )
     if not sample_pages:
         raise ValueError("No PDF pages available for OCR benchmark.")
 

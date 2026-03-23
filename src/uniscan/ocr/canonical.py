@@ -15,7 +15,7 @@ from typing import Sequence
 
 from uniscan.io import imwrite_unicode, render_pdf_page_indices
 
-from .benchmark import _run_extraction_engine, sample_pdf_page_indices
+from .benchmark import _run_extraction_engine, resolve_pdf_page_indices
 from .engine import (
     OCR_ENGINE_LABELS,
     OCR_ENGINE_VALUES,
@@ -149,6 +149,7 @@ def run_ocr_canonical_package(
     output_dir: Path,
     engines: Sequence[str] | None = None,
     sample_size: int = 5,
+    page_numbers: Sequence[int] | None = None,
     dpi: int = 160,
     lang: str = "eng",
 ) -> list[CanonicalOcrResult]:
@@ -165,7 +166,11 @@ def run_ocr_canonical_package(
     searchable_root.mkdir(parents=True, exist_ok=True)
 
     page_count = _pdf_page_count(resolved_pdf)
-    sample_pages = sample_pdf_page_indices(page_count, sample_size=sample_size)
+    sample_pages = resolve_pdf_page_indices(
+        page_count,
+        sample_size=sample_size,
+        page_numbers=page_numbers,
+    )
     if not sample_pages:
         raise ValueError("No PDF pages available for canonical OCR packaging.")
 
@@ -277,4 +282,3 @@ def summarize_ocr_canonical_package(results: Sequence[CanonicalOcrResult]) -> st
                 f"{row.engine}: error {row.elapsed_seconds:.2f}s {row.error or 'unknown error'}"
             )
     return "\n".join(lines)
-

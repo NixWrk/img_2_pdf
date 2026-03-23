@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 from uniscan.ocr import (
@@ -13,6 +14,27 @@ from uniscan.ocr import (
 )
 from uniscan.tools import run_crop_benchmark, summarize_benchmark_results
 from uniscan.ui import run_app
+
+
+def _parse_page_numbers(raw_values: list[str] | None) -> tuple[int, ...] | None:
+    if not raw_values:
+        return None
+    tokens: list[str] = []
+    for raw in raw_values:
+        tokens.extend(part for part in re.split(r"[\s,;]+", raw.strip()) if part)
+    if not tokens:
+        return None
+
+    pages: list[int] = []
+    for token in tokens:
+        try:
+            page = int(token)
+        except ValueError as exc:
+            raise ValueError(f"Invalid page value: {token}") from exc
+        if page < 1:
+            raise ValueError(f"Invalid page value: {page}. Page numbers must be >= 1.")
+        pages.append(page)
+    return tuple(pages)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -71,6 +93,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Total number of sampled pages (evenly distributed from first to last).",
     )
     ocr_benchmark_parser.add_argument(
+        "--pages",
+        nargs="+",
+        default=None,
+        help="Explicit 1-based pages (for example: --pages 3,9). Overrides --sample-size.",
+    )
+    ocr_benchmark_parser.add_argument(
         "--dpi",
         type=int,
         default=160,
@@ -106,6 +134,12 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=5,
         help="Total number of sampled pages (evenly distributed from first to last).",
+    )
+    ocr_canonical_parser.add_argument(
+        "--pages",
+        nargs="+",
+        default=None,
+        help="Explicit 1-based pages (for example: --pages 3,9). Overrides --sample-size.",
     )
     ocr_canonical_parser.add_argument(
         "--dpi",
@@ -148,11 +182,16 @@ def main(argv: list[str] | None = None) -> int:
         print(summarize_benchmark_results(results))
         return 0 if any(result.output_pdf is not None for result in results) else 1
     if args.command == "benchmark-ocr":
+        try:
+            page_numbers = _parse_page_numbers(args.pages)
+        except ValueError as exc:
+            parser.error(str(exc))
         results = run_ocr_benchmark(
             pdf_path=args.pdf,
             output_dir=args.output,
             engines=tuple(args.engines) if args.engines else None,
             sample_size=args.sample_size,
+            page_numbers=page_numbers,
             dpi=args.dpi,
             lang=args.lang,
         )
@@ -161,11 +200,16 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
     if args.command == "benchmark-ocr-canonical":
+        try:
+            page_numbers = _parse_page_numbers(args.pages)
+        except ValueError as exc:
+            parser.error(str(exc))
         results = run_ocr_canonical_package(
             pdf_path=args.pdf,
             output_dir=args.output,
             engines=tuple(args.engines) if args.engines else None,
             sample_size=args.sample_size,
+            page_numbers=page_numbers,
             dpi=args.dpi,
             lang=args.lang,
         )

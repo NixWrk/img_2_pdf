@@ -4,6 +4,7 @@ param(
     [string]$PdfPath = "J:\Imaging Edge Mobile\Imaging Edge Mobile_paddleocr_uvdoc.pdf",
     [string]$OutputRoot = "",
     [int]$SampleSize = 1,
+    [string]$Pages = "",
     [int]$Dpi = 160,
     [string[]]$Engines = @(),
     [string]$BootstrapPython = "py",
@@ -310,6 +311,9 @@ foreach ($engine in $engineMatrix) {
             "--engines", $engineName,
             "--strict"
         )
+        if (-not [string]::IsNullOrWhiteSpace($Pages)) {
+            $benchArgs += @("--pages", $Pages)
+        }
         $benchExit = Invoke-Logged -Exe $venvPython -ArgList $benchArgs -LogPath $logPath -StepName "Run benchmark" -AllowFailure
         $entry.benchmark_exit_code = $benchExit
 

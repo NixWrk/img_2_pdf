@@ -164,6 +164,7 @@ Environment strategy and conflict notes:
 powershell -ExecutionPolicy Bypass -File .\scripts\benchmark_ocr_matrix.ps1 `
   -PdfPath "J:\Imaging Edge Mobile\Imaging Edge Mobile_paddleocr_uvdoc.pdf" `
   -OutputRoot ".\artifacts\ocr_latest_matrix" `
+  -Pages "3,9" `
   -SampleSize 1 `
   -Dpi 160 `
   -Recreate
@@ -175,10 +176,13 @@ Equal-condition comparison package for all OCR engines (canonical per-page text 
 .\.venv\Scripts\python.exe -m uniscan benchmark-ocr-canonical `
   --pdf "J:\Imaging Edge Mobile\Imaging Edge Mobile_paddleocr_uvdoc.pdf" `
   --output ".\outputs\ocr_canonical_full_run" `
+  --pages 3,9 `
   --sample-size 10 `
   --dpi 200 `
   --strict
 ```
+
+`--pages` sets exact 1-based pages and overrides `--sample-size` for both `benchmark-ocr` and `benchmark-ocr-canonical`.
 
 Build a readable comparison bundle (report + copied results + per-engine extracted text) in `.\outputs`:
 
