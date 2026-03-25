@@ -56,6 +56,57 @@ OCRMYPDF_PLUGIN_CANDIDATES: dict[str, tuple[str, ...]] = {
 }
 
 
+def _find_ghostscript_executable(which_fn=shutil.which) -> str | None:
+    """Return Ghostscript executable path when available."""
+    for candidate in ("gs", "gswin64c", "gswin32c"):
+        found = which_fn(candidate) or which_fn(f"{candidate}.exe")
+        if found:
+            return str(found)
+
+    candidate_roots = (
+        Path("C:/Program Files/gs"),
+        Path("C:/Program Files (x86)/gs"),
+        Path("C:/PC/GPL_Ghostscript"),
+    )
+    for root in candidate_roots:
+        if not root.exists():
+            continue
+        patterns = ("gs*/bin/gswin64c.exe", "gs*/bin/gswin32c.exe", "*/bin/gswin64c.exe", "*/bin/gswin32c.exe")
+        for pattern in patterns:
+            matches = sorted(root.glob(pattern), reverse=True)
+            if matches:
+                return str(matches[0])
+    return None
+
+
+def _run_cmd_with_optional_env(run_cmd, command: list[str], env: dict[str, str] | None):
+    kwargs = {
+        "capture_output": True,
+        "text": True,
+    }
+    if env is not None:
+        kwargs["env"] = env
+    try:
+        return run_cmd(command, **kwargs)
+    except TypeError:
+        kwargs.pop("env", None)
+        return run_cmd(command, **kwargs)
+
+
+def _ocrmypdf_env_with_ghostscript(which_fn=shutil.which) -> dict[str, str] | None:
+    gs_exe = _find_ghostscript_executable(which_fn=which_fn)
+    if not gs_exe:
+        return None
+
+    env = os.environ.copy()
+    gs_dir = str(Path(gs_exe).parent)
+    current_path = env.get("PATH", "")
+    if gs_dir.lower() not in current_path.lower():
+        env["PATH"] = gs_dir + os.pathsep + current_path
+    env.setdefault("GS_PROG", gs_exe)
+    return env
+
+
 @dataclass(slots=True, frozen=True)
 class OcrDependencyStatus:
     pytesseract_available: bool
@@ -103,15 +154,12 @@ def _has_command(name: str, which_fn) -> bool:
 
 
 def _is_valid_ocrmypdf_plugin_module(name: str, import_module) -> bool:
-    """Validate that module looks like an OCRmyPDF plugin module."""
+    """Validate that plugin module can be imported."""
     try:
-        module = import_module(name)
+        import_module(name)
     except Exception:
         return False
-
-    # OCRmyPDF plugins expose hook functions from the module namespace.
-    hook_candidates = ("get_ocr_engine", "add_options", "check_options")
-    return any(hasattr(module, hook_name) for hook_name in hook_candidates)
+    return True
 
 
 def _ocrmypdf_plugin_candidates_for_engine(engine: str) -> tuple[str, ...]:
@@ -350,19 +398,20 @@ def _image_paths_to_searchable_pdf_ocrmypdf(
     with tempfile.TemporaryDirectory(prefix="uniscan_ocrmypdf_") as tmp:
         tmp_pdf = Path(tmp) / "input.pdf"
         build_pdf_fn([Path(p) for p in image_paths], out_pdf=tmp_pdf, dpi=300)
-        proc = run_cmd(
-            [
-                str(ocrmypdf_cmd),
-                "--force-ocr",
-                "--optimize",
-                "0",
-                "--language",
-                lang,
-                str(tmp_pdf),
-                str(out_pdf),
-            ],
-            capture_output=True,
-            text=True,
+        cmd = [
+            str(ocrmypdf_cmd),
+            "--force-ocr",
+            "--optimize",
+            "0",
+            "--language",
+            lang,
+            str(tmp_pdf),
+            str(out_pdf),
+        ]
+        proc = _run_cmd_with_optional_env(
+            run_cmd,
+            cmd,
+            _ocrmypdf_env_with_ghostscript(which_fn=which_fn),
         )
         if int(getattr(proc, "returncode", 1)) != 0:
             stderr = (getattr(proc, "stderr", "") or "").strip()
@@ -442,21 +491,22 @@ def _image_paths_to_searchable_pdf_ocrmypdf_plugin(
     with tempfile.TemporaryDirectory(prefix="uniscan_ocrmypdf_plugin_") as tmp:
         tmp_pdf = Path(tmp) / "input.pdf"
         build_pdf_fn([Path(p) for p in image_paths], out_pdf=tmp_pdf, dpi=300)
-        proc = run_cmd(
-            [
-                str(ocrmypdf_cmd),
-                "--plugin",
-                plugin_module,
-                "--force-ocr",
-                "--optimize",
-                "0",
-                "--language",
-                lang,
-                str(tmp_pdf),
-                str(out_pdf),
-            ],
-            capture_output=True,
-            text=True,
+        cmd = [
+            str(ocrmypdf_cmd),
+            "--plugin",
+            plugin_module,
+            "--force-ocr",
+            "--optimize",
+            "0",
+            "--language",
+            lang,
+            str(tmp_pdf),
+            str(out_pdf),
+        ]
+        proc = _run_cmd_with_optional_env(
+            run_cmd,
+            cmd,
+            _ocrmypdf_env_with_ghostscript(which_fn=which_fn),
         )
         if int(getattr(proc, "returncode", 1)) != 0:
             stderr = (getattr(proc, "stderr", "") or "").strip()
