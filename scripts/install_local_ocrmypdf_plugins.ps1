@@ -43,6 +43,9 @@ $sourceRoots | ForEach-Object { Write-Host " - $_" }
 
 $pluginSpecs = @(
     @{
+        name = "ocrmypdf-surya-main"
+    },
+    @{
         name = "OCRmyPDF-PaddleOCR-main"
     },
     @{
