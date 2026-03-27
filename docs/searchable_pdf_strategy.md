@@ -11,6 +11,19 @@ This file describes how each OCR engine in UniScan can produce searchable PDFs.
 5. `surya`
 6. `mineru`
 7. `chandra`
+8. `olmocr`
+
+## Benchmark Decision (2026-03-27)
+
+1. Excluded from target stack for current document set:
+   - `pytesseract`
+   - `ocrmypdf` (Tesseract backend)
+   - `pymupdf` (Tesseract OCR mode)
+2. Active extraction engines for current benchmark focus:
+   - `paddleocr`
+   - `surya`
+   - `chandra`
+   - `olmocr`
 
 ## Built-in Searchable PDF Paths (already wired in code)
 
@@ -61,6 +74,11 @@ In code: `src/uniscan/ocr/engine.py` (`_image_paths_to_searchable_pdf_ocrmypdf_p
      - `OCRmypdf_plugins/ocrmypdf-chandra-main` (module: `ocrmypdf_chandra`)
    - Plugin module candidate in UniScan:
      - `ocrmypdf_chandra`
+5. `olmocr`
+   - Ready OCRmyPDF plugin package: no.
+   - Current output mode in UniScan benchmark: markdown/text extraction (`.txt` artifact).
+   - Stable runtime path on this Windows host: docker backend (`chatdoc/ocrflux:latest`) from dedicated `olmocr` venv.
+   - Next integration target: bridge `olmocr` text/coordinates into searchable PDF layer.
 
 ## Overriding plugin module names
 
@@ -87,6 +105,7 @@ Based on local plugin repositories currently present in this workspace:
 3. Confirmed local bridge script: Surya + OCRmyPDF internals (`Ocrmypdf+surya`).
 4. Confirmed: Chandra via OCRmyPDF plugin (`ocrmypdf-chandra-main`).
 5. Not confirmed as ready package in local set: MinerU plugin.
+6. Not available yet: olmOCR plugin for OCRmyPDF.
 
 This means:
 
@@ -94,6 +113,7 @@ This means:
 2. For `surya`, UniScan can use `ocrmypdf_surya` after local plugin installation.
 3. For `chandra`, UniScan can use `ocrmypdf_chandra` after local plugin installation.
 4. For `mineru`, UniScan has plugin hooks and module detection, but actual plugin package must be installed/provided.
+5. For `olmocr`, current path is text/markdown OCR only; searchable-PDF bridge is a separate implementation task.
 
 ## Plugin source safety rule
 

@@ -12,6 +12,7 @@ from uniscan.export import export_pages_as_pdf
 from uniscan.ocr import (
     OCR_ENGINE_CHANDRA,
     OCR_ENGINE_MINERU,
+    OCR_ENGINE_OLMOCR,
     OCR_ENGINE_OCRMYPDF,
     OCR_ENGINE_PADDLEOCR,
     OCR_ENGINE_PYMUPDF,
@@ -31,6 +32,7 @@ ALL_ENGINES = (
     OCR_ENGINE_SURYA,
     OCR_ENGINE_MINERU,
     OCR_ENGINE_CHANDRA,
+    OCR_ENGINE_OLMOCR,
 )
 SEARCHABLE_ENGINES = (
     OCR_ENGINE_PYTESSERACT,
@@ -42,6 +44,7 @@ EXTRACTION_ENGINES = (
     OCR_ENGINE_SURYA,
     OCR_ENGINE_MINERU,
     OCR_ENGINE_CHANDRA,
+    OCR_ENGINE_OLMOCR,
 )
 
 
@@ -111,6 +114,10 @@ def test_run_ocr_benchmark_writes_report_and_artifacts(tmp_path, monkeypatch) ->
         assert work_dir.name == "chandra_work"
         return f"chandra:{lang}:{len(image_paths)}", 15
 
+    def fake_olmocr(image_paths, *, lang, work_dir, which_fn, run_cmd):
+        assert work_dir.name == "olmocr_work"
+        return f"olmocr:{lang}:{len(image_paths)}", 16
+
     monkeypatch.setattr("uniscan.ocr.benchmark.detect_ocr_engine_status", fake_status)
     monkeypatch.setattr("uniscan.ocr.benchmark.image_paths_to_searchable_pdf", fake_searchable_pdf)
     monkeypatch.setattr("uniscan.ocr.benchmark._extract_pdf_text_chars", fake_extract_chars)
@@ -118,6 +125,7 @@ def test_run_ocr_benchmark_writes_report_and_artifacts(tmp_path, monkeypatch) ->
     monkeypatch.setattr("uniscan.ocr.benchmark._run_surya_direct", fake_surya)
     monkeypatch.setattr("uniscan.ocr.benchmark._run_mineru_direct", fake_mineru)
     monkeypatch.setattr("uniscan.ocr.benchmark._run_chandra_direct", fake_chandra)
+    monkeypatch.setattr("uniscan.ocr.benchmark._run_olmocr_direct", fake_olmocr)
 
     results = run_ocr_benchmark(
         pdf_path=pdf_path,
@@ -134,7 +142,7 @@ def test_run_ocr_benchmark_writes_report_and_artifacts(tmp_path, monkeypatch) ->
     for result in results:
         assert result.sample_pages == [1, 3]
     assert {result.text_chars for result in results if result.engine in SEARCHABLE_ENGINES} == {321}
-    assert {result.text_chars for result in results if result.engine in EXTRACTION_ENGINES} == {12, 13, 14, 15}
+    assert {result.text_chars for result in results if result.engine in EXTRACTION_ENGINES} == {12, 13, 14, 15, 16}
 
     report_path = output_dir / "fixture_ocr_benchmark.json"
     assert report_path.exists()

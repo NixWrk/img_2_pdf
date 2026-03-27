@@ -15,6 +15,7 @@ from .benchmark import (
 from .engine import (
     OCR_ENGINE_LABELS,
     OCR_ENGINE_CHANDRA,
+    OCR_ENGINE_OLMOCR,
     OCR_ENGINE_MINERU,
     OCR_ENGINE_OCRMYPDF,
     OCR_ENGINE_PADDLEOCR,
@@ -38,6 +39,7 @@ from .preprocessing import (
 __all__ = [
     "OCR_ENGINE_LABELS",
     "OCR_ENGINE_CHANDRA",
+    "OCR_ENGINE_OLMOCR",
     "OCR_ENGINE_MINERU",
     "OCR_ENGINE_OCRMYPDF",
     "OCR_ENGINE_PADDLEOCR",

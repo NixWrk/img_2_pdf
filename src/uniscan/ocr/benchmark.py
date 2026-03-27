@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from uniscan.io import imwrite_unicode, render_pdf_page_indices
 from .engine import (
     OCR_ENGINE_LABELS,
     OCR_ENGINE_CHANDRA,
+    OCR_ENGINE_OLMOCR,
     OCR_ENGINE_MINERU,
     OCR_ENGINE_PADDLEOCR,
     OCR_ENGINE_SURYA,
@@ -720,6 +722,241 @@ def _run_chandra_direct(
         raise
 
 
+def _collect_olmocr_workspace_text(workspace: Path) -> tuple[str, int]:
+    markdown_candidates: list[Path] = []
+    markdown_dir = workspace / "markdown"
+    if markdown_dir.exists():
+        markdown_candidates.extend(sorted(markdown_dir.rglob("*.md")))
+    if not markdown_candidates:
+        markdown_candidates.extend(sorted(workspace.rglob("*.md")))
+
+    text_parts: list[str] = []
+    for md_path in markdown_candidates:
+        try:
+            raw = md_path.read_text(encoding="utf-8", errors="ignore").strip()
+        except Exception:
+            continue
+        cleaned = _strip_markdown(raw)
+        if cleaned:
+            text_parts.append(cleaned)
+
+    if not text_parts:
+        # Fallback for formats that keep text only in Dolma-style JSONL.
+        for jsonl_path in sorted(workspace.rglob("*.jsonl")):
+            try:
+                lines = jsonl_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except Exception:
+                continue
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    continue
+                for key in (
+                    "text",
+                    "content",
+                    "document_text",
+                    "document_markdown",
+                    "natural_text",
+                    "markdown",
+                ):
+                    value = payload.get(key)
+                    if isinstance(value, str) and value.strip():
+                        text_parts.append(_strip_markdown(value.strip()))
+                for key in ("page_texts", "pages", "page_markdown", "page_text"):
+                    value = payload.get(key)
+                    for extracted in _collect_text_strings(value):
+                        cleaned = _strip_markdown(extracted.strip())
+                        if cleaned:
+                            text_parts.append(cleaned)
+
+    if not text_parts:
+        raise RuntimeError("olmOCR finished without markdown/text artifacts.")
+
+    text = "\n".join(part for part in text_parts if part and not part.isspace())
+    return text, len(text)
+
+
+def _render_images_to_pdf(image_paths: Sequence[Path], out_pdf: Path) -> None:
+    if len(image_paths) == 0:
+        raise ValueError("No images to render into PDF.")
+    try:
+        import fitz  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("olmOCR docker fallback requires PyMuPDF. Install with: pip install pymupdf") from exc
+
+    output_doc = fitz.open()
+    try:
+        for image_path in image_paths:
+            image_doc = fitz.open(str(image_path))
+            try:
+                image_pdf = fitz.open("pdf", image_doc.convert_to_pdf())
+                try:
+                    output_doc.insert_pdf(image_pdf)
+                finally:
+                    image_pdf.close()
+            finally:
+                image_doc.close()
+        output_doc.save(str(out_pdf))
+    finally:
+        output_doc.close()
+
+
+def _run_olmocr_docker(
+    image_paths: Sequence[Path],
+    *,
+    work_dir: Path,
+    which_fn=shutil.which,
+    run_cmd=subprocess.run,
+) -> tuple[str, int]:
+    docker_cmd = which_fn("docker") or which_fn("docker.exe")
+    if not docker_cmd:
+        raise RuntimeError("docker is not available in PATH for olmOCR docker fallback.")
+
+    docker_root = work_dir / "olmocr_docker"
+    data_dir = docker_root / "data"
+    work_root = docker_root / "work"
+    workspace_dir = work_root / "ws"
+    for directory in (data_dir, work_root):
+        directory.mkdir(parents=True, exist_ok=True)
+    if workspace_dir.exists():
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+
+    input_pdf = data_dir / "input.pdf"
+    _render_images_to_pdf(image_paths, input_pdf)
+
+    image = (os.environ.get("UNISCAN_OLMOCR_DOCKER_IMAGE") or "chatdoc/ocrflux:latest").strip()
+    gpu = (os.environ.get("UNISCAN_OLMOCR_DOCKER_GPU") or "all").strip()
+    model = (os.environ.get("UNISCAN_OLMOCR_DOCKER_MODEL") or "").strip()
+    workers = (os.environ.get("UNISCAN_OLMOCR_DOCKER_WORKERS") or "1").strip()
+    gpu_mem_util = (os.environ.get("UNISCAN_OLMOCR_DOCKER_GPU_MEM_UTIL") or "").strip()
+
+    cache_dir_raw = (os.environ.get("UNISCAN_OLMOCR_DOCKER_CACHE") or str(_REPO_ROOT / ".hf_cache_ocrflux")).strip()
+    cache_dir = Path(cache_dir_raw)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    mount_data = data_dir.resolve().as_posix()
+    mount_work = work_root.resolve().as_posix()
+    mount_cache = cache_dir.resolve().as_posix()
+
+    command: list[str] = [str(docker_cmd), "run", "--rm"]
+    if gpu and gpu.lower() != "none":
+        command.extend(["--gpus", gpu])
+    command.extend(
+        [
+            "-v",
+            f"{mount_data}:/data:ro",
+            "-v",
+            f"{mount_work}:/work",
+            "-v",
+            f"{mount_cache}:/root/.cache/huggingface",
+            image,
+            "/work/ws",
+            "--task",
+            "pdf2markdown",
+            "--data",
+            "/data/input.pdf",
+        ]
+    )
+    if workers:
+        command.extend(["--workers", workers])
+    if model:
+        command.extend(["--model", model])
+    if gpu_mem_util:
+        command.extend(["--gpu_memory_utilization", gpu_mem_util])
+
+    proc = run_cmd(command, capture_output=True, text=True)
+    if int(getattr(proc, "returncode", 1)) != 0:
+        stderr = (getattr(proc, "stderr", "") or "").strip()
+        stdout = (getattr(proc, "stdout", "") or "").strip()
+        details = stderr or stdout or "unknown docker olmOCR error"
+        raise RuntimeError(f"docker olmOCR failed: {details}")
+
+    if not workspace_dir.exists():
+        raise RuntimeError("docker olmOCR finished but did not create workspace.")
+
+    return _collect_olmocr_workspace_text(workspace_dir)
+
+
+def _run_olmocr_direct(
+    image_paths: Sequence[Path],
+    *,
+    lang: str,
+    work_dir: Path,
+    which_fn=shutil.which,
+    run_cmd=subprocess.run,
+) -> tuple[str, int]:
+    if len(image_paths) == 0:
+        raise ValueError("No images for olmOCR.")
+
+    backend = (os.environ.get("UNISCAN_OLMOCR_BACKEND") or "auto").strip().lower()
+    if backend not in {"auto", "local", "docker"}:
+        raise ValueError("UNISCAN_OLMOCR_BACKEND must be one of: auto, local, docker")
+
+    workspace = work_dir / "olmocr_workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    # olmOCR language selection is model-driven; keep API compatible with
+    # other engines by accepting `lang` but not forcing a language flag.
+    _ = lang
+
+    server = (os.environ.get("UNISCAN_OLMOCR_SERVER") or "").strip()
+    model = (os.environ.get("UNISCAN_OLMOCR_MODEL") or "").strip()
+    api_key = (os.environ.get("UNISCAN_OLMOCR_API_KEY") or "").strip()
+
+    base_args = [str(workspace), "--markdown", "--pdfs", *[str(path) for path in image_paths]]
+    if server:
+        base_args += ["--server", server]
+    if model:
+        base_args += ["--model", model]
+    if api_key:
+        base_args += ["--api_key", api_key]
+
+    errors: list[str] = []
+    if backend in {"auto", "local"}:
+        command_candidates: list[list[str]] = []
+        olmocr_cmd = which_fn("olmocr") or which_fn("olmocr.exe")
+        if olmocr_cmd:
+            command_candidates.append([str(olmocr_cmd), *base_args])
+        command_candidates.append([sys.executable, "-m", "olmocr.pipeline", *base_args])
+
+        if not command_candidates:
+            errors.append("local olmOCR command is not available in PATH.")
+        else:
+            for command in command_candidates:
+                command_env = dict(os.environ)
+                command_path = Path(command[0])
+                if command_path.exists():
+                    bin_dir = str(command_path.resolve().parent)
+                    current_path = command_env.get("PATH", "")
+                    command_env["PATH"] = f"{bin_dir}{os.pathsep}{current_path}" if current_path else bin_dir
+                proc = run_cmd(command, capture_output=True, text=True, env=command_env)
+                if int(getattr(proc, "returncode", 1)) == 0:
+                    return _collect_olmocr_workspace_text(workspace)
+                stderr = (getattr(proc, "stderr", "") or "").strip()
+                stdout = (getattr(proc, "stdout", "") or "").strip()
+                details = stderr or stdout or "unknown olmOCR error"
+                errors.append(f"{command[0]}: {details}")
+
+    if backend in {"auto", "docker"}:
+        try:
+            return _run_olmocr_docker(
+                image_paths,
+                work_dir=work_dir,
+                which_fn=which_fn,
+                run_cmd=run_cmd,
+            )
+        except Exception as exc:
+            errors.append(str(exc))
+
+    if not errors:
+        raise RuntimeError("olmOCR failed for unknown reason.")
+    raise RuntimeError("olmOCR failed: " + " | ".join(errors))
+
+
 def _run_extraction_engine(
     engine: str,
     image_paths: Sequence[Path],
@@ -749,6 +986,14 @@ def _run_extraction_engine(
         )
     if engine == OCR_ENGINE_CHANDRA:
         return _run_chandra_direct(
+            image_paths,
+            lang=lang,
+            work_dir=work_dir,
+            which_fn=which_fn,
+            run_cmd=run_cmd,
+        )
+    if engine == OCR_ENGINE_OLMOCR:
+        return _run_olmocr_direct(
             image_paths,
             lang=lang,
             work_dir=work_dir,

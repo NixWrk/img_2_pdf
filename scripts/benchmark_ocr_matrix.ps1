@@ -178,6 +178,13 @@ $engineMatrix = @(
         )
         # torch GPU installed separately via --index-url
         gpu_torch = $true
+    },
+    @{
+        name = "olmocr"
+        deps = @(
+            "olmocr",
+            "requests"
+        )
     }
 )
 
@@ -427,6 +434,10 @@ foreach ($engine in $engineMatrix) {
                 $versionPkgs += @("chandra-ocr", "requests")
                 break
             }
+            "olmocr" {
+                $versionPkgs += @("olmocr", "requests")
+                break
+            }
         }
         $versionPkgs = @($versionPkgs | Select-Object -Unique)
         $versionsPath = Join-Path $engineOutput "versions.txt"
@@ -451,6 +462,13 @@ foreach ($engine in $engineMatrix) {
             $env:PADDLE_PDX_USE_PIR_TRT = "false"
             $env:FLAGS_enable_new_ir_in_executor = "0"
             $env:FLAGS_enable_pir_in_executor = "0"
+        }
+        if ($engineName -eq "olmocr") {
+            # On Windows, local vLLM startup is fragile; use dockerized backend.
+            $env:UNISCAN_OLMOCR_BACKEND = "docker"
+            $env:UNISCAN_OLMOCR_DOCKER_IMAGE = "chatdoc/ocrflux:latest"
+            $env:UNISCAN_OLMOCR_DOCKER_WORKERS = "1"
+            $env:UNISCAN_OLMOCR_DOCKER_CACHE = (Join-Path $RepoRoot ".hf_cache_ocrflux")
         }
 
         $benchArgs = @(
@@ -509,6 +527,17 @@ foreach ($engine in $engineMatrix) {
     finally {
         $results += [pscustomobject]$entry
         $env:Path = $basePath
+        foreach ($name in @(
+            "UNISCAN_OLMOCR_BACKEND",
+            "UNISCAN_OLMOCR_DOCKER_IMAGE",
+            "UNISCAN_OLMOCR_DOCKER_WORKERS",
+            "UNISCAN_OLMOCR_DOCKER_CACHE",
+            "UNISCAN_OLMOCR_DOCKER_GPU",
+            "UNISCAN_OLMOCR_DOCKER_MODEL",
+            "UNISCAN_OLMOCR_DOCKER_GPU_MEM_UTIL"
+        )) {
+            Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+        }
     }
 }
 

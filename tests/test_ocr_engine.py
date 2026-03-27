@@ -5,6 +5,7 @@ import pytest
 from uniscan.ocr.engine import (
     OCR_ENGINE_LABELS,
     OCR_ENGINE_CHANDRA,
+    OCR_ENGINE_OLMOCR,
     OCR_ENGINE_MINERU,
     OCR_ENGINE_OCRMYPDF,
     OCR_ENGINE_PADDLEOCR,
@@ -64,6 +65,7 @@ def test_ocr_engine_registry_is_stable() -> None:
         OCR_ENGINE_SURYA,
         OCR_ENGINE_MINERU,
         OCR_ENGINE_CHANDRA,
+        OCR_ENGINE_OLMOCR,
     )
     assert SEARCHABLE_PDF_ENGINES == (
         OCR_ENGINE_PYTESSERACT,
@@ -83,6 +85,7 @@ def test_ocr_engine_registry_is_stable() -> None:
         (OCR_ENGINE_SURYA, False),
         (OCR_ENGINE_MINERU, False),
         (OCR_ENGINE_CHANDRA, False),
+        (OCR_ENGINE_OLMOCR, False),
     ],
 )
 def test_detect_ocr_engine_status_ready_matrix(engine_name: str, expected_searchable_pdf: bool) -> None:
@@ -103,6 +106,7 @@ def test_detect_ocr_engine_status_ready_matrix(engine_name: str, expected_search
                 "dill",
                 "omegaconf",
                 "chandra_ocr",
+                "olmocr",
             }
         ),
         which_fn=_which_factory({"tesseract", "ocrmypdf", "chandra"}),
@@ -122,6 +126,7 @@ def test_detect_ocr_engine_status_ready_matrix(engine_name: str, expected_search
         (OCR_ENGINE_SURYA, set(), set(), ["surya/marker"]),
         (OCR_ENGINE_MINERU, set(), set(), ["mineru(magic_pdf)"]),
         (OCR_ENGINE_CHANDRA, set(), set(), ["chandra-ocr(chandra)"]),
+        (OCR_ENGINE_OLMOCR, set(), set(), ["olmocr"]),
     ],
 )
 def test_detect_ocr_engine_status_missing_matrix(
@@ -192,7 +197,13 @@ def test_detect_ocr_engine_status_chandra_ready_from_cli_only() -> None:
 
 
 def test_image_paths_to_searchable_pdf_rejects_unwired_ocr_engines(tmp_path: Path) -> None:
-    for engine_name in (OCR_ENGINE_PADDLEOCR, OCR_ENGINE_SURYA, OCR_ENGINE_MINERU, OCR_ENGINE_CHANDRA):
+    for engine_name in (
+        OCR_ENGINE_PADDLEOCR,
+        OCR_ENGINE_SURYA,
+        OCR_ENGINE_MINERU,
+        OCR_ENGINE_CHANDRA,
+        OCR_ENGINE_OLMOCR,
+    ):
         try:
             image_paths_to_searchable_pdf(
                 [tmp_path / "page.png"],
@@ -204,7 +215,9 @@ def test_image_paths_to_searchable_pdf_rejects_unwired_ocr_engines(tmp_path: Pat
                     missing=[],
                     searchable_pdf=False,
                 ),
-                import_module=_importer_factory({"paddleocr", "surya", "marker", "mineru", "magic_pdf", "chandra_ocr"}),
+                import_module=_importer_factory(
+                    {"paddleocr", "surya", "marker", "mineru", "magic_pdf", "chandra_ocr", "olmocr"}
+                ),
                 which_fn=_which_factory({"tesseract", "ocrmypdf"}),
             )
         except NotImplementedError as exc:

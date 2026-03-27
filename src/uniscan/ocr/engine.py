@@ -21,6 +21,7 @@ OCR_ENGINE_PYMUPDF = "pymupdf"
 OCR_ENGINE_SURYA = "surya"
 OCR_ENGINE_MINERU = "mineru"
 OCR_ENGINE_CHANDRA = "chandra"
+OCR_ENGINE_OLMOCR = "olmocr"
 
 OCR_ENGINE_VALUES: tuple[str, ...] = (
     OCR_ENGINE_PYTESSERACT,
@@ -30,6 +31,7 @@ OCR_ENGINE_VALUES: tuple[str, ...] = (
     OCR_ENGINE_SURYA,
     OCR_ENGINE_MINERU,
     OCR_ENGINE_CHANDRA,
+    OCR_ENGINE_OLMOCR,
 )
 
 OCR_ENGINE_LABELS: dict[str, str] = {
@@ -40,6 +42,7 @@ OCR_ENGINE_LABELS: dict[str, str] = {
     OCR_ENGINE_SURYA: "Surya",
     OCR_ENGINE_MINERU: "MinerU",
     OCR_ENGINE_CHANDRA: "Chandra",
+    OCR_ENGINE_OLMOCR: "olmOCR",
 }
 
 SEARCHABLE_PDF_ENGINES: tuple[str, ...] = (
@@ -289,6 +292,17 @@ def detect_ocr_engine_status(
             ready=not missing,
             missing=missing,
             searchable_pdf=plugin_module is not None,
+        )
+
+    if engine == OCR_ENGINE_OLMOCR:
+        has_olmocr = _has_module("olmocr", import_module)
+        has_olmocr_cli = _has_command("olmocr", which_fn)
+        missing = [] if (has_olmocr or has_olmocr_cli) else ["olmocr"]
+        return OcrEngineStatus(
+            engine_name=engine,
+            ready=not missing,
+            missing=missing,
+            searchable_pdf=False,
         )
 
     has_chandra = _has_module("chandra_ocr", import_module) or _has_module("chandra", import_module)
