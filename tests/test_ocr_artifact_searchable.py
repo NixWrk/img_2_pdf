@@ -11,7 +11,9 @@ from uniscan.export import export_pages_as_pdf
 from uniscan.ocr.artifact_searchable import (
     _assign_lines_to_boxes,
     _build_searchable_pdf_from_text,
+    _estimate_page_split_weights,
     _parse_artifact_filename,
+    _split_lines_to_pages_by_weights,
     _split_text_to_pages,
     run_artifact_searchable_package,
 )
@@ -56,6 +58,28 @@ def test_split_text_to_pages_with_markers() -> None:
     )
     pages = _split_text_to_pages(text, 2)
     assert pages == ["Page one text", "Page two text"]
+
+
+def test_split_lines_to_pages_by_weights() -> None:
+    lines = [f"L{i}" for i in range(12)]
+    pages = _split_lines_to_pages_by_weights(lines, page_count=3, page_weights=[1.0, 5.0, 1.0])
+    counts = [len(page.splitlines()) if page else 0 for page in pages]
+    assert counts[1] > counts[0]
+    assert counts[1] > counts[2]
+    assert sum(counts) == 12
+
+
+def test_estimate_page_split_weights_clips_outliers() -> None:
+    weights = _estimate_page_split_weights(
+        [
+            [(0.0, 0.0, 1.0, 1.0)] * 10,
+            [(0.0, 0.0, 1.0, 1.0)] * 200,
+            [],
+        ]
+    )
+    assert len(weights) == 3
+    assert weights[1] < 200.0
+    assert weights[2] > 0.0
 
 
 def test_assign_lines_to_boxes_balances_lines() -> None:

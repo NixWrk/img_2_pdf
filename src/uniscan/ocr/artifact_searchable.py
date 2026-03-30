@@ -125,6 +125,79 @@ def _split_text_to_pages(text: str, page_count: int) -> list[str]:
     return pages
 
 
+def _split_lines_to_pages_by_weights(
+    lines: Sequence[str],
+    *,
+    page_count: int,
+    page_weights: Sequence[float] | None,
+) -> list[str]:
+    if page_count <= 0:
+        return []
+    if not lines:
+        return [""] * page_count
+
+    if page_weights is None or len(page_weights) != page_count:
+        weights = [1.0] * page_count
+    else:
+        weights = [max(float(value), 0.0) for value in page_weights]
+        if sum(weights) <= 0:
+            weights = [1.0] * page_count
+
+    total_weight = float(sum(weights))
+    total_lines = len(lines)
+    raw_counts = [(total_lines * weight / total_weight) for weight in weights]
+    counts = [int(math.floor(value)) for value in raw_counts]
+    used = sum(counts)
+    remainder = total_lines - used
+
+    if remainder > 0:
+        order = sorted(
+            range(page_count),
+            key=lambda idx: (
+                raw_counts[idx] - counts[idx],
+                raw_counts[idx],
+                -idx,
+            ),
+            reverse=True,
+        )
+        for idx in order[:remainder]:
+            counts[idx] += 1
+
+    pages: list[str] = []
+    cursor = 0
+    for count in counts:
+        chunk = list(lines[cursor : cursor + count])
+        cursor += count
+        pages.append("\n".join(chunk).strip())
+
+    if cursor < total_lines:
+        tail = "\n".join(lines[cursor:]).strip()
+        if pages:
+            pages[-1] = f"{pages[-1]}\n{tail}".strip() if pages[-1] else tail
+    if len(pages) < page_count:
+        pages.extend([""] * (page_count - len(pages)))
+    return pages[:page_count]
+
+
+def _estimate_page_split_weights(
+    page_line_boxes: Sequence[Sequence[tuple[float, float, float, float]]],
+) -> list[float]:
+    if not page_line_boxes:
+        return []
+
+    counts = [float(len(items)) for items in page_line_boxes]
+    positive = sorted(value for value in counts if value > 0)
+    if not positive:
+        return [1.0] * len(counts)
+
+    # Trim upper tail so one noisy page does not consume most text lines.
+    trim_count = max(1, int(len(positive) * 0.8))
+    trimmed = positive[:trim_count]
+    median = trimmed[len(trimmed) // 2]
+    high_clip = max(4.0, median * 2.5)
+    return [min(value, high_clip) if value > 0 else 0.1 for value in counts]
+
+
 def _extract_pdf_text(pdf_path: Path) -> str:
     from pypdf import PdfReader
 
@@ -522,14 +595,28 @@ def _build_searchable_pdf_from_text(
     layout_doc = fitz.open(str(source_pdf))
 
     page_count = len(reader.pages)
+    page_line_boxes: list[list[tuple[float, float, float, float]]] = []
+    for page_idx in range(page_count):
+        page_line_boxes.append(_estimate_page_line_bboxes(page=layout_doc[page_idx]))
+
     page_texts = _split_text_to_pages(text, page_count)
+    marker_pages_detected = bool(_PAGE_MARKER_RE.search(text)) or ("\f" in text)
+    if not marker_pages_detected:
+        all_lines = _split_page_text_lines(text)
+        page_weights = _estimate_page_split_weights(page_line_boxes)
+        page_texts = _split_lines_to_pages_by_weights(
+            all_lines,
+            page_count=page_count,
+            page_weights=page_weights,
+        )
+
     try:
         for page_idx, source_page in enumerate(reader.pages):
             page_text = page_texts[page_idx] if page_idx < len(page_texts) else ""
             if page_text.strip():
                 page_width = float(source_page.mediabox.width)
                 page_height = float(source_page.mediabox.height)
-                line_boxes = _estimate_page_line_bboxes(page=layout_doc[page_idx])
+                line_boxes = page_line_boxes[page_idx]
                 page_lines = _split_page_text_lines(page_text)
                 placements = _assign_lines_to_boxes(page_lines, line_boxes)
                 if not placements and page_lines:

@@ -56,3 +56,31 @@ Per-model time (seconds):
    - `chandra`: `19.14`
    - `olmocr`: `31.79`
    - `surya`: `9.74`
+
+## Page-Split/Placement Fix Rebuild (2026-03-30)
+
+Update:
+
+1. Added weighted page split when source TXT has no explicit page markers.
+2. Added robust line-box assignment to reduce text concentration in top page area.
+3. Reused existing TXT artifacts only (no OCR reruns).
+
+Command:
+
+```powershell
+$env:PYTHONPATH='d:\Git_Code\img_2_pdf\src'
+python -m uniscan build-searchable-from-artifacts `
+  --compare-dir "d:\Git_Code\img_2_pdf\artifacts\ocr_obs_gost_oldbook_20260327_165121\_compare_txt" `
+  --pdf-root "d:\Git_Code\PDF\PDFs" `
+  --output "d:\Git_Code\img_2_pdf\artifacts\searchable_pdf_from_txt_20260330_recheck_v3" `
+  --engines chandra surya olmocr `
+  --strict
+```
+
+Result:
+
+1. `ok`: 6
+2. `error`: 0
+3. Pages with non-empty extractable text layer:
+   - `ГОСТ` (`37 pages`): `chandra 37/37`, `olmocr 37/37`, `surya 37/37`
+   - `Старая книга` (`33 pages`): `chandra 33/33`, `olmocr 33/33`, `surya 33/33`
