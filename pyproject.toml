@@ -24,7 +24,8 @@ dependencies = [
 [project.optional-dependencies]
 ocr = [
   "ocrmypdf>=16.0",
-  "pypdf>=4.0"
+  "pypdf>=4.0",
+  "reportlab>=4.0"
 ]
 dev = [
   "pytest>=8.0",

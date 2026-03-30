@@ -65,7 +65,10 @@ def test_run_artifact_searchable_package_builds_pdfs(tmp_path: Path) -> None:
 
     _build_sample_pdf(pdf_root, "ГОСТ с плохим качеством скана", [30, 90])
     (compare_dir / "ГОСТ с плохим качеством скана__chandra.txt").write_text(
-        "Alpha line for page one.\nBeta line for page two.",
+        "Alpha line for page one.\n"
+        "\u041f\u0440\u0438\u043c\u0435\u0440 "
+        "\u0440\u0443\u0441\u0441\u043a\u043e\u0439 "
+        "\u0441\u0442\u0440\u043e\u043a\u0438.",
         encoding="utf-8",
     )
     (compare_dir / "ГОСТ с плохим качеством скана__surya.txt").write_text(
@@ -95,6 +98,8 @@ def test_run_artifact_searchable_package_builds_pdfs(tmp_path: Path) -> None:
         assert pdf_path.exists()
         extracted = _extract_pdf_text(pdf_path)
         assert extracted.strip()
+        if row.engine == "chandra":
+            assert any(0x0400 <= ord(ch) <= 0x04FF for ch in extracted)
 
     assert (output_dir / "artifact_searchable_summary.json").exists()
     assert (output_dir / "artifact_searchable_summary.csv").exists()
@@ -204,4 +209,3 @@ def test_cli_build_searchable_from_artifacts_strict_fails(monkeypatch, tmp_path:
     stdout = capsys.readouterr().out
     assert exit_code == 1
     assert "summary" in stdout
-

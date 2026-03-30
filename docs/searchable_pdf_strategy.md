@@ -149,6 +149,11 @@ Purpose:
 
 1. Build searchable PDF for `chandra`, `surya`, `olmocr` from existing `*.txt` artifacts.
 2. Do not rerun OCR models when reusable text artifacts already exist.
+3. Preserve Cyrillic search/select by embedding unicode text-layer font.
+
+Font override:
+
+1. `UNISCAN_TEXT_LAYER_FONT` - optional absolute path to `.ttf` used for invisible text layer.
 
 Reference run:
 

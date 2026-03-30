@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
 from dataclasses import asdict, dataclass
+from io import BytesIO
 from pathlib import Path
 from time import perf_counter
 from typing import Sequence
@@ -123,14 +125,163 @@ def _split_text_to_pages(text: str, page_count: int) -> list[str]:
 
 
 def _extract_pdf_text(pdf_path: Path) -> str:
-    import fitz  # type: ignore
+    from pypdf import PdfReader
 
-    doc = fitz.open(str(pdf_path))
+    reader = PdfReader(str(pdf_path))
+    parts = [(page.extract_text() or "") for page in reader.pages]
+    return "\n".join(part for part in parts if part.strip())
+
+
+def _resolve_text_layer_font_path() -> Path:
+    env_path = os.getenv("UNISCAN_TEXT_LAYER_FONT", "").strip()
+    candidates = [
+        env_path,
+        r"C:\Windows\Fonts\arial.ttf",
+        r"C:\Windows\Fonts\calibri.ttf",
+        r"C:\Windows\Fonts\tahoma.ttf",
+        r"C:\Windows\Fonts\verdana.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+    ]
+    for raw_path in candidates:
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if path.exists():
+            return path
+    raise FileNotFoundError(
+        "No unicode-capable TTF font found for searchable text layer. "
+        "Set UNISCAN_TEXT_LAYER_FONT to a valid .ttf path."
+    )
+
+
+def _register_overlay_font(font_path: Path) -> str:
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    # Deterministic alias for one process.
+    font_alias = "UniscanTextLayerFont"
     try:
-        parts = [page.get_text("text") for page in doc]
-    finally:
-        doc.close()
-    return "\n".join(part for part in parts if part)
+        pdfmetrics.getFont(font_alias)
+    except KeyError:
+        pdfmetrics.registerFont(TTFont(font_alias, str(font_path)))
+    return font_alias
+
+
+def _wrap_line_to_width(
+    line: str,
+    *,
+    font_name: str,
+    font_size: float,
+    max_width: float,
+) -> list[str]:
+    from reportlab.pdfbase import pdfmetrics
+
+    if not line:
+        return [""]
+    if pdfmetrics.stringWidth(line, font_name, font_size) <= max_width:
+        return [line]
+
+    parts: list[str] = []
+    start = 0
+    while start < len(line):
+        low = start + 1
+        high = len(line)
+        best = start + 1
+        while low <= high:
+            mid = (low + high) // 2
+            chunk = line[start:mid]
+            width = pdfmetrics.stringWidth(chunk, font_name, font_size)
+            if width <= max_width:
+                best = mid
+                low = mid + 1
+            else:
+                high = mid - 1
+        if best <= start:
+            best = start + 1
+        parts.append(line[start:best])
+        start = best
+        while start < len(line) and line[start] == " ":
+            start += 1
+    return parts
+
+
+def _wrap_text_to_width(
+    text: str,
+    *,
+    font_name: str,
+    font_size: float,
+    max_width: float,
+) -> list[str]:
+    wrapped: list[str] = []
+    for source_line in text.splitlines():
+        wrapped.extend(
+            _wrap_line_to_width(
+                source_line,
+                font_name=font_name,
+                font_size=font_size,
+                max_width=max_width,
+            )
+        )
+    return wrapped or [""]
+
+
+def _build_overlay_page(
+    *,
+    page_width: float,
+    page_height: float,
+    text: str,
+    font_name: str,
+):
+    from pypdf import PdfReader
+    from reportlab.pdfgen import canvas
+
+    margin = 4.0
+    max_width = max(page_width - margin * 2.0, 1.0)
+    candidate_sizes = (8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.5, 1.2, 1.0, 0.8, 0.6, 0.4)
+
+    chosen_size = candidate_sizes[-1]
+    chosen_leading = max(chosen_size * 1.05, 0.4)
+    chosen_lines: list[str] = _wrap_text_to_width(
+        text,
+        font_name=font_name,
+        font_size=chosen_size,
+        max_width=max_width,
+    )
+
+    for font_size in candidate_sizes:
+        leading = max(font_size * 1.05, 0.4)
+        max_lines = max(int((page_height - margin * 2.0) / leading), 1)
+        lines = _wrap_text_to_width(
+            text,
+            font_name=font_name,
+            font_size=font_size,
+            max_width=max_width,
+        )
+        if len(lines) <= max_lines:
+            chosen_size = font_size
+            chosen_leading = leading
+            chosen_lines = lines
+            break
+        chosen_size = font_size
+        chosen_leading = leading
+        chosen_lines = lines[:max_lines]
+
+    packet = BytesIO()
+    pdf_canvas = canvas.Canvas(packet, pagesize=(page_width, page_height), pageCompression=1)
+    text_obj = pdf_canvas.beginText(margin, max(page_height - margin - chosen_size, margin))
+    text_obj.setFont(font_name, chosen_size)
+    text_obj.setLeading(chosen_leading)
+    text_obj.setTextRenderMode(3)  # invisible selectable text
+    for line in chosen_lines:
+        text_obj.textLine(line)
+    pdf_canvas.drawText(text_obj)
+    pdf_canvas.save()
+
+    packet.seek(0)
+    return PdfReader(packet).pages[0]
 
 
 def _build_searchable_pdf_from_text(
@@ -139,39 +290,33 @@ def _build_searchable_pdf_from_text(
     text: str,
     out_pdf: Path,
 ) -> tuple[int, int]:
-    import fitz  # type: ignore
+    from pypdf import PdfReader, PdfWriter
 
+    font_path = _resolve_text_layer_font_path()
+    font_name = _register_overlay_font(font_path)
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
-    doc = fitz.open(str(source_pdf))
-    try:
-        page_count = int(doc.page_count)
-        page_texts = _split_text_to_pages(text, page_count)
-        for page_idx in range(page_count):
-            page = doc[page_idx]
-            page_text = page_texts[page_idx] if page_idx < len(page_texts) else ""
-            if not page_text.strip():
-                continue
-            rect = page.rect
-            text_rect = fitz.Rect(
-                rect.x0 + 4.0,
-                rect.y0 + 4.0,
-                rect.x1 - 4.0,
-                rect.y1 - 4.0,
-            )
-            # Render mode 3 = invisible text; keeps scan visually unchanged.
-            page.insert_textbox(
-                text_rect,
-                page_text,
-                fontsize=1.0,
-                fontname="helv",
-                render_mode=3,
-                overlay=True,
-            )
+    reader = PdfReader(str(source_pdf))
+    writer = PdfWriter()
 
-        doc.save(str(out_pdf), garbage=3, deflate=True)
-        return page_count, len(text)
-    finally:
-        doc.close()
+    page_count = len(reader.pages)
+    page_texts = _split_text_to_pages(text, page_count)
+    for page_idx, source_page in enumerate(reader.pages):
+        page_text = page_texts[page_idx] if page_idx < len(page_texts) else ""
+        if page_text.strip():
+            page_width = float(source_page.mediabox.width)
+            page_height = float(source_page.mediabox.height)
+            overlay_page = _build_overlay_page(
+                page_width=page_width,
+                page_height=page_height,
+                text=page_text,
+                font_name=font_name,
+            )
+            source_page.merge_page(overlay_page)
+        writer.add_page(source_page)
+
+    with out_pdf.open("wb") as fh:
+        writer.write(fh)
+    return page_count, len(text)
 
 
 def run_artifact_searchable_package(
@@ -328,4 +473,3 @@ def summarize_artifact_searchable_package(results: Sequence[ArtifactSearchableRe
                 f"{row.error or 'unknown error'}"
             )
     return "\n".join(lines)
-
