@@ -138,3 +138,18 @@ This means:
 1. Original repos inside `OCRmypdf_plugins` are treated as read-only sources.
 2. Any modifications must be done only in copied folders with `_NIX` suffix.
 3. The installer script `scripts/install_local_ocrmypdf_plugins.ps1` creates/uses `_NIX` copies and installs plugins from those copies.
+
+## Implemented Artifact-First Path (2026-03-30)
+
+Implemented CLI command:
+
+1. `build-searchable-from-artifacts`
+
+Purpose:
+
+1. Build searchable PDF for `chandra`, `surya`, `olmocr` from existing `*.txt` artifacts.
+2. Do not rerun OCR models when reusable text artifacts already exist.
+
+Reference run:
+
+1. `docs/benchmark_runs/2026-03-30_searchable_from_txt_all_models.md`
