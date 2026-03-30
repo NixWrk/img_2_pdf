@@ -7,7 +7,10 @@ from .canonical import (
 )
 from .artifact_searchable import (
     ArtifactSearchableResult,
+    CompareTxtBuildResult,
+    build_compare_txt_from_benchmark,
     run_artifact_searchable_package,
+    summarize_compare_txt_build,
     summarize_artifact_searchable_package,
 )
 from .benchmark import (
@@ -53,6 +56,7 @@ __all__ = [
     "OCR_ENGINE_SURYA",
     "OCR_ENGINE_VALUES",
     "ArtifactSearchableResult",
+    "CompareTxtBuildResult",
     "CanonicalOcrResult",
     "OcrDependencyStatus",
     "OcrEngineStatus",
@@ -62,6 +66,7 @@ __all__ = [
     "apply_preprocessing",
     "detect_ocr_dependencies",
     "detect_ocr_engine_status",
+    "build_compare_txt_from_benchmark",
     "image_paths_to_searchable_pdf",
     "preprocess_image_file",
     "run_ocr_canonical_package",
@@ -71,5 +76,6 @@ __all__ = [
     "sample_pdf_page_indices",
     "summarize_ocr_canonical_package",
     "summarize_artifact_searchable_package",
+    "summarize_compare_txt_build",
     "summarize_ocr_benchmark",
 ]

@@ -7,9 +7,11 @@ import re
 from pathlib import Path
 
 from uniscan.ocr import (
+    build_compare_txt_from_benchmark,
     run_artifact_searchable_package,
     run_ocr_benchmark,
     run_ocr_canonical_package,
+    summarize_compare_txt_build,
     summarize_artifact_searchable_package,
     summarize_ocr_benchmark,
     summarize_ocr_canonical_package,
@@ -237,6 +239,34 @@ def main(argv: list[str] | None = None) -> int:
         help="Require explicit page markers in TXT artifacts ([SOURCE PAGE N] or form-feed).",
     )
 
+    compare_prepare_parser = subparsers.add_parser(
+        "prepare-compare-txt",
+        help="Build '<document>__<engine>.txt' compare folder from benchmark summary/artifacts.",
+    )
+    compare_prepare_parser.add_argument(
+        "--benchmark-root",
+        required=True,
+        type=Path,
+        help="Benchmark root folder containing summary.json and engine artifacts.",
+    )
+    compare_prepare_parser.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="Output compare_txt folder.",
+    )
+    compare_prepare_parser.add_argument(
+        "--engines",
+        nargs="+",
+        default=None,
+        help="Optional engine filter (for example: chandra surya olmocr).",
+    )
+    compare_prepare_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Return non-zero exit code when any selected engine failed to export compare_txt.",
+    )
+
     args = parser.parse_args(argv)
     if args.version:
         from uniscan import __version__
@@ -302,6 +332,16 @@ def main(argv: list[str] | None = None) -> int:
             require_page_markers=bool(args.require_page_markers or args.strict),
         )
         print(summarize_artifact_searchable_package(results))
+        if args.strict and any(result.status != "ok" for result in results):
+            return 1
+        return 0
+    if args.command == "prepare-compare-txt":
+        results = build_compare_txt_from_benchmark(
+            benchmark_root=args.benchmark_root,
+            output_dir=args.output,
+            engines=tuple(args.engines) if args.engines else None,
+        )
+        print(summarize_compare_txt_build(results))
         if args.strict and any(result.status != "ok" for result in results):
             return 1
         return 0

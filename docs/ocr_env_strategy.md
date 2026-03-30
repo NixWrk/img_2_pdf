@@ -54,6 +54,14 @@ It will:
 5. Save per-engine logs, package versions, JSON report artifacts.
 6. Build matrix summaries (`summary.json` and `summary.csv`).
 
+From `2026-03-30` page-aware extraction artifacts are also written automatically
+for text engines (`chandra`, `surya`, `olmocr`, etc.):
+
+1. `<engine>/page_XXXX.txt` - one OCR text file per source page.
+2. `<engine>/pages.json` - page index metadata.
+3. `<engine>/all_pages.txt` and root `<pdf_stem>_<engine>.txt` - markerized
+   aggregate text with `[SOURCE PAGE N]`.
+
 ## One-Command Run (Matrix Mode)
 
 ```powershell
@@ -72,4 +80,27 @@ powershell -ExecutionPolicy Bypass -File .\scripts\benchmark_ocr_matrix.ps1 `
   -Engines paddleocr,surya `
   -SampleSize 1 `
   -Recreate
+```
+
+## Build compare_txt from benchmark output
+
+After matrix run for one document:
+
+```powershell
+python -m uniscan prepare-compare-txt `
+  --benchmark-root ".\artifacts\ocr_latest_matrix\My Document" `
+  --output ".\artifacts\ocr_latest_matrix\My Document\_compare_txt" `
+  --engines chandra surya olmocr `
+  --strict
+```
+
+Then build searchable PDF from markerized artifacts:
+
+```powershell
+python -m uniscan build-searchable-from-artifacts `
+  --compare-dir ".\artifacts\ocr_latest_matrix\My Document\_compare_txt" `
+  --pdf-root "O:\OBS_TEST\PDF2OBS\PDFS" `
+  --output ".\artifacts\searchable_from_compare_txt" `
+  --engines chandra surya olmocr `
+  --strict
 ```

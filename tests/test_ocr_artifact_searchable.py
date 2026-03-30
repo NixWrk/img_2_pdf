@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from uniscan.ocr.artifact_searchable import (
     _parse_artifact_filename,
     _split_lines_to_pages_by_weights,
     _split_text_to_pages,
+    build_compare_txt_from_benchmark,
     run_artifact_searchable_package,
 )
 
@@ -214,6 +216,41 @@ def test_run_artifact_searchable_package_require_markers(tmp_path: Path) -> None
     assert "no explicit page markers" in (results[0].error or "").lower()
 
 
+def test_build_compare_txt_from_benchmark(tmp_path: Path) -> None:
+    benchmark_root = tmp_path / "bench"
+    output_dir = tmp_path / "compare_txt"
+    benchmark_root.mkdir()
+
+    src_txt = benchmark_root / "fixture_doc_chandra.txt"
+    src_txt.write_text("[SOURCE PAGE 0001]\nHello\n", encoding="utf-8")
+    payload = [
+        {
+            "engine": "chandra",
+            "status": "ok",
+            "artifact_path": str(src_txt),
+        },
+        {
+            "engine": "surya",
+            "status": "error",
+            "artifact_path": "",
+        },
+    ]
+    (benchmark_root / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    rows = build_compare_txt_from_benchmark(
+        benchmark_root=benchmark_root,
+        output_dir=output_dir,
+        engines=("chandra", "surya"),
+    )
+    assert len(rows) == 2
+    ok_rows = [row for row in rows if row.status == "ok"]
+    err_rows = [row for row in rows if row.status == "error"]
+    assert len(ok_rows) == 1
+    assert len(err_rows) == 1
+    assert (output_dir / "fixture_doc__chandra.txt").exists()
+    assert (output_dir / "sources_map.txt").exists()
+
+
 def test_cli_build_searchable_from_artifacts_success(monkeypatch, tmp_path: Path, capsys) -> None:
     compare_dir = tmp_path / "compare"
     pdf_root = tmp_path / "pdf_root"
@@ -320,3 +357,34 @@ def test_cli_build_searchable_from_artifacts_strict_fails(monkeypatch, tmp_path:
     stdout = capsys.readouterr().out
     assert exit_code == 1
     assert "summary" in stdout
+
+
+def test_cli_prepare_compare_txt_strict_fails(tmp_path: Path, capsys) -> None:
+    benchmark_root = tmp_path / "bench"
+    output_dir = tmp_path / "compare_txt"
+    benchmark_root.mkdir()
+    src_txt = benchmark_root / "fixture_doc_chandra.txt"
+    src_txt.write_text("[SOURCE PAGE 0001]\nHello\n", encoding="utf-8")
+    payload = [
+        {"engine": "chandra", "status": "ok", "artifact_path": str(src_txt)},
+        {"engine": "surya", "status": "error", "artifact_path": ""},
+    ]
+    (benchmark_root / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    exit_code = main(
+        [
+            "prepare-compare-txt",
+            "--benchmark-root",
+            str(benchmark_root),
+            "--output",
+            str(output_dir),
+            "--engines",
+            "chandra",
+            "surya",
+            "--strict",
+        ]
+    )
+    stdout = capsys.readouterr().out
+    assert exit_code == 1
+    assert "chandra: ok" in stdout
+    assert "surya: error" in stdout

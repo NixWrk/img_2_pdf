@@ -28,6 +28,15 @@ class ArtifactSearchableResult:
     error: str | None = None
 
 
+@dataclass(slots=True)
+class CompareTxtBuildResult:
+    engine: str
+    status: str
+    source_artifact_path: str | None
+    compare_txt_path: str | None
+    error: str | None = None
+
+
 _PAGE_MARKER_RE = re.compile(r"^\s*\[SOURCE PAGE\s+(\d+)\]\s*$", re.IGNORECASE)
 
 
@@ -802,4 +811,120 @@ def summarize_artifact_searchable_package(results: Sequence[ArtifactSearchableRe
                 f"{row.document} [{row.engine}]: error {row.elapsed_seconds:.2f}s "
                 f"{row.error or 'unknown error'}"
             )
+    return "\n".join(lines)
+
+
+def build_compare_txt_from_benchmark(
+    *,
+    benchmark_root: Path,
+    output_dir: Path,
+    engines: Sequence[str] | None = None,
+) -> list[CompareTxtBuildResult]:
+    resolved_root = Path(benchmark_root)
+    resolved_output = Path(output_dir)
+    resolved_output.mkdir(parents=True, exist_ok=True)
+
+    summary_path = resolved_root / "summary.json"
+    if not summary_path.exists():
+        raise FileNotFoundError(f"Benchmark summary.json not found: {summary_path}")
+
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        raise ValueError("Benchmark summary.json must contain a list of engine rows.")
+
+    allowed_engines = None if engines is None else {item.strip().lower() for item in engines if item.strip()}
+    source_map_lines = [f"Created: {summary_path.stat().st_mtime}"]
+    results: list[CompareTxtBuildResult] = []
+
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        engine = str(row.get("engine") or "").strip().lower()
+        if not engine:
+            continue
+        if allowed_engines is not None and engine not in allowed_engines:
+            continue
+
+        status = str(row.get("status") or "").strip().lower()
+        artifact_raw = str(row.get("artifact_path") or "").strip()
+        if status != "ok":
+            results.append(
+                CompareTxtBuildResult(
+                    engine=engine,
+                    status="error",
+                    source_artifact_path=artifact_raw or None,
+                    compare_txt_path=None,
+                    error=f"engine status is '{status or 'unknown'}'",
+                )
+            )
+            continue
+        if not artifact_raw:
+            results.append(
+                CompareTxtBuildResult(
+                    engine=engine,
+                    status="error",
+                    source_artifact_path=None,
+                    compare_txt_path=None,
+                    error="artifact_path is empty in summary row",
+                )
+            )
+            continue
+
+        source_path = Path(artifact_raw)
+        if source_path.suffix.lower() == ".pdf":
+            txt_sidecar = source_path.with_suffix(".txt")
+            if txt_sidecar.exists():
+                source_path = txt_sidecar
+
+        if source_path.suffix.lower() != ".txt" or not source_path.exists():
+            results.append(
+                CompareTxtBuildResult(
+                    engine=engine,
+                    status="error",
+                    source_artifact_path=str(source_path),
+                    compare_txt_path=None,
+                    error="source text artifact not found",
+                )
+            )
+            continue
+
+        suffix = f"_{engine}"
+        stem = source_path.stem
+        document = stem[: -len(suffix)] if stem.lower().endswith(suffix) else stem
+        if not document.strip():
+            results.append(
+                CompareTxtBuildResult(
+                    engine=engine,
+                    status="error",
+                    source_artifact_path=str(source_path),
+                    compare_txt_path=None,
+                    error=f"cannot resolve document name from artifact '{source_path.name}'",
+                )
+            )
+            continue
+
+        compare_path = resolved_output / f"{document}__{engine}.txt"
+        compare_path.write_text(source_path.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+        source_map_lines.append(str(source_path))
+        results.append(
+            CompareTxtBuildResult(
+                engine=engine,
+                status="ok",
+                source_artifact_path=str(source_path),
+                compare_txt_path=str(compare_path),
+                error=None,
+            )
+        )
+
+    (resolved_output / "sources_map.txt").write_text("\n".join(source_map_lines) + "\n", encoding="utf-8")
+    return results
+
+
+def summarize_compare_txt_build(results: Sequence[CompareTxtBuildResult]) -> str:
+    lines: list[str] = []
+    for row in results:
+        if row.status == "ok":
+            lines.append(f"{row.engine}: ok compare_txt={row.compare_txt_path}")
+        else:
+            lines.append(f"{row.engine}: error {row.error or 'unknown error'}")
     return "\n".join(lines)
