@@ -223,7 +223,16 @@ function Invoke-Logged {
     }
     "$Exe $($ArgList -join ' ')" | Tee-Object -FilePath $LogPath -Append | Out-Null
 
-    $stderrPath = Join-Path $env:TEMP ("uniscan_ocr_matrix_stderr_{0}.log" -f ([guid]::NewGuid().ToString("N")))
+    $stderrRoot = if (-not [string]::IsNullOrWhiteSpace($script:UniscanTempRoot) -and (Test-Path $script:UniscanTempRoot)) {
+        $script:UniscanTempRoot
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($env:TEMP) -and (Test-Path $env:TEMP)) {
+        $env:TEMP
+    }
+    else {
+        $OutputRoot
+    }
+    $stderrPath = Join-Path $stderrRoot ("uniscan_ocr_matrix_stderr_{0}.log" -f ([guid]::NewGuid().ToString("N")))
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     $hasNativeEap = $null -ne (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -ErrorAction SilentlyContinue)
@@ -236,7 +245,17 @@ function Invoke-Logged {
         # while redirecting stderr away from PowerShell error records.
         & $Exe @ArgList 2> $stderrPath | Tee-Object -FilePath $LogPath -Append | Out-Host
         if (Test-Path $stderrPath) {
-            Get-Content $stderrPath | Tee-Object -FilePath $LogPath -Append | Out-Host
+            try {
+                # Native tools may emit UTF-8 bytes that are invalid in current OEM/ACP.
+                $stderrText = [System.IO.File]::ReadAllText($stderrPath, [System.Text.UTF8Encoding]::new($false, $true))
+            }
+            catch {
+                # Fallback to system default instead of crashing benchmark orchestration.
+                $stderrText = Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue
+            }
+            if (-not [string]::IsNullOrWhiteSpace($stderrText)) {
+                $stderrText | Tee-Object -FilePath $LogPath -Append | Out-Host
+            }
         }
         $exitCode = [int]$LASTEXITCODE
     }
@@ -282,6 +301,7 @@ foreach ($engine in $engineMatrix) {
     $entry = [ordered]@{
         engine = $engineName
         venv_path = $venvPath
+        temp_path = $null
         status = "not_run"
         install_exit_code = $null
         benchmark_exit_code = $null
@@ -294,7 +314,19 @@ foreach ($engine in $engineMatrix) {
         log_path = $logPath
     }
 
+    $previousTemp = $env:TEMP
+    $previousTmp = $env:TMP
+    $engineTempRoot = Join-Path $engineOutput "_tmp"
+
     try {
+        # Keep temporary files in per-engine output dir to avoid system-temp
+        # permission/encoding issues and make diagnostics reproducible.
+        New-Item -ItemType Directory -Force $engineTempRoot | Out-Null
+        $entry.temp_path = $engineTempRoot
+        $script:UniscanTempRoot = $engineTempRoot
+        $env:TEMP = $engineTempRoot
+        $env:TMP = $engineTempRoot
+
         if ($Recreate -and (Test-Path $venvPath)) {
             try {
                 Remove-Item -Recurse -Force $venvPath -ErrorAction Stop
@@ -529,6 +561,19 @@ foreach ($engine in $engineMatrix) {
     finally {
         $results += [pscustomobject]$entry
         $env:Path = $basePath
+        $script:UniscanTempRoot = $null
+        if ([string]::IsNullOrWhiteSpace($previousTemp)) {
+            Remove-Item "Env:TEMP" -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:TEMP = $previousTemp
+        }
+        if ([string]::IsNullOrWhiteSpace($previousTmp)) {
+            Remove-Item "Env:TMP" -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:TMP = $previousTmp
+        }
         foreach ($name in @(
             "UNISCAN_OLMOCR_BACKEND",
             "UNISCAN_OLMOCR_DOCKER_IMAGE",
