@@ -469,6 +469,8 @@ foreach ($engine in $engineMatrix) {
             $env:UNISCAN_OLMOCR_DOCKER_IMAGE = "chatdoc/ocrflux:latest"
             $env:UNISCAN_OLMOCR_DOCKER_WORKERS = "1"
             $env:UNISCAN_OLMOCR_DOCKER_CACHE = (Join-Path $RepoRoot ".hf_cache_ocrflux")
+            # Relax strict default (1/250) so noisy scans do not discard entire docs.
+            $env:UNISCAN_OLMOCR_DOCKER_MAX_PAGE_ERROR_RATE = "0.10"
         }
 
         $benchArgs = @(
@@ -534,7 +536,10 @@ foreach ($engine in $engineMatrix) {
             "UNISCAN_OLMOCR_DOCKER_CACHE",
             "UNISCAN_OLMOCR_DOCKER_GPU",
             "UNISCAN_OLMOCR_DOCKER_MODEL",
-            "UNISCAN_OLMOCR_DOCKER_GPU_MEM_UTIL"
+            "UNISCAN_OLMOCR_DOCKER_GPU_MEM_UTIL",
+            "UNISCAN_OLMOCR_DOCKER_PAGES_PER_GROUP",
+            "UNISCAN_OLMOCR_DOCKER_MAX_PAGE_RETRIES",
+            "UNISCAN_OLMOCR_DOCKER_MAX_PAGE_ERROR_RATE"
         )) {
             Remove-Item "Env:$name" -ErrorAction SilentlyContinue
         }

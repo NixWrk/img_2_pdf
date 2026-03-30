@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import uniscan.ocr.benchmark as ocr_benchmark_mod
 from uniscan.cli import main
 from uniscan.export import export_pages_as_pdf
 from uniscan.ocr import (
@@ -214,6 +215,85 @@ def test_run_ocr_benchmark_unready_engine_is_error(tmp_path, monkeypatch) -> Non
     assert results[0].status == "error"
     assert results[0].note == "missing: dependency-x"
     assert results[0].artifact_path is not None
+
+
+def test_olmocr_docker_defaults_include_relaxed_error_rate(tmp_path, monkeypatch) -> None:
+    work_dir = tmp_path / "work"
+    image_paths = [tmp_path / "p1.png"]
+    image_paths[0].write_bytes(b"fake")
+    captured: dict[str, list[str]] = {}
+
+    monkeypatch.delenv("UNISCAN_OLMOCR_DOCKER_MAX_PAGE_ERROR_RATE", raising=False)
+    monkeypatch.delenv("UNISCAN_OLMOCR_DOCKER_MAX_PAGE_RETRIES", raising=False)
+    monkeypatch.delenv("UNISCAN_OLMOCR_DOCKER_PAGES_PER_GROUP", raising=False)
+
+    def fake_render(_image_paths, out_pdf):
+        out_pdf.write_bytes(b"%PDF-1.4\n")
+
+    def fake_collect(_workspace: Path):
+        return "ok", 2
+
+    def fake_run(command, capture_output, text):
+        captured["command"] = command
+        workspace_dir = work_dir / "olmocr_docker" / "work" / "ws"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(ocr_benchmark_mod, "_render_images_to_pdf", fake_render)
+    monkeypatch.setattr(ocr_benchmark_mod, "_collect_olmocr_workspace_text", fake_collect)
+
+    text, chars = ocr_benchmark_mod._run_olmocr_docker(
+        image_paths,
+        work_dir=work_dir,
+        which_fn=lambda _name: "docker",
+        run_cmd=fake_run,
+    )
+
+    assert text == "ok"
+    assert chars == 2
+    command = captured["command"]
+    assert "--max_page_error_rate" in command
+    assert command[command.index("--max_page_error_rate") + 1] == "0.10"
+
+
+def test_olmocr_docker_respects_error_rate_overrides(tmp_path, monkeypatch) -> None:
+    work_dir = tmp_path / "work"
+    image_paths = [tmp_path / "p1.png"]
+    image_paths[0].write_bytes(b"fake")
+    captured: dict[str, list[str]] = {}
+
+    monkeypatch.setenv("UNISCAN_OLMOCR_DOCKER_PAGES_PER_GROUP", "6")
+    monkeypatch.setenv("UNISCAN_OLMOCR_DOCKER_MAX_PAGE_RETRIES", "12")
+    monkeypatch.setenv("UNISCAN_OLMOCR_DOCKER_MAX_PAGE_ERROR_RATE", "0.25")
+
+    def fake_render(_image_paths, out_pdf):
+        out_pdf.write_bytes(b"%PDF-1.4\n")
+
+    def fake_collect(_workspace: Path):
+        return "ok", 2
+
+    def fake_run(command, capture_output, text):
+        captured["command"] = command
+        workspace_dir = work_dir / "olmocr_docker" / "work" / "ws"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(ocr_benchmark_mod, "_render_images_to_pdf", fake_render)
+    monkeypatch.setattr(ocr_benchmark_mod, "_collect_olmocr_workspace_text", fake_collect)
+
+    text, chars = ocr_benchmark_mod._run_olmocr_docker(
+        image_paths,
+        work_dir=work_dir,
+        which_fn=lambda _name: "docker",
+        run_cmd=fake_run,
+    )
+
+    assert text == "ok"
+    assert chars == 2
+    command = captured["command"]
+    assert command[command.index("--pages_per_group") + 1] == "6"
+    assert command[command.index("--max_page_retries") + 1] == "12"
+    assert command[command.index("--max_page_error_rate") + 1] == "0.25"
 
 
 @pytest.mark.skipif(not FIXTURE_PDF.exists(), reason="external OCR fixture is not available")

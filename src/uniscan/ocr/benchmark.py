@@ -833,6 +833,13 @@ def _run_olmocr_docker(
     model = (os.environ.get("UNISCAN_OLMOCR_DOCKER_MODEL") or "").strip()
     workers = (os.environ.get("UNISCAN_OLMOCR_DOCKER_WORKERS") or "1").strip()
     gpu_mem_util = (os.environ.get("UNISCAN_OLMOCR_DOCKER_GPU_MEM_UTIL") or "").strip()
+    pages_per_group = (os.environ.get("UNISCAN_OLMOCR_DOCKER_PAGES_PER_GROUP") or "").strip()
+    max_page_retries = (os.environ.get("UNISCAN_OLMOCR_DOCKER_MAX_PAGE_RETRIES") or "").strip()
+    # ocrflux default is 1/250 (~0.004), which is too strict for noisy scans and
+    # can drop an entire document despite mostly successful pages.
+    max_page_error_rate = (
+        os.environ.get("UNISCAN_OLMOCR_DOCKER_MAX_PAGE_ERROR_RATE") or "0.10"
+    ).strip()
 
     cache_dir_raw = (os.environ.get("UNISCAN_OLMOCR_DOCKER_CACHE") or str(_REPO_ROOT / ".hf_cache_ocrflux")).strip()
     cache_dir = Path(cache_dir_raw)
@@ -863,6 +870,12 @@ def _run_olmocr_docker(
     )
     if workers:
         command.extend(["--workers", workers])
+    if pages_per_group:
+        command.extend(["--pages_per_group", pages_per_group])
+    if max_page_retries:
+        command.extend(["--max_page_retries", max_page_retries])
+    if max_page_error_rate:
+        command.extend(["--max_page_error_rate", max_page_error_rate])
     if model:
         command.extend(["--model", model])
     if gpu_mem_util:
