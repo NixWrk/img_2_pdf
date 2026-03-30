@@ -153,3 +153,4 @@ Purpose:
 Reference run:
 
 1. `docs/benchmark_runs/2026-03-30_searchable_from_txt_all_models.md`
+2. `docs/benchmark_runs/2026-03-30_searchable_from_txt_recheck.md`

@@ -14,6 +14,26 @@ integration for:
 3. Deliver in small, testable commits.
 4. Artifact-first policy: reuse latest existing `.txt` outputs; rerun OCR only if required artifact is missing.
 
+## Implementation Status (2026-03-30)
+
+Completed items:
+
+1. Shared artifact-first searchable PDF pipeline implemented.
+2. `chandra`, `surya`, `olmocr` supported from existing `*.txt` artifacts.
+3. CLI command added: `build-searchable-from-artifacts`.
+4. Test coverage added for parser, page splitting, pipeline, and CLI strict mode.
+5. Recheck run on OBS documents completed successfully (6/6 conversions).
+
+Main commits:
+
+1. `c50ec1b` - `feat(ocr): build searchable PDFs from existing TXT artifacts`
+2. `bcff7f2` - `docs: record artifact-first searchable PDF run for three OCR models`
+
+Verification commands:
+
+1. `python -m pytest -q tests/test_ocr_artifact_searchable.py tests/test_ocr_canonical.py tests/test_ocr_engine.py --basetemp d:\Git_Code\img_2_pdf\.tmp_pytest_recheck_escalated`
+2. `python -m uniscan build-searchable-from-artifacts --compare-dir "d:\Git_Code\img_2_pdf\artifacts\ocr_obs_gost_oldbook_20260327_165121\_compare_txt" --pdf-root "d:\Git_Code\PDF\PDFs" --output "d:\Git_Code\img_2_pdf\artifacts\searchable_pdf_from_txt_20260330_recheck" --engines chandra surya olmocr --strict`
+
 ## Artifact-First Inputs (No Unnecessary Re-Runs)
 
 Primary comparison/input folder:
