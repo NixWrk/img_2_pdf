@@ -191,6 +191,29 @@ def test_run_artifact_searchable_package_builds_pdfs(tmp_path: Path) -> None:
     assert (output_dir / "artifact_searchable_summary.csv").exists()
 
 
+def test_run_artifact_searchable_package_require_markers(tmp_path: Path) -> None:
+    compare_dir = tmp_path / "compare"
+    pdf_root = tmp_path / "pdf_root"
+    output_dir = tmp_path / "out"
+    compare_dir.mkdir()
+    pdf_root.mkdir()
+
+    _build_sample_pdf(pdf_root, "fixture_doc", [30, 90])
+    (compare_dir / "fixture_doc__chandra.txt").write_text("plain markerless text", encoding="utf-8")
+
+    results = run_artifact_searchable_package(
+        compare_dir=compare_dir,
+        pdf_root=pdf_root,
+        output_dir=output_dir,
+        engines=("chandra",),
+        require_page_markers=True,
+    )
+
+    assert len(results) == 1
+    assert results[0].status == "error"
+    assert "no explicit page markers" in (results[0].error or "").lower()
+
+
 def test_cli_build_searchable_from_artifacts_success(monkeypatch, tmp_path: Path, capsys) -> None:
     compare_dir = tmp_path / "compare"
     pdf_root = tmp_path / "pdf_root"
@@ -204,6 +227,7 @@ def test_cli_build_searchable_from_artifacts_success(monkeypatch, tmp_path: Path
         assert kwargs["pdf_root"] == pdf_root
         assert kwargs["output_dir"] == output_dir
         assert kwargs["engines"] == ("chandra", "surya")
+        assert kwargs["require_page_markers"] is False
         return [
             SimpleNamespace(
                 document="ГОСТ",
@@ -250,6 +274,7 @@ def test_cli_build_searchable_from_artifacts_strict_fails(monkeypatch, tmp_path:
     output_dir.mkdir()
 
     def fake_run(**_kwargs):
+        assert _kwargs["require_page_markers"] is True
         return [
             SimpleNamespace(
                 document="ГОСТ",

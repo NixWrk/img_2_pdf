@@ -125,6 +125,12 @@ def _split_text_to_pages(text: str, page_count: int) -> list[str]:
     return pages
 
 
+def _has_explicit_page_markers(text: str) -> bool:
+    if "\f" in text:
+        return True
+    return bool(_PAGE_MARKER_RE.search(text))
+
+
 def _split_lines_to_pages_by_weights(
     lines: Sequence[str],
     *,
@@ -643,6 +649,7 @@ def run_artifact_searchable_package(
     pdf_root: Path,
     output_dir: Path,
     engines: Sequence[str] | None = None,
+    require_page_markers: bool = False,
 ) -> list[ArtifactSearchableResult]:
     resolved_compare = Path(compare_dir)
     resolved_pdf_root = Path(pdf_root)
@@ -709,6 +716,11 @@ def run_artifact_searchable_package(
 
         try:
             text = artifact_path.read_text(encoding="utf-8", errors="ignore")
+            if require_page_markers and not _has_explicit_page_markers(text):
+                raise ValueError(
+                    "TXT artifact has no explicit page markers. "
+                    "Expected '[SOURCE PAGE N]' blocks or form-feed separators."
+                )
             out_pdf = resolved_output / document / f"{document}__{engine}_searchable.pdf"
             page_count, text_chars = _build_searchable_pdf_from_text(
                 source_pdf=source_pdf,

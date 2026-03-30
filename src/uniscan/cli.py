@@ -231,6 +231,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Return non-zero exit code when any artifact conversion is not ok.",
     )
+    artifact_searchable_parser.add_argument(
+        "--require-page-markers",
+        action="store_true",
+        help="Require explicit page markers in TXT artifacts ([SOURCE PAGE N] or form-feed).",
+    )
 
     args = parser.parse_args(argv)
     if args.version:
@@ -294,6 +299,7 @@ def main(argv: list[str] | None = None) -> int:
             pdf_root=args.pdf_root,
             output_dir=args.output,
             engines=tuple(args.engines) if args.engines else None,
+            require_page_markers=bool(args.require_page_markers or args.strict),
         )
         print(summarize_artifact_searchable_package(results))
         if args.strict and any(result.status != "ok" for result in results):
