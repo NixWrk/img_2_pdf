@@ -1,4 +1,4 @@
-# Searchable PDF Strategy Per OCR Engine
+﻿# Searchable PDF Strategy Per OCR Engine
 
 This file describes how each OCR engine in UniScan can produce searchable PDFs.
 
@@ -37,6 +37,10 @@ Scope:
 
 1. `ГОСТ с плохим качеством скана.pdf`
 2. `Старая книга с частично рукописным текстом.pdf`
+
+Implementation order and commit roadmap:
+
+1. `docs/ocr_searchable_pdf_execution_plan.md`
 
 ## Built-in Searchable PDF Paths (already wired in code)
 
