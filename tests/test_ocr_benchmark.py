@@ -97,31 +97,36 @@ def test_run_ocr_benchmark_writes_report_and_artifacts(tmp_path, monkeypatch) ->
         out_pdf.write_text(f"{engine_name}:{lang}:{len(image_paths)}", encoding="utf-8")
         return out_pdf
 
-    def fake_extract_chars(_pdf_path: Path) -> int:
-        return 321
+    def fake_extract_pdf_text(_pdf_path: Path) -> str:
+        return "x" * 321
 
     def fake_paddleocr(image_paths, *, lang):
+        assert len(image_paths) == 1
         return f"paddle:{lang}:{len(image_paths)}", 12
 
     def fake_surya(image_paths, *, lang, work_dir, which_fn, run_cmd):
-        assert work_dir.name == "surya_work"
+        assert "surya_work" in str(work_dir)
+        assert len(image_paths) == 1
         return f"surya:{lang}:{len(image_paths)}", 13
 
     def fake_mineru(image_paths, *, lang, work_dir, which_fn, run_cmd):
-        assert work_dir.name == "mineru_work"
+        assert "mineru_work" in str(work_dir)
+        assert len(image_paths) == 1
         return f"mineru:{lang}:{len(image_paths)}", 14
 
     def fake_chandra(image_paths, *, lang, work_dir, which_fn, run_cmd):
-        assert work_dir.name == "chandra_work"
+        assert "chandra_work" in str(work_dir)
+        assert len(image_paths) == 1
         return f"chandra:{lang}:{len(image_paths)}", 15
 
     def fake_olmocr(image_paths, *, lang, work_dir, which_fn, run_cmd):
-        assert work_dir.name == "olmocr_work"
+        assert "olmocr_work" in str(work_dir)
+        assert len(image_paths) == 1
         return f"olmocr:{lang}:{len(image_paths)}", 16
 
     monkeypatch.setattr("uniscan.ocr.benchmark.detect_ocr_engine_status", fake_status)
     monkeypatch.setattr("uniscan.ocr.benchmark.image_paths_to_searchable_pdf", fake_searchable_pdf)
-    monkeypatch.setattr("uniscan.ocr.benchmark._extract_pdf_text_chars", fake_extract_chars)
+    monkeypatch.setattr("uniscan.ocr.benchmark._extract_pdf_text", fake_extract_pdf_text)
     monkeypatch.setattr("uniscan.ocr.benchmark._run_paddleocr_direct", fake_paddleocr)
     monkeypatch.setattr("uniscan.ocr.benchmark._run_surya_direct", fake_surya)
     monkeypatch.setattr("uniscan.ocr.benchmark._run_mineru_direct", fake_mineru)
@@ -143,7 +148,21 @@ def test_run_ocr_benchmark_writes_report_and_artifacts(tmp_path, monkeypatch) ->
     for result in results:
         assert result.sample_pages == [1, 3]
     assert {result.text_chars for result in results if result.engine in SEARCHABLE_ENGINES} == {321}
-    assert {result.text_chars for result in results if result.engine in EXTRACTION_ENGINES} == {12, 13, 14, 15, 16}
+    assert {result.text_chars for result in results if result.engine in EXTRACTION_ENGINES} == {
+        24,
+        26,
+        28,
+        30,
+        32,
+    }
+
+    # Extraction engines now persist page-aware artifacts and markerized aggregate.
+    for engine in EXTRACTION_ENGINES:
+        engine_dir = output_dir / engine
+        assert (engine_dir / "pages.json").exists()
+        assert (engine_dir / "all_pages.txt").exists()
+        assert (engine_dir / "page_0001.txt").exists()
+        assert (engine_dir / "page_0003.txt").exists()
 
     report_path = output_dir / "fixture_ocr_benchmark.json"
     assert report_path.exists()

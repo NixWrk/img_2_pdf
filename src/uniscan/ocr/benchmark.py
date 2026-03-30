@@ -255,6 +255,101 @@ def _artifact_path_for_engine(output_dir: Path, pdf_stem: str, engine: str) -> P
     return output_dir / f"{pdf_stem}_{engine}{suffix}"
 
 
+def _markerized_pages_text(
+    *,
+    page_texts: Sequence[str],
+    source_pages_1based: Sequence[int],
+) -> str:
+    blocks: list[str] = []
+    for page_no, text in zip(source_pages_1based, page_texts, strict=True):
+        blocks.append(f"[SOURCE PAGE {page_no:04d}]")
+        if text:
+            blocks.append(text.rstrip())
+        blocks.append("")
+    payload = "\n".join(blocks).strip()
+    return payload + "\n" if payload else ""
+
+
+def _write_pagewise_text_artifacts(
+    *,
+    output_dir: Path,
+    engine: str,
+    pdf_path: Path,
+    source_pages_1based: Sequence[int],
+    page_texts: Sequence[str],
+    aggregate_path: Path,
+) -> tuple[int, Path]:
+    engine_dir = output_dir / engine
+    engine_dir.mkdir(parents=True, exist_ok=True)
+
+    pages_payload: list[dict[str, Any]] = []
+    total_chars = 0
+    for source_page, text in zip(source_pages_1based, page_texts, strict=True):
+        page_file = engine_dir / f"page_{source_page:04d}.txt"
+        page_file.write_text(text, encoding="utf-8")
+        chars = len(text)
+        total_chars += chars
+        pages_payload.append(
+            {
+                "source_page": source_page,
+                "file": page_file.name,
+                "text_chars": chars,
+            }
+        )
+
+    markerized = _markerized_pages_text(
+        page_texts=page_texts,
+        source_pages_1based=source_pages_1based,
+    )
+    (engine_dir / "all_pages.txt").write_text(markerized, encoding="utf-8")
+    aggregate_path.write_text(markerized, encoding="utf-8")
+
+    pages_index = {
+        "pdf_path": str(pdf_path),
+        "engine": engine,
+        "pages": pages_payload,
+        "total_text_chars": total_chars,
+        "aggregate_file": "all_pages.txt",
+        "aggregate_has_page_markers": True,
+    }
+    pages_json_path = engine_dir / "pages.json"
+    pages_json_path.write_text(
+        json.dumps(pages_index, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return total_chars, pages_json_path
+
+
+def _run_extraction_engine_pagewise(
+    engine: str,
+    image_paths: Sequence[Path],
+    *,
+    source_pages_1based: Sequence[int],
+    lang: str,
+    work_dir: Path,
+    which_fn,
+    run_cmd,
+) -> tuple[list[str], int]:
+    if len(image_paths) != len(source_pages_1based):
+        raise ValueError("image_paths and source_pages_1based lengths must match.")
+
+    page_texts: list[str] = []
+    total_chars = 0
+    for image_path, source_page in zip(image_paths, source_pages_1based, strict=True):
+        page_work_dir = work_dir / f"page_{source_page:04d}"
+        text, chars = _run_extraction_engine(
+            engine,
+            [image_path],
+            lang=lang,
+            work_dir=page_work_dir,
+            which_fn=which_fn,
+            run_cmd=run_cmd,
+        )
+        page_texts.append(text)
+        total_chars += int(chars)
+    return page_texts, total_chars
+
+
 def _module_presence_probe(name: str):
     """Import-probe compatible callable without importing heavyweight modules."""
     if importlib.util.find_spec(name) is None:
@@ -1071,6 +1166,7 @@ def run_ocr_benchmark(
     selected_engines = tuple(engines) if engines is not None else OCR_ENGINE_VALUES
     import_probe = import_module or _module_presence_probe
     results: list[OcrBenchmarkResult] = []
+    source_pages_1based = [page + 1 for page in sample_pages]
 
     with tempfile.TemporaryDirectory(prefix="uniscan_ocr_benchmark_") as tmp:
         tmp_dir = Path(tmp)
@@ -1153,15 +1249,25 @@ def run_ocr_benchmark(
                     )
                     continue
 
-                text, text_chars = _run_extraction_engine(
+                # Keep extraction engines page-aware: persist per-page files and
+                # write markerized aggregate text that preserves source page ids.
+                page_texts, text_chars = _run_extraction_engine_pagewise(
                     engine,
                     sampled_image_paths,
+                    source_pages_1based=source_pages_1based,
                     lang=lang,
                     work_dir=tmp_dir / f"{engine}_work",
                     which_fn=which_fn,
                     run_cmd=run_cmd,
                 )
-                artifact_path.write_text(text, encoding="utf-8")
+                _write_pagewise_text_artifacts(
+                    output_dir=resolved_output,
+                    engine=engine,
+                    pdf_path=resolved_pdf,
+                    source_pages_1based=source_pages_1based,
+                    page_texts=page_texts,
+                    aggregate_path=artifact_path,
+                )
                 elapsed = perf_counter() - start
                 results.append(
                     _make_result(
