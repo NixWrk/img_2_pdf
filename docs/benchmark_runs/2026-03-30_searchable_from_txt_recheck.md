@@ -38,3 +38,21 @@ Artifacts:
 1. `artifacts/searchable_pdf_from_txt_20260330_recheck/*/*_searchable.pdf`
 2. `artifacts/searchable_pdf_from_txt_20260330_recheck/artifact_searchable_summary.json`
 3. `artifacts/searchable_pdf_from_txt_20260330_recheck/artifact_searchable_summary.csv`
+
+## Coordinate-Line Rebuild (2026-03-30)
+
+Update:
+
+1. Rebuilt the same 6 PDFs with per-line geometric placement (coordinate-like mode).
+2. No OCR reruns were performed; same TXT inputs were reused.
+
+Per-model time (seconds):
+
+1. `gost_bad_scan_quality`:
+   - `chandra`: `3.73`
+   - `olmocr`: `3.78`
+   - `surya`: `2.44`
+2. `oldbook_partial_handwriting`:
+   - `chandra`: `19.14`
+   - `olmocr`: `31.79`
+   - `surya`: `9.74`

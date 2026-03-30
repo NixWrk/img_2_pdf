@@ -9,6 +9,7 @@ import pytest
 from uniscan.cli import main
 from uniscan.export import export_pages_as_pdf
 from uniscan.ocr.artifact_searchable import (
+    _assign_lines_to_boxes,
     _parse_artifact_filename,
     _split_text_to_pages,
     run_artifact_searchable_package,
@@ -54,6 +55,15 @@ def test_split_text_to_pages_with_markers() -> None:
     )
     pages = _split_text_to_pages(text, 2)
     assert pages == ["Page one text", "Page two text"]
+
+
+def test_assign_lines_to_boxes_balances_lines() -> None:
+    lines = ["L1", "L2", "L3", "L4", "L5"]
+    boxes = [(0.0, 0.0, 100.0, 20.0), (0.0, 25.0, 100.0, 45.0)]
+    placements = _assign_lines_to_boxes(lines, boxes)
+    assert len(placements) == 2
+    assert "L1" in placements[0][1]
+    assert "L5" in placements[1][1]
 
 
 def test_run_artifact_searchable_package_builds_pdfs(tmp_path: Path) -> None:

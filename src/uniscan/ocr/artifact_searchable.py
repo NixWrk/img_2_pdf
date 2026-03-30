@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 import re
 from dataclasses import asdict, dataclass
@@ -228,58 +229,211 @@ def _wrap_text_to_width(
     return wrapped or [""]
 
 
+def _estimate_page_line_bboxes(
+    *,
+    page,
+) -> list[tuple[float, float, float, float]]:
+    try:
+        import fitz  # type: ignore
+        import cv2  # type: ignore
+        import numpy as np
+    except Exception:
+        return []
+
+    matrix = fitz.Matrix(2.0, 2.0)
+    pix = page.get_pixmap(matrix=matrix, alpha=False)
+    if pix.width <= 0 or pix.height <= 0:
+        return []
+
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    if pix.n >= 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img[:, :, 0]
+
+    _, binary_inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    binary_inv = cv2.morphologyEx(binary_inv, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    contours, _ = cv2.findContours(binary_inv, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    components: list[tuple[float, float, float, float, float, float, float]] = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        area = w * h
+        if area < 20:
+            continue
+        if h < 4 or h > (pix.height * 0.25):
+            continue
+        if w < 2:
+            continue
+        x0 = float(x)
+        y0 = float(y)
+        x1 = float(x + w)
+        y1 = float(y + h)
+        cx = (x0 + x1) / 2.0
+        cy = (y0 + y1) / 2.0
+        components.append((x0, y0, x1, y1, cx, cy, float(h)))
+
+    if not components:
+        return []
+
+    heights = [item[6] for item in components]
+    median_h = float(sorted(heights)[len(heights) // 2]) if heights else 10.0
+    y_threshold = max(4.0, median_h * 0.6)
+    gap_threshold = max(20.0, median_h * 2.5)
+
+    components.sort(key=lambda item: (item[5], item[0]))
+    lines: list[dict[str, object]] = []
+    for comp in components:
+        x0, y0, x1, y1, _cx, cy, _h = comp
+        target: dict[str, object] | None = None
+        for line in reversed(lines[-8:]):
+            line_cy = float(line["cy"])
+            if abs(cy - line_cy) <= y_threshold:
+                target = line
+                break
+        if target is None:
+            target = {"items": [], "cy": cy}
+            lines.append(target)
+        target_items = target["items"]
+        assert isinstance(target_items, list)
+        target_items.append((x0, y0, x1, y1))
+        target["cy"] = (float(target["cy"]) + cy) / 2.0
+
+    raw_boxes: list[tuple[float, float, float, float]] = []
+    for line in lines:
+        items = list(line["items"])
+        if not items:
+            continue
+        items.sort(key=lambda item: item[0])
+        seg_x0, seg_y0, seg_x1, seg_y1 = items[0]
+        prev_x1 = seg_x1
+        for x0, y0, x1, y1 in items[1:]:
+            if (x0 - prev_x1) > gap_threshold:
+                if (seg_x1 - seg_x0) >= 2.0 and (seg_y1 - seg_y0) >= 2.0:
+                    raw_boxes.append((seg_x0, seg_y0, seg_x1, seg_y1))
+                seg_x0, seg_y0, seg_x1, seg_y1 = x0, y0, x1, y1
+            else:
+                seg_x0 = min(seg_x0, x0)
+                seg_y0 = min(seg_y0, y0)
+                seg_x1 = max(seg_x1, x1)
+                seg_y1 = max(seg_y1, y1)
+            prev_x1 = x1
+        if (seg_x1 - seg_x0) >= 2.0 and (seg_y1 - seg_y0) >= 2.0:
+            raw_boxes.append((seg_x0, seg_y0, seg_x1, seg_y1))
+
+    if not raw_boxes:
+        return []
+
+    raw_boxes.sort(key=lambda item: (item[1], item[0]))
+    scale_x = float(page.rect.width) / float(pix.width)
+    scale_y = float(page.rect.height) / float(pix.height)
+    result: list[tuple[float, float, float, float]] = []
+    for x0, y0, x1, y1 in raw_boxes:
+        bx0 = max(0.0, x0 * scale_x)
+        by0 = max(0.0, y0 * scale_y)
+        bx1 = min(float(page.rect.width), x1 * scale_x)
+        by1 = min(float(page.rect.height), y1 * scale_y)
+        if bx1 <= bx0 or by1 <= by0:
+            continue
+        result.append((bx0, by0, bx1, by1))
+    return result
+
+
+def _split_page_text_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("[SOURCE PAGE"):
+            continue
+        lines.append(line)
+    return lines
+
+
+def _assign_lines_to_boxes(
+    lines: Sequence[str],
+    boxes: Sequence[tuple[float, float, float, float]],
+) -> list[tuple[tuple[float, float, float, float], str]]:
+    if not lines:
+        return []
+    if not boxes:
+        return []
+
+    if len(lines) <= len(boxes):
+        return [(boxes[idx], lines[idx]) for idx in range(len(lines))]
+
+    assignments: list[tuple[tuple[float, float, float, float], str]] = []
+    cursor = 0
+    for box_idx, box in enumerate(boxes):
+        remaining_lines = len(lines) - cursor
+        remaining_boxes = len(boxes) - box_idx
+        take = max(1, int(math.ceil(remaining_lines / remaining_boxes)))
+        chunk = lines[cursor : cursor + take]
+        cursor += take
+        assignments.append((box, " ".join(chunk)))
+        if cursor >= len(lines):
+            break
+    if cursor < len(lines) and assignments:
+        last_box, last_text = assignments[-1]
+        tail = " ".join(lines[cursor:])
+        assignments[-1] = (last_box, f"{last_text} {tail}".strip())
+    return assignments
+
+
 def _build_overlay_page(
     *,
     page_width: float,
     page_height: float,
-    text: str,
+    placements: Sequence[tuple[tuple[float, float, float, float], str]],
     font_name: str,
 ):
     from pypdf import PdfReader
     from reportlab.pdfgen import canvas
 
-    margin = 4.0
-    max_width = max(page_width - margin * 2.0, 1.0)
-    candidate_sizes = (8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.5, 1.2, 1.0, 0.8, 0.6, 0.4)
-
-    chosen_size = candidate_sizes[-1]
-    chosen_leading = max(chosen_size * 1.05, 0.4)
-    chosen_lines: list[str] = _wrap_text_to_width(
-        text,
-        font_name=font_name,
-        font_size=chosen_size,
-        max_width=max_width,
-    )
-
-    for font_size in candidate_sizes:
-        leading = max(font_size * 1.05, 0.4)
-        max_lines = max(int((page_height - margin * 2.0) / leading), 1)
-        lines = _wrap_text_to_width(
-            text,
-            font_name=font_name,
-            font_size=font_size,
-            max_width=max_width,
-        )
-        if len(lines) <= max_lines:
-            chosen_size = font_size
-            chosen_leading = leading
-            chosen_lines = lines
-            break
-        chosen_size = font_size
-        chosen_leading = leading
-        chosen_lines = lines[:max_lines]
-
     packet = BytesIO()
     pdf_canvas = canvas.Canvas(packet, pagesize=(page_width, page_height), pageCompression=1)
-    text_obj = pdf_canvas.beginText(margin, max(page_height - margin - chosen_size, margin))
-    text_obj.setFont(font_name, chosen_size)
-    text_obj.setLeading(chosen_leading)
-    text_obj.setTextRenderMode(3)  # invisible selectable text
-    for line in chosen_lines:
-        text_obj.textLine(line)
-    pdf_canvas.drawText(text_obj)
-    pdf_canvas.save()
+    candidate_sizes = (8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.5, 1.2, 1.0, 0.8, 0.6, 0.4)
 
+    for bbox, text in placements:
+        if not text.strip():
+            continue
+        x0, y0, x1, y1 = bbox
+        width = max(x1 - x0 - 1.0, 1.0)
+        height = max(y1 - y0 - 1.0, 1.0)
+        chosen_size = candidate_sizes[-1]
+        chosen_leading = max(chosen_size * 1.05, 0.4)
+        chosen_lines = [text]
+
+        for font_size in candidate_sizes:
+            leading = max(font_size * 1.05, 0.4)
+            max_lines = max(int(height / leading), 1)
+            lines = _wrap_text_to_width(
+                text,
+                font_name=font_name,
+                font_size=font_size,
+                max_width=width,
+            )
+            if len(lines) <= max_lines:
+                chosen_size = font_size
+                chosen_leading = leading
+                chosen_lines = lines
+                break
+            chosen_size = font_size
+            chosen_leading = leading
+            chosen_lines = lines[:max_lines]
+
+        baseline_y = max(page_height - y0 - chosen_size, 0.5)
+        text_obj = pdf_canvas.beginText(max(x0 + 0.5, 0.5), baseline_y)
+        text_obj.setFont(font_name, chosen_size)
+        text_obj.setLeading(chosen_leading)
+        text_obj.setTextRenderMode(3)  # invisible selectable text
+        for line in chosen_lines:
+            text_obj.textLine(line)
+        pdf_canvas.drawText(text_obj)
+
+    pdf_canvas.save()
     packet.seek(0)
     return PdfReader(packet).pages[0]
 
@@ -291,28 +445,38 @@ def _build_searchable_pdf_from_text(
     out_pdf: Path,
 ) -> tuple[int, int]:
     from pypdf import PdfReader, PdfWriter
+    import fitz  # type: ignore
 
     font_path = _resolve_text_layer_font_path()
     font_name = _register_overlay_font(font_path)
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     reader = PdfReader(str(source_pdf))
     writer = PdfWriter()
+    layout_doc = fitz.open(str(source_pdf))
 
     page_count = len(reader.pages)
     page_texts = _split_text_to_pages(text, page_count)
-    for page_idx, source_page in enumerate(reader.pages):
-        page_text = page_texts[page_idx] if page_idx < len(page_texts) else ""
-        if page_text.strip():
-            page_width = float(source_page.mediabox.width)
-            page_height = float(source_page.mediabox.height)
-            overlay_page = _build_overlay_page(
-                page_width=page_width,
-                page_height=page_height,
-                text=page_text,
-                font_name=font_name,
-            )
-            source_page.merge_page(overlay_page)
-        writer.add_page(source_page)
+    try:
+        for page_idx, source_page in enumerate(reader.pages):
+            page_text = page_texts[page_idx] if page_idx < len(page_texts) else ""
+            if page_text.strip():
+                page_width = float(source_page.mediabox.width)
+                page_height = float(source_page.mediabox.height)
+                line_boxes = _estimate_page_line_bboxes(page=layout_doc[page_idx])
+                page_lines = _split_page_text_lines(page_text)
+                placements = _assign_lines_to_boxes(page_lines, line_boxes)
+                if not placements and page_lines:
+                    placements = [((4.0, 4.0, page_width - 4.0, page_height - 4.0), " ".join(page_lines))]
+                overlay_page = _build_overlay_page(
+                    page_width=page_width,
+                    page_height=page_height,
+                    placements=placements,
+                    font_name=font_name,
+                )
+                source_page.merge_page(overlay_page)
+            writer.add_page(source_page)
+    finally:
+        layout_doc.close()
 
     with out_pdf.open("wb") as fh:
         writer.write(fh)
