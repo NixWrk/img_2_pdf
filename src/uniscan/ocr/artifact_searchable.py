@@ -828,7 +828,13 @@ def build_compare_txt_from_benchmark(
     if not summary_path.exists():
         raise FileNotFoundError(f"Benchmark summary.json not found: {summary_path}")
 
-    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    try:
+        raw_summary = summary_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raw_summary = summary_path.read_text(encoding="utf-8-sig")
+    if raw_summary.startswith("\ufeff"):
+        raw_summary = raw_summary.lstrip("\ufeff")
+    payload = json.loads(raw_summary)
     if not isinstance(payload, list):
         raise ValueError("Benchmark summary.json must contain a list of engine rows.")
 
@@ -875,6 +881,16 @@ def build_compare_txt_from_benchmark(
             txt_sidecar = source_path.with_suffix(".txt")
             if txt_sidecar.exists():
                 source_path = txt_sidecar
+
+        if source_path.suffix.lower() != ".txt" or not source_path.exists():
+            engine_dir = resolved_root / engine
+            fallback_candidates: list[Path] = []
+            if engine_dir.exists():
+                fallback_candidates.extend(sorted(engine_dir.glob(f"*_{engine}.txt")))
+                if not fallback_candidates:
+                    fallback_candidates.extend(sorted(engine_dir.rglob(f"*_{engine}.txt")))
+            if fallback_candidates:
+                source_path = fallback_candidates[0]
 
         if source_path.suffix.lower() != ".txt" or not source_path.exists():
             results.append(
