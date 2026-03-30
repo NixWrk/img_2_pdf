@@ -814,6 +814,60 @@ def summarize_artifact_searchable_package(results: Sequence[ArtifactSearchableRe
     return "\n".join(lines)
 
 
+def _load_compare_source_rows(benchmark_root: Path) -> tuple[list[dict], list[str]]:
+    summary_path = benchmark_root / "summary.json"
+    if summary_path.exists():
+        try:
+            raw_summary = summary_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            raw_summary = summary_path.read_text(encoding="utf-8-sig")
+        if raw_summary.startswith("\ufeff"):
+            raw_summary = raw_summary.lstrip("\ufeff")
+        payload = json.loads(raw_summary)
+        if not isinstance(payload, list):
+            raise ValueError("Benchmark summary.json must contain a list of engine rows.")
+        return [row for row in payload if isinstance(row, dict)], [f"summary_json={summary_path}"]
+
+    report_paths = sorted(
+        (path for path in benchmark_root.rglob("*_ocr_benchmark.json") if path.is_file()),
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+    payload: list[dict] = []
+    seen_engines: set[str] = set()
+    source_reports: list[str] = []
+    for report_path in report_paths:
+        try:
+            report_raw = report_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            report_raw = report_path.read_text(encoding="utf-8-sig")
+        try:
+            report_payload = json.loads(report_raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(report_payload, dict):
+            continue
+        results = report_payload.get("results")
+        if not isinstance(results, list):
+            continue
+        for row in results:
+            if not isinstance(row, dict):
+                continue
+            engine = str(row.get("engine") or "").strip().lower()
+            if not engine or engine in seen_engines:
+                continue
+            payload.append(dict(row))
+            seen_engines.add(engine)
+            source_reports.append(str(report_path))
+
+    if not payload:
+        raise FileNotFoundError(
+            f"Benchmark summary.json not found: {summary_path} and no *_ocr_benchmark.json reports found under {benchmark_root}"
+        )
+    unique_reports = list(dict.fromkeys(source_reports))
+    return payload, [f"discovered_reports={len(unique_reports)}"] + unique_reports
+
+
 def build_compare_txt_from_benchmark(
     *,
     benchmark_root: Path,
@@ -824,22 +878,9 @@ def build_compare_txt_from_benchmark(
     resolved_output = Path(output_dir)
     resolved_output.mkdir(parents=True, exist_ok=True)
 
-    summary_path = resolved_root / "summary.json"
-    if not summary_path.exists():
-        raise FileNotFoundError(f"Benchmark summary.json not found: {summary_path}")
-
-    try:
-        raw_summary = summary_path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        raw_summary = summary_path.read_text(encoding="utf-8-sig")
-    if raw_summary.startswith("\ufeff"):
-        raw_summary = raw_summary.lstrip("\ufeff")
-    payload = json.loads(raw_summary)
-    if not isinstance(payload, list):
-        raise ValueError("Benchmark summary.json must contain a list of engine rows.")
+    payload, source_map_lines = _load_compare_source_rows(resolved_root)
 
     allowed_engines = None if engines is None else {item.strip().lower() for item in engines if item.strip()}
-    source_map_lines = [f"Created: {summary_path.stat().st_mtime}"]
     results: list[CompareTxtBuildResult] = []
 
     for row in payload:

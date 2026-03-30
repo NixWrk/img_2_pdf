@@ -251,6 +251,45 @@ def test_build_compare_txt_from_benchmark(tmp_path: Path) -> None:
     assert (output_dir / "sources_map.txt").exists()
 
 
+def test_build_compare_txt_from_reports_without_summary(tmp_path: Path) -> None:
+    benchmark_root = tmp_path / "bench"
+    output_dir = tmp_path / "compare_txt"
+    benchmark_root.mkdir()
+
+    surya_dir = benchmark_root / "surya"
+    chandra_dir = benchmark_root / "chandra"
+    surya_dir.mkdir()
+    chandra_dir.mkdir()
+
+    surya_txt = surya_dir / "fixture_doc_surya.txt"
+    chandra_txt = chandra_dir / "fixture_doc_chandra.txt"
+    surya_txt.write_text("[SOURCE PAGE 0001]\nS\n", encoding="utf-8")
+    chandra_txt.write_text("[SOURCE PAGE 0001]\nC\n", encoding="utf-8")
+
+    surya_report = {
+        "pdf_path": "fixture_doc.pdf",
+        "results": [{"engine": "surya", "status": "ok", "artifact_path": str(surya_txt)}],
+    }
+    chandra_report = {
+        "pdf_path": "fixture_doc.pdf",
+        "results": [{"engine": "chandra", "status": "ok", "artifact_path": str(chandra_txt)}],
+    }
+    (surya_dir / "fixture_doc_ocr_benchmark.json").write_text(json.dumps(surya_report), encoding="utf-8")
+    (chandra_dir / "fixture_doc_ocr_benchmark.json").write_text(json.dumps(chandra_report), encoding="utf-8")
+
+    rows = build_compare_txt_from_benchmark(
+        benchmark_root=benchmark_root,
+        output_dir=output_dir,
+        engines=("surya", "chandra"),
+    )
+    assert len(rows) == 2
+    assert all(row.status == "ok" for row in rows)
+    assert (output_dir / "fixture_doc__surya.txt").exists()
+    assert (output_dir / "fixture_doc__chandra.txt").exists()
+    sources_map = (output_dir / "sources_map.txt").read_text(encoding="utf-8")
+    assert "discovered_reports=2" in sources_map
+
+
 def test_cli_build_searchable_from_artifacts_success(monkeypatch, tmp_path: Path, capsys) -> None:
     compare_dir = tmp_path / "compare"
     pdf_root = tmp_path / "pdf_root"
