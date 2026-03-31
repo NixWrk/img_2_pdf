@@ -236,7 +236,7 @@ def test_run_ocr_benchmark_unready_engine_is_error(tmp_path, monkeypatch) -> Non
     assert results[0].artifact_path is not None
 
 
-def test_olmocr_docker_defaults_include_relaxed_error_rate(tmp_path, monkeypatch) -> None:
+def test_olmocr_docker_defaults_single_page_to_permissive_error_rate(tmp_path, monkeypatch) -> None:
     work_dir = tmp_path / "work"
     image_paths = [tmp_path / "p1.png"]
     image_paths[0].write_bytes(b"fake")
@@ -272,6 +272,43 @@ def test_olmocr_docker_defaults_include_relaxed_error_rate(tmp_path, monkeypatch
     assert chars == 2
     command = captured["command"]
     assert "--max_page_error_rate" in command
+    assert command[command.index("--max_page_error_rate") + 1] == "1.0"
+
+
+def test_olmocr_docker_defaults_multi_page_to_relaxed_error_rate(tmp_path, monkeypatch) -> None:
+    work_dir = tmp_path / "work"
+    image_paths = [tmp_path / "p1.png", tmp_path / "p2.png"]
+    image_paths[0].write_bytes(b"fake")
+    image_paths[1].write_bytes(b"fake")
+    captured: dict[str, list[str]] = {}
+
+    monkeypatch.delenv("UNISCAN_OLMOCR_DOCKER_MAX_PAGE_ERROR_RATE", raising=False)
+
+    def fake_render(_image_paths, out_pdf):
+        out_pdf.write_bytes(b"%PDF-1.4\n")
+
+    def fake_collect(_workspace: Path):
+        return "ok", 2
+
+    def fake_run(command, capture_output, text):
+        captured["command"] = command
+        workspace_dir = work_dir / "olmocr_docker" / "work" / "ws"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(ocr_benchmark_mod, "_render_images_to_pdf", fake_render)
+    monkeypatch.setattr(ocr_benchmark_mod, "_collect_olmocr_workspace_text", fake_collect)
+
+    text, chars = ocr_benchmark_mod._run_olmocr_docker(
+        image_paths,
+        work_dir=work_dir,
+        which_fn=lambda _name: "docker",
+        run_cmd=fake_run,
+    )
+
+    assert text == "ok"
+    assert chars == 2
+    command = captured["command"]
     assert command[command.index("--max_page_error_rate") + 1] == "0.10"
 
 

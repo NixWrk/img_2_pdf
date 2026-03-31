@@ -501,8 +501,9 @@ foreach ($engine in $engineMatrix) {
             $env:UNISCAN_OLMOCR_DOCKER_IMAGE = "chatdoc/ocrflux:latest"
             $env:UNISCAN_OLMOCR_DOCKER_WORKERS = "1"
             $env:UNISCAN_OLMOCR_DOCKER_CACHE = (Join-Path $RepoRoot ".hf_cache_ocrflux")
-            # Relax strict default (1/250) so noisy scans do not discard entire docs.
-            $env:UNISCAN_OLMOCR_DOCKER_MAX_PAGE_ERROR_RATE = "0.10"
+            # In page-wise benchmarking (single page per invocation), keep pages even
+            # when OCRFlux falls back, otherwise docs get discarded too aggressively.
+            $env:UNISCAN_OLMOCR_DOCKER_MAX_PAGE_ERROR_RATE = "1.0"
         }
 
         $benchArgs = @(

@@ -935,10 +935,12 @@ def _run_olmocr_docker(
     gpu_mem_util = (os.environ.get("UNISCAN_OLMOCR_DOCKER_GPU_MEM_UTIL") or "").strip()
     pages_per_group = (os.environ.get("UNISCAN_OLMOCR_DOCKER_PAGES_PER_GROUP") or "").strip()
     max_page_retries = (os.environ.get("UNISCAN_OLMOCR_DOCKER_MAX_PAGE_RETRIES") or "").strip()
-    # ocrflux default is 1/250 (~0.004), which is too strict for noisy scans and
-    # can drop an entire document despite mostly successful pages.
+    # ocrflux default is 1/250 (~0.004), which is too strict for noisy scans.
+    # In page-wise mode (single page per invocation), any fallback would discard
+    # the whole page unless we relax the threshold to 1.0.
+    default_error_rate = "1.0" if len(image_paths) <= 1 else "0.10"
     max_page_error_rate = (
-        os.environ.get("UNISCAN_OLMOCR_DOCKER_MAX_PAGE_ERROR_RATE") or "0.10"
+        os.environ.get("UNISCAN_OLMOCR_DOCKER_MAX_PAGE_ERROR_RATE") or default_error_rate
     ).strip()
 
     cache_dir_raw = (os.environ.get("UNISCAN_OLMOCR_DOCKER_CACHE") or str(_REPO_ROOT / ".hf_cache_ocrflux")).strip()
