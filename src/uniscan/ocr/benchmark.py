@@ -832,6 +832,17 @@ def _collect_olmocr_workspace_text(workspace: Path) -> tuple[str, int]:
 
     text_parts: list[str] = []
 
+    def _load_json_relaxed(raw: str) -> Any:
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            # Some OCRFlux outputs contain bare backslashes in markdown fields
+            # (for example "\_" or "\("), which are invalid JSON escapes.
+            fixed = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", raw)
+            if fixed == raw:
+                raise
+            return json.loads(fixed)
+
     def _append_payload_text(payload: Any) -> None:
         if not isinstance(payload, dict):
             return
@@ -865,7 +876,7 @@ def _collect_olmocr_workspace_text(workspace: Path) -> tuple[str, int]:
     # Fallback for formats that keep text in JSON/JSONL payloads.
     for json_path in sorted(workspace.rglob("*.json")):
         try:
-            payload = json.loads(json_path.read_text(encoding="utf-8", errors="ignore"))
+            payload = _load_json_relaxed(json_path.read_text(encoding="utf-8", errors="ignore"))
         except Exception:
             continue
         if isinstance(payload, dict):
@@ -884,7 +895,7 @@ def _collect_olmocr_workspace_text(workspace: Path) -> tuple[str, int]:
             if not line:
                 continue
             try:
-                payload = json.loads(line)
+                payload = _load_json_relaxed(line)
             except Exception:
                 continue
             _append_payload_text(payload)
@@ -906,7 +917,7 @@ def _collect_olmocr_workspace_text(workspace: Path) -> tuple[str, int]:
             if not line:
                 continue
             try:
-                payload = json.loads(line)
+                payload = _load_json_relaxed(line)
             except Exception:
                 continue
             _append_payload_text(payload)
