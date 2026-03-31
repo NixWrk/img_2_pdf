@@ -329,25 +329,40 @@ def _run_extraction_engine_pagewise(
     work_dir: Path,
     which_fn,
     run_cmd,
-) -> tuple[list[str], int]:
+) -> tuple[list[str], int, list[dict[str, Any]]]:
     if len(image_paths) != len(source_pages_1based):
         raise ValueError("image_paths and source_pages_1based lengths must match.")
 
     page_texts: list[str] = []
     total_chars = 0
+    page_errors: list[dict[str, Any]] = []
     for image_path, source_page in zip(image_paths, source_pages_1based, strict=True):
         page_work_dir = work_dir / f"page_{source_page:04d}"
-        text, chars = _run_extraction_engine(
-            engine,
-            [image_path],
-            lang=lang,
-            work_dir=page_work_dir,
-            which_fn=which_fn,
-            run_cmd=run_cmd,
-        )
-        page_texts.append(text)
-        total_chars += int(chars)
-    return page_texts, total_chars
+        try:
+            text, chars = _run_extraction_engine(
+                engine,
+                [image_path],
+                lang=lang,
+                work_dir=page_work_dir,
+                which_fn=which_fn,
+                run_cmd=run_cmd,
+            )
+            page_texts.append(text)
+            total_chars += int(chars)
+        except Exception as exc:
+            page_texts.append("")
+            page_errors.append(
+                {
+                    "source_page": source_page,
+                    "image": str(image_path),
+                    "error": str(exc),
+                }
+            )
+
+    if page_errors and not any(text.strip() for text in page_texts):
+        preview = "; ".join(f"p{item['source_page']}: {item['error']}" for item in page_errors[:3])
+        raise RuntimeError(f"all sampled pages failed for {engine}: {preview}")
+    return page_texts, total_chars, page_errors
 
 
 def _module_presence_probe(name: str):
@@ -1332,7 +1347,7 @@ def run_ocr_benchmark(
 
                 # Keep extraction engines page-aware: persist per-page files and
                 # write markerized aggregate text that preserves source page ids.
-                page_texts, text_chars = _run_extraction_engine_pagewise(
+                page_texts, text_chars, page_errors = _run_extraction_engine_pagewise(
                     engine,
                     sampled_image_paths,
                     source_pages_1based=source_pages_1based,
@@ -1359,6 +1374,11 @@ def run_ocr_benchmark(
                         artifact_path=artifact_path,
                         text_chars=text_chars,
                         memory_delta_mb=_memory_delta_mb(rss_before, _memory_rss_mb()),
+                        note=(
+                            f"partial page failures: {len(page_errors)} / {len(source_pages_1based)}"
+                            if page_errors
+                            else None
+                        ),
                     )
                 )
             except Exception as exc:

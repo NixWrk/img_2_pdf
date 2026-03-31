@@ -352,6 +352,58 @@ def test_olmocr_docker_respects_error_rate_overrides(tmp_path, monkeypatch) -> N
     assert command[command.index("--max_page_error_rate") + 1] == "0.25"
 
 
+def test_run_extraction_engine_pagewise_keeps_partial_results(tmp_path, monkeypatch) -> None:
+    image_paths = [tmp_path / "p1.png", tmp_path / "p2.png"]
+    for image_path in image_paths:
+        image_path.write_bytes(b"img")
+
+    def fake_extract(engine, image_paths, *, lang, work_dir, which_fn, run_cmd):
+        assert engine == OCR_ENGINE_OLMOCR
+        assert len(image_paths) == 1
+        if image_paths[0].name == "p2.png":
+            raise RuntimeError("page failed")
+        return "ok-page", 7
+
+    monkeypatch.setattr(ocr_benchmark_mod, "_run_extraction_engine", fake_extract)
+
+    page_texts, chars, page_errors = ocr_benchmark_mod._run_extraction_engine_pagewise(
+        OCR_ENGINE_OLMOCR,
+        image_paths,
+        source_pages_1based=[1, 2],
+        lang="rus",
+        work_dir=tmp_path / "work",
+        which_fn=lambda _name: None,
+        run_cmd=lambda *_args, **_kwargs: None,
+    )
+
+    assert page_texts == ["ok-page", ""]
+    assert chars == 7
+    assert len(page_errors) == 1
+    assert page_errors[0]["source_page"] == 2
+
+
+def test_run_extraction_engine_pagewise_raises_when_all_pages_fail(tmp_path, monkeypatch) -> None:
+    image_paths = [tmp_path / "p1.png", tmp_path / "p2.png"]
+    for image_path in image_paths:
+        image_path.write_bytes(b"img")
+
+    def fake_extract(_engine, _image_paths, *, lang, work_dir, which_fn, run_cmd):
+        raise RuntimeError("all failed")
+
+    monkeypatch.setattr(ocr_benchmark_mod, "_run_extraction_engine", fake_extract)
+
+    with pytest.raises(RuntimeError, match="all sampled pages failed"):
+        ocr_benchmark_mod._run_extraction_engine_pagewise(
+            OCR_ENGINE_OLMOCR,
+            image_paths,
+            source_pages_1based=[1, 2],
+            lang="rus",
+            work_dir=tmp_path / "work",
+            which_fn=lambda _name: None,
+            run_cmd=lambda *_args, **_kwargs: None,
+        )
+
+
 @pytest.mark.skipif(not FIXTURE_PDF.exists(), reason="external OCR fixture is not available")
 def test_run_ocr_benchmark_uses_external_fixture_smoke(tmp_path, monkeypatch) -> None:
     output_dir = tmp_path / "out"
