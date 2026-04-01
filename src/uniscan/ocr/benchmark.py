@@ -10,7 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import perf_counter
@@ -38,6 +38,7 @@ _DEFAULT_HF_CACHE_HOME = _REPO_ROOT / ".hf_cache"
 _DEFAULT_MODELSCOPE_CACHE_HOME = _REPO_ROOT / ".modelscope_cache"
 _DEFAULT_SURYA_MODEL_CACHE_HOME = _REPO_ROOT / ".surya_cache"
 _DEFAULT_YOLO_CONFIG_HOME = _REPO_ROOT / ".ultralytics"
+_DEFAULT_RUNTIME_TMP_HOME = _REPO_ROOT / ".tmp_runtime"
 
 
 @dataclass(slots=True)
@@ -372,6 +373,20 @@ def _module_presence_probe(name: str):
     return object()
 
 
+def _create_runtime_work_dir(*, prefix: str) -> Path:
+    root_raw = (os.environ.get("UNISCAN_RUNTIME_TMP") or "").strip()
+    root = Path(root_raw) if root_raw else _DEFAULT_RUNTIME_TMP_HOME
+    root.mkdir(parents=True, exist_ok=True)
+    for _ in range(64):
+        candidate = root / f"{prefix}{uuid.uuid4().hex[:12]}"
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"Unable to allocate runtime work dir under '{root}'.")
+
+
 def _run_paddleocr_direct(image_paths: Sequence[Path], *, lang: str) -> tuple[str, int]:
     os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(_DEFAULT_PADDLE_CACHE_HOME))
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
@@ -408,7 +423,27 @@ def _run_surya_module_cli(
     if len(image_paths) == 0:
         raise ValueError("No images for Surya OCR.")
 
-    input_dir = image_paths[0].parent
+    input_dir = work_dir / "surya_input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    # Surya CLI consumes a directory. For pagewise mode we must isolate input
+    # files, otherwise every call re-processes all sibling pages and pollutes
+    # per-page artifacts with foreign text.
+    ordered_names: list[str] = []
+    for idx, image_path in enumerate(image_paths, start=1):
+        src = Path(image_path)
+        if not src.exists():
+            continue
+        if len(image_paths) == 1:
+            target_name = src.name
+        else:
+            target_name = f"{idx:04d}_{src.name}"
+        target = input_dir / target_name
+        shutil.copy2(src, target)
+        ordered_names.append(target_name)
+
+    if not ordered_names:
+        raise RuntimeError("Surya input directory is empty after staging images.")
+
     output_root = work_dir / "surya_out"
     output_root.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("MODEL_CACHE_DIR", str(_DEFAULT_SURYA_MODEL_CACHE_HOME))
@@ -442,17 +477,38 @@ def _run_surya_module_cli(
 
     payload = json.loads(results_json.read_text(encoding="utf-8"))
     collected: list[str] = []
-    for pages in payload.values():
-        if not isinstance(pages, list):
-            continue
-        for page in pages:
-            if not isinstance(page, dict):
+    consumed = False
+    if isinstance(payload, dict):
+        for image_name in ordered_names:
+            pages = payload.get(image_name)
+            if not isinstance(pages, list):
+                # Some builds key by stem, not full filename.
+                pages = payload.get(Path(image_name).stem)
+            if not isinstance(pages, list):
                 continue
-            for line in page.get("text_lines", []):
-                if isinstance(line, dict):
-                    text = (line.get("text") or "").strip()
-                    if text:
-                        collected.append(text)
+            consumed = True
+            for page in pages:
+                if not isinstance(page, dict):
+                    continue
+                for line in page.get("text_lines", []):
+                    if isinstance(line, dict):
+                        text = (line.get("text") or "").strip()
+                        if text:
+                            collected.append(text)
+
+    # Fallback for unknown payload layouts.
+    if not consumed:
+        for pages in payload.values():
+            if not isinstance(pages, list):
+                continue
+            for page in pages:
+                if not isinstance(page, dict):
+                    continue
+                for line in page.get("text_lines", []):
+                    if isinstance(line, dict):
+                        text = (line.get("text") or "").strip()
+                        if text:
+                            collected.append(text)
     text = "\n".join(collected)
     return text, len(text)
 
@@ -1264,8 +1320,8 @@ def run_ocr_benchmark(
     results: list[OcrBenchmarkResult] = []
     source_pages_1based = [page + 1 for page in sample_pages]
 
-    with tempfile.TemporaryDirectory(prefix="uniscan_ocr_benchmark_") as tmp:
-        tmp_dir = Path(tmp)
+    tmp_dir = _create_runtime_work_dir(prefix="uniscan_ocr_benchmark_")
+    try:
         sampled_image_paths = _render_sample_paths(
             resolved_pdf,
             sample_pages,
@@ -1395,6 +1451,8 @@ def run_ocr_benchmark(
                         error=str(exc),
                     )
                 )
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     report_path = resolved_output / f"{resolved_pdf.stem}_ocr_benchmark.json"
     report_path.write_text(

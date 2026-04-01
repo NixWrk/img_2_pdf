@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+from types import ModuleType
 
 import numpy as np
 import pytest
@@ -402,6 +404,48 @@ def test_run_extraction_engine_pagewise_raises_when_all_pages_fail(tmp_path, mon
             which_fn=lambda _name: None,
             run_cmd=lambda *_args, **_kwargs: None,
         )
+
+
+def test_surya_module_cli_uses_only_staged_inputs(tmp_path, monkeypatch) -> None:
+    image_path = tmp_path / "page_0001.png"
+    image_path.write_bytes(b"img")
+    work_dir = tmp_path / "work"
+
+    surya_module = ModuleType("surya")
+    scripts_module = ModuleType("surya.scripts")
+    ocr_text_module = ModuleType("surya.scripts.ocr_text")
+
+    class _DummyCli:
+        @staticmethod
+        def main(*, args, standalone_mode=False):
+            assert standalone_mode is False
+            input_dir = Path(args[0])
+            output_root = Path(args[2])
+            payload = {
+                name: [{"text_lines": [{"text": f"TEXT::{name}"}]}]
+                for name in sorted(path.name for path in input_dir.iterdir() if path.is_file())
+            }
+            # Simulate unrelated page accidentally present in raw model output.
+            payload["foreign_page.png"] = [{"text_lines": [{"text": "FOREIGN"}]}]
+            result_file = output_root / input_dir.name / "results.json"
+            result_file.parent.mkdir(parents=True, exist_ok=True)
+            result_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    ocr_text_module.ocr_text_cli = _DummyCli
+    monkeypatch.setitem(sys.modules, "surya", surya_module)
+    monkeypatch.setitem(sys.modules, "surya.scripts", scripts_module)
+    monkeypatch.setitem(sys.modules, "surya.scripts.ocr_text", ocr_text_module)
+
+    text, chars = ocr_benchmark_mod._run_surya_module_cli(
+        [image_path],
+        lang="rus",
+        work_dir=work_dir,
+        run_cmd=lambda *_args, **_kwargs: None,
+    )
+
+    assert "TEXT::page_0001.png" in text
+    assert "FOREIGN" not in text
+    assert chars == len(text)
 
 
 @pytest.mark.skipif(not FIXTURE_PDF.exists(), reason="external OCR fixture is not available")
