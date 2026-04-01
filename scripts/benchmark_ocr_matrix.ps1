@@ -363,7 +363,10 @@ foreach ($engine in $engineMatrix) {
         # Surya is handled separately because current surya-ocr pins may upgrade
         # torch and break preinstalled torchvision/torchaudio combos.
         if ($engine["gpu_torch"] -eq $true) {
-            if ($engineName -ne "surya") {
+            if ($engineName -eq "chandra") {
+                "Skipping generic torch install for chandra; will resolve CUDA build after engine deps." | Tee-Object -FilePath $logPath -Append | Out-Host
+            }
+            elseif ($engineName -ne "surya") {
                 if ($torchGpuOk) {
                     $null = Invoke-Logged -Exe $venvPython -ArgList @(
                         "-m", "pip", "install", "--upgrade",
@@ -420,6 +423,45 @@ foreach ($engine in $engineMatrix) {
                 "-m", "pip", "install", "--upgrade",
                 "torchvision", "torchaudio"
             ) -LogPath $logPath -StepName "Align torchvision/torchaudio with torch"
+        }
+        if ($engineName -eq "chandra") {
+            if (-not $torchGpuOk) {
+                throw "Chandra GPU mode requires CUDA-capable PyTorch, but GPU compute capability is too low ($gpuComputeCap)."
+            }
+
+            $chandraCudaReady = $false
+            $cudaTorchIndices = @(
+                "https://download.pytorch.org/whl/cu128",
+                "https://download.pytorch.org/whl/cu126",
+                "https://download.pytorch.org/whl/cu124",
+                "https://download.pytorch.org/whl/cu121"
+            )
+            foreach ($torchIndex in $cudaTorchIndices) {
+                try {
+                    $null = Invoke-Logged -Exe $venvPython -ArgList @(
+                        "-m", "pip", "install", "--upgrade",
+                        "torch", "torchvision",
+                        "--index-url", $torchIndex
+                    ) -LogPath $logPath -StepName "Install Chandra CUDA torch ($torchIndex)"
+                }
+                catch {
+                    ("[warn] CUDA torch install failed from {0}" -f $torchIndex) | Tee-Object -FilePath $logPath -Append | Out-Host
+                    continue
+                }
+
+                $cudaProbeExit = Invoke-Logged -Exe $venvPython -ArgList @(
+                    "-c",
+                    "import sys, torch; print('torch', torch.__version__); print('cuda_available', torch.cuda.is_available()); sys.exit(0 if torch.cuda.is_available() else 1)"
+                ) -LogPath $logPath -StepName "Probe Chandra CUDA torch ($torchIndex)" -AllowFailure
+                if ($cudaProbeExit -eq 0) {
+                    $chandraCudaReady = $true
+                    break
+                }
+            }
+
+            if (-not $chandraCudaReady) {
+                throw "Failed to activate CUDA-enabled torch for Chandra. Aborting to avoid CPU fallback."
+            }
         }
         $entry.install_exit_code = 0
 
@@ -505,6 +547,12 @@ foreach ($engine in $engineMatrix) {
             # when OCRFlux falls back, otherwise docs get discarded too aggressively.
             $env:UNISCAN_OLMOCR_DOCKER_MAX_PAGE_ERROR_RATE = "1.0"
         }
+        if ($engineName -eq "chandra") {
+            # Disallow silent CPU fallback in benchmark runs.
+            $env:UNISCAN_CHANDRA_PREFER_GPU = "1"
+            $env:UNISCAN_CHANDRA_REQUIRE_GPU = "1"
+            $env:TORCH_DEVICE = "cuda:0"
+        }
 
         $benchArgs = @(
             "-m", "uniscan",
@@ -585,7 +633,10 @@ foreach ($engine in $engineMatrix) {
             "UNISCAN_OLMOCR_DOCKER_GPU_MEM_UTIL",
             "UNISCAN_OLMOCR_DOCKER_PAGES_PER_GROUP",
             "UNISCAN_OLMOCR_DOCKER_MAX_PAGE_RETRIES",
-            "UNISCAN_OLMOCR_DOCKER_MAX_PAGE_ERROR_RATE"
+            "UNISCAN_OLMOCR_DOCKER_MAX_PAGE_ERROR_RATE",
+            "UNISCAN_CHANDRA_PREFER_GPU",
+            "UNISCAN_CHANDRA_REQUIRE_GPU",
+            "TORCH_DEVICE"
         )) {
             Remove-Item "Env:$name" -ErrorAction SilentlyContinue
         }

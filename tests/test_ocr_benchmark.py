@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -436,6 +437,98 @@ def test_run_extraction_engine_pagewise_collects_surya_sidecar(tmp_path, monkeyp
     assert len(page_metadata) == 1
     assert page_metadata[0]["source_page"] == 1
     assert Path(page_metadata[0]["surya_page_lines_path"]).exists()
+
+
+def test_run_extraction_engine_pagewise_collects_chandra_sidecar(tmp_path, monkeypatch) -> None:
+    image_paths = [tmp_path / "p1.png"]
+    image_paths[0].write_bytes(b"img")
+
+    def fake_extract(engine, _image_paths, *, lang, work_dir, which_fn, run_cmd):
+        assert engine == OCR_ENGINE_CHANDRA
+        sidecar = work_dir / "chandra_page_lines.json"
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text('{"images":[]}', encoding="utf-8")
+        return "ok-chandra", 9
+
+    monkeypatch.setattr(ocr_benchmark_mod, "_run_extraction_engine", fake_extract)
+
+    page_texts, chars, page_errors, page_metadata = ocr_benchmark_mod._run_extraction_engine_pagewise(
+        OCR_ENGINE_CHANDRA,
+        image_paths,
+        source_pages_1based=[1],
+        lang="rus",
+        work_dir=tmp_path / "work",
+        which_fn=lambda _name: None,
+        run_cmd=lambda *_args, **_kwargs: None,
+    )
+
+    assert page_texts == ["ok-chandra"]
+    assert chars == 9
+    assert page_errors == []
+    assert len(page_metadata) == 1
+    assert page_metadata[0]["source_page"] == 1
+    assert Path(page_metadata[0]["chandra_page_lines_path"]).exists()
+
+
+def test_write_pagewise_text_artifacts_copies_chandra_geometry(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
+    aggregate_path = tmp_path / "doc_chandra.txt"
+    sidecar_src = tmp_path / "chandra_page_lines.json"
+    sidecar_src.write_text('{"images":[]}', encoding="utf-8")
+    pdf_path = tmp_path / "doc.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+
+    total_chars, pages_json_path = ocr_benchmark_mod._write_pagewise_text_artifacts(
+        output_dir=output_dir,
+        engine=OCR_ENGINE_CHANDRA,
+        pdf_path=pdf_path,
+        source_pages_1based=[1],
+        page_texts=["line-1"],
+        aggregate_path=aggregate_path,
+        page_metadata=[{"source_page": 1, "chandra_page_lines_path": str(sidecar_src)}],
+    )
+
+    assert total_chars == len("line-1")
+    assert pages_json_path.exists()
+    copied = output_dir / OCR_ENGINE_CHANDRA / "page_0001.chandra.json"
+    assert copied.exists()
+    payload = json.loads(pages_json_path.read_text(encoding="utf-8"))
+    assert payload["pages"][0]["geometry_file"] == "page_0001.chandra.json"
+    assert payload["pages"][0]["geometry_type"] == "chandra_text_lines"
+
+
+def test_configure_chandra_runtime_device_prefers_cuda(monkeypatch) -> None:
+    class _Cuda:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+    fake_torch = SimpleNamespace(__version__="9.9.9", cuda=_Cuda())
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.delenv("TORCH_DEVICE", raising=False)
+    monkeypatch.setenv("UNISCAN_CHANDRA_PREFER_GPU", "1")
+    monkeypatch.delenv("UNISCAN_CHANDRA_REQUIRE_GPU", raising=False)
+
+    device = ocr_benchmark_mod._configure_chandra_runtime_device()
+
+    assert device == "cuda:0"
+    assert os.environ.get("TORCH_DEVICE") == "cuda:0"
+
+
+def test_configure_chandra_runtime_device_raises_when_gpu_required_without_cuda(monkeypatch) -> None:
+    class _Cuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+    fake_torch = SimpleNamespace(__version__="9.9.9", cuda=_Cuda())
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.delenv("TORCH_DEVICE", raising=False)
+    monkeypatch.setenv("UNISCAN_CHANDRA_PREFER_GPU", "1")
+    monkeypatch.setenv("UNISCAN_CHANDRA_REQUIRE_GPU", "1")
+
+    with pytest.raises(RuntimeError, match="CUDA is unavailable"):
+        ocr_benchmark_mod._configure_chandra_runtime_device()
 
 
 def test_surya_module_cli_uses_only_staged_inputs(tmp_path, monkeypatch) -> None:

@@ -539,8 +539,10 @@ def _load_surya_page_geometry(
     *,
     compare_dir: Path,
     document: str,
+    engine: str = "surya",
+    geometry_types: Sequence[str] = ("surya_text_lines",),
 ) -> dict[int, dict[str, object]]:
-    engine_dir = compare_dir.parent / "surya"
+    engine_dir = compare_dir.parent / engine
     pages_json_path = engine_dir / "pages.json"
     if not pages_json_path.exists():
         return {}
@@ -562,16 +564,20 @@ def _load_surya_page_geometry(
     if not isinstance(pages, list):
         return {}
 
+    allowed_geometry_types = {item.strip().lower() for item in geometry_types if item and item.strip()}
+    if not allowed_geometry_types:
+        return {}
+
     geometry_by_page: dict[int, dict[str, object]] = {}
     for page_info in pages:
         if not isinstance(page_info, dict):
             continue
         source_page = page_info.get("source_page")
         geometry_file = page_info.get("geometry_file")
-        geometry_type = page_info.get("geometry_type")
+        geometry_type = str(page_info.get("geometry_type") or "").strip().lower()
         if not isinstance(source_page, int):
             continue
-        if geometry_type != "surya_text_lines":
+        if geometry_type not in allowed_geometry_types:
             continue
         if not isinstance(geometry_file, str) or not geometry_file.strip():
             continue
@@ -965,6 +971,15 @@ def run_artifact_searchable_package(
                 surya_geometry_by_page = _load_surya_page_geometry(
                     compare_dir=resolved_compare,
                     document=document,
+                    engine="surya",
+                    geometry_types=("surya_text_lines",),
+                )
+            if engine == "chandra":
+                surya_geometry_by_page = _load_surya_page_geometry(
+                    compare_dir=resolved_compare,
+                    document=document,
+                    engine="chandra",
+                    geometry_types=("chandra_text_lines",),
                 )
             out_pdf = resolved_output / document / f"{document}__{engine}_searchable.pdf"
             page_count, text_chars = _build_searchable_pdf_from_text(

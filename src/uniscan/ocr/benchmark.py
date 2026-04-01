@@ -251,6 +251,66 @@ def _memory_delta_mb(before: float | None, after: float | None) -> float | None:
     return round(after - before, 3)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _configure_chandra_runtime_device() -> str:
+    """Resolve TORCH_DEVICE for Chandra before importing chandra.settings."""
+
+    explicit = (os.environ.get("TORCH_DEVICE") or "").strip()
+    prefer_gpu = _env_bool("UNISCAN_CHANDRA_PREFER_GPU", default=True)
+    require_gpu = _env_bool("UNISCAN_CHANDRA_REQUIRE_GPU", default=False)
+
+    def _cuda_probe() -> tuple[bool, str]:
+        try:
+            import torch  # type: ignore
+        except Exception as exc:
+            return False, f"torch import failed: {exc}"
+        try:
+            available = bool(torch.cuda.is_available())
+        except Exception as exc:
+            return False, f"torch.cuda probe failed: {exc}"
+        if available:
+            return True, f"torch={getattr(torch, '__version__', 'unknown')}"
+        return False, f"torch={getattr(torch, '__version__', 'unknown')} cuda_available=False"
+
+    if explicit:
+        if explicit.lower().startswith("cuda"):
+            has_cuda, detail = _cuda_probe()
+            if not has_cuda and require_gpu:
+                raise RuntimeError(
+                    f"Chandra GPU mode requires CUDA, but TORCH_DEVICE='{explicit}' is unusable ({detail})."
+                )
+        return explicit
+
+    if not prefer_gpu and not require_gpu:
+        os.environ.setdefault("TORCH_DEVICE", "cpu")
+        return os.environ["TORCH_DEVICE"]
+
+    has_cuda, detail = _cuda_probe()
+    if has_cuda:
+        os.environ["TORCH_DEVICE"] = "cuda:0"
+        return "cuda:0"
+
+    if require_gpu:
+        raise RuntimeError(
+            "Chandra GPU mode is required, but CUDA is unavailable. "
+            f"Install a CUDA-enabled torch build in the Chandra venv ({detail})."
+        )
+
+    os.environ.setdefault("TORCH_DEVICE", "cpu")
+    return os.environ["TORCH_DEVICE"]
+
+
 def _artifact_path_for_engine(output_dir: Path, pdf_stem: str, engine: str) -> Path:
     suffix = ".pdf" if engine in SEARCHABLE_PDF_ENGINES else ".txt"
     return output_dir / f"{pdf_stem}_{engine}{suffix}"
@@ -305,18 +365,27 @@ def _write_pagewise_text_artifacts(
             "file": page_file.name,
             "text_chars": chars,
         }
-        sidecar_raw = metadata_by_page.get(source_page, {}).get("surya_page_lines_path")
-        if isinstance(sidecar_raw, str):
+        page_meta = metadata_by_page.get(source_page, {})
+        sidecar_specs = (
+            ("surya_page_lines_path", "surya_text_lines", "surya"),
+            ("chandra_page_lines_path", "chandra_text_lines", "chandra"),
+        )
+        for key, geometry_type, suffix in sidecar_specs:
+            sidecar_raw = page_meta.get(key)
+            if not isinstance(sidecar_raw, str):
+                continue
             sidecar_src = Path(sidecar_raw)
-            if sidecar_src.exists():
-                sidecar_name = f"page_{source_page:04d}.surya.json"
-                sidecar_dst = engine_dir / sidecar_name
-                try:
-                    shutil.copy2(sidecar_src, sidecar_dst)
-                    page_info["geometry_file"] = sidecar_name
-                    page_info["geometry_type"] = "surya_text_lines"
-                except Exception:
-                    pass
+            if not sidecar_src.exists():
+                continue
+            sidecar_name = f"page_{source_page:04d}.{suffix}.json"
+            sidecar_dst = engine_dir / sidecar_name
+            try:
+                shutil.copy2(sidecar_src, sidecar_dst)
+                page_info["geometry_file"] = sidecar_name
+                page_info["geometry_type"] = geometry_type
+                break
+            except Exception:
+                continue
 
         pages_payload.append(page_info)
 
@@ -380,6 +449,15 @@ def _run_extraction_engine_pagewise(
                         {
                             "source_page": source_page,
                             "surya_page_lines_path": str(sidecar),
+                        }
+                    )
+            if engine == OCR_ENGINE_CHANDRA:
+                sidecar = page_work_dir / "chandra_page_lines.json"
+                if sidecar.exists():
+                    page_metadata.append(
+                        {
+                            "source_page": source_page,
+                            "chandra_page_lines_path": str(sidecar),
                         }
                     )
         except Exception as exc:
@@ -837,6 +915,7 @@ def _run_chandra_module(
         raise ValueError("No images for Chandra OCR.")
 
     os.environ.setdefault("HF_HOME", str(_DEFAULT_HF_CACHE_HOME))
+    selected_device = _configure_chandra_runtime_device()
     # Chandra uses PIL internally — lift the decompression-bomb guard.
     try:
         from PIL import Image as _PIL_Image  # type: ignore
@@ -848,23 +927,96 @@ def _run_chandra_module(
     from chandra.model.schema import BatchInputItem
     from chandra.input import load_image
 
+    def _chunk_text(raw_content: Any) -> str:
+        if raw_content is None:
+            return ""
+        text = re.sub(r"<[^>]+>", " ", str(raw_content))
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    def _safe_bbox(raw_bbox: Any, width: int, height: int) -> list[float] | None:
+        if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
+            return None
+        try:
+            x0 = float(raw_bbox[0])
+            y0 = float(raw_bbox[1])
+            x1 = float(raw_bbox[2])
+            y1 = float(raw_bbox[3])
+        except Exception:
+            return None
+        x0 = max(0.0, min(x0, float(width)))
+        y0 = max(0.0, min(y0, float(height)))
+        x1 = max(0.0, min(x1, float(width)))
+        y1 = max(0.0, min(y1, float(height)))
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return [x0, y0, x1, y1]
+
+    _ = lang
     model = InferenceManager(method="hf")
+    if _env_bool("UNISCAN_CHANDRA_REQUIRE_GPU", default=False):
+        model_device = str(getattr(getattr(model, "model", None), "device", ""))
+        if not model_device.lower().startswith("cuda"):
+            raise RuntimeError(
+                "Chandra model loaded without CUDA device while GPU mode is required "
+                f"(TORCH_DEVICE={selected_device!r}, model_device={model_device!r})."
+            )
 
     collected: list[str] = []
+    sidecar_images: list[dict[str, Any]] = []
     for image_path in image_paths:
         pil_image = load_image(str(image_path))
+        width, height = pil_image.size
         batch = [BatchInputItem(image=pil_image, prompt_type="ocr_layout")]
         results = model.generate(batch, include_images=False, include_headers_footers=False)
 
         page_texts: list[str] = []
+        page_lines: list[dict[str, Any]] = []
         for result in results:
-            md = getattr(result, "markdown", "") or ""
-            md = md.strip()
-            if md:
-                page_texts.append(md)
+            chunks = getattr(result, "chunks", None)
+            if isinstance(chunks, list):
+                for chunk in chunks:
+                    if not isinstance(chunk, dict):
+                        continue
+                    line_text = _chunk_text(chunk.get("content"))
+                    if not line_text:
+                        continue
+                    page_texts.append(line_text)
+                    bbox = _safe_bbox(chunk.get("bbox"), width, height)
+                    if bbox is not None:
+                        page_lines.append({"text": line_text, "bbox": bbox})
+            if not page_texts:
+                md = getattr(result, "markdown", "") or ""
+                md = _strip_markdown(md.strip())
+                if md:
+                    for line in md.splitlines():
+                        line = line.strip()
+                        if line:
+                            page_texts.append(line)
+
         if not page_texts:
             raise RuntimeError(f"Chandra OCR produced no text for {image_path.name}.")
+
         collected.append("\n".join(page_texts))
+        if page_lines:
+            sidecar_images.append(
+                {
+                    "image_name": image_path.name,
+                    "pages": [
+                        {
+                            "image_bbox": [0.0, 0.0, float(width), float(height)],
+                            "text_lines": page_lines,
+                        }
+                    ],
+                }
+            )
+
+    if sidecar_images:
+        sidecar_path = work_dir / "chandra_page_lines.json"
+        sidecar_path.write_text(
+            json.dumps({"images": sidecar_images}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     text = "\n".join(part for part in collected if part and not part.isspace())
     return text, len(text)

@@ -278,6 +278,70 @@ def test_run_artifact_searchable_package_builds_pdfs(tmp_path: Path) -> None:
     assert (output_dir / "artifact_searchable_summary.csv").exists()
 
 
+def test_run_artifact_searchable_package_uses_chandra_sidecar_geometry(tmp_path: Path) -> None:
+    compare_dir = tmp_path / "compare"
+    pdf_root = tmp_path / "pdf_root"
+    output_dir = tmp_path / "out"
+    compare_dir.mkdir()
+    pdf_root.mkdir()
+
+    doc_name = "fixture_doc"
+    _build_sample_pdf(pdf_root, doc_name, [40])
+    (compare_dir / f"{doc_name}__chandra.txt").write_text("", encoding="utf-8")
+
+    chandra_dir = compare_dir.parent / "chandra"
+    chandra_dir.mkdir()
+    (chandra_dir / "pages.json").write_text(
+        json.dumps(
+            {
+                "pdf_path": str((pdf_root / f"{doc_name}.pdf")),
+                "engine": "chandra",
+                "pages": [
+                    {
+                        "source_page": 1,
+                        "geometry_file": "page_0001.chandra.json",
+                        "geometry_type": "chandra_text_lines",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (chandra_dir / "page_0001.chandra.json").write_text(
+        json.dumps(
+            {
+                "images": [
+                    {
+                        "image_name": "00001.png",
+                        "pages": [
+                            {
+                                "image_bbox": [0, 0, 300, 200],
+                                "text_lines": [
+                                    {"text": "CHANDRA GEOMETRY LINE", "bbox": [20, 20, 280, 60]}
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rows = run_artifact_searchable_package(
+        compare_dir=compare_dir,
+        pdf_root=pdf_root,
+        output_dir=output_dir,
+        engines=("chandra",),
+    )
+
+    assert len(rows) == 1
+    assert rows[0].status == "ok"
+    assert rows[0].searchable_pdf_path is not None
+    extracted = _extract_pdf_text(Path(rows[0].searchable_pdf_path))
+    assert "CHANDRA GEOMETRY LINE" in extracted
+
+
 def test_run_artifact_searchable_package_require_markers(tmp_path: Path) -> None:
     compare_dir = tmp_path / "compare"
     pdf_root = tmp_path / "pdf_root"
