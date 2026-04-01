@@ -44,6 +44,15 @@ def _normalize_key(value: str) -> str:
     return re.sub(r"\s+", " ", value.strip().lower())
 
 
+def _clean_overlay_line(raw_line: str) -> str:
+    # Strip lightweight markdown/html markers so they do not leak into the
+    # selectable text layer (<b>, <math>, etc.).
+    line = re.sub(r"</?[^>\n]+>", "", raw_line)
+    line = line.replace("\u00a0", " ")
+    line = re.sub(r"\s+", " ", line)
+    return line.strip()
+
+
 def _parse_artifact_filename(path: Path) -> tuple[str, str]:
     stem = path.stem
     if "__" not in stem:
@@ -434,14 +443,6 @@ def _estimate_page_line_bboxes(
 
 
 def _split_page_text_lines(text: str) -> list[str]:
-    def _clean_overlay_line(raw_line: str) -> str:
-        # Strip lightweight markdown/html markers so they do not leak into the
-        # selectable text layer (<b>, <math>, etc.).
-        line = re.sub(r"</?[^>\n]+>", "", raw_line)
-        line = line.replace("\u00a0", " ")
-        line = re.sub(r"\s+", " ", line)
-        return line.strip()
-
     lines: list[str] = []
     for raw in text.splitlines():
         line = _clean_overlay_line(raw)
@@ -534,6 +535,166 @@ def _assign_lines_to_boxes(
     return assignments
 
 
+def _load_surya_page_geometry(
+    *,
+    compare_dir: Path,
+    document: str,
+) -> dict[int, dict[str, object]]:
+    engine_dir = compare_dir.parent / "surya"
+    pages_json_path = engine_dir / "pages.json"
+    if not pages_json_path.exists():
+        return {}
+
+    try:
+        payload = json.loads(pages_json_path.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    pdf_path = payload.get("pdf_path")
+    if isinstance(pdf_path, str) and pdf_path.strip():
+        source_stem = Path(pdf_path).stem
+        if _normalize_key(source_stem) != _normalize_key(document):
+            return {}
+
+    pages = payload.get("pages")
+    if not isinstance(pages, list):
+        return {}
+
+    geometry_by_page: dict[int, dict[str, object]] = {}
+    for page_info in pages:
+        if not isinstance(page_info, dict):
+            continue
+        source_page = page_info.get("source_page")
+        geometry_file = page_info.get("geometry_file")
+        geometry_type = page_info.get("geometry_type")
+        if not isinstance(source_page, int):
+            continue
+        if geometry_type != "surya_text_lines":
+            continue
+        if not isinstance(geometry_file, str) or not geometry_file.strip():
+            continue
+
+        sidecar_path = engine_dir / geometry_file
+        if not sidecar_path.exists():
+            continue
+        try:
+            sidecar = json.loads(sidecar_path.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            continue
+        if not isinstance(sidecar, dict):
+            continue
+        images = sidecar.get("images")
+        if not isinstance(images, list):
+            continue
+
+        image_width = 0.0
+        image_height = 0.0
+        lines: list[dict[str, object]] = []
+        for image_entry in images:
+            if not isinstance(image_entry, dict):
+                continue
+            page_entries = image_entry.get("pages")
+            if not isinstance(page_entries, list):
+                continue
+            for page_entry in page_entries:
+                if not isinstance(page_entry, dict):
+                    continue
+                image_bbox = page_entry.get("image_bbox")
+                if (
+                    isinstance(image_bbox, list)
+                    and len(image_bbox) == 4
+                    and all(isinstance(item, (int, float)) for item in image_bbox)
+                ):
+                    image_width = max(image_width, float(image_bbox[2]) - float(image_bbox[0]))
+                    image_height = max(image_height, float(image_bbox[3]) - float(image_bbox[1]))
+                raw_lines = page_entry.get("text_lines")
+                if not isinstance(raw_lines, list):
+                    continue
+                for raw_line in raw_lines:
+                    if not isinstance(raw_line, dict):
+                        continue
+                    text = _clean_overlay_line(str(raw_line.get("text") or ""))
+                    bbox = raw_line.get("bbox")
+                    if (
+                        not text
+                        or not isinstance(bbox, list)
+                        or len(bbox) != 4
+                        or not all(isinstance(item, (int, float)) for item in bbox)
+                    ):
+                        continue
+                    lines.append(
+                        {
+                            "text": text,
+                            "bbox": [float(item) for item in bbox],
+                        }
+                    )
+
+        if not lines:
+            continue
+        if image_width <= 0.0 or image_height <= 0.0:
+            max_x = max(float(item["bbox"][2]) for item in lines if isinstance(item.get("bbox"), list))
+            max_y = max(float(item["bbox"][3]) for item in lines if isinstance(item.get("bbox"), list))
+            image_width = image_width if image_width > 0 else max_x
+            image_height = image_height if image_height > 0 else max_y
+        if image_width <= 0.0 or image_height <= 0.0:
+            continue
+
+        geometry_by_page[source_page] = {
+            "image_width": image_width,
+            "image_height": image_height,
+            "lines": lines,
+        }
+
+    return geometry_by_page
+
+
+def _placements_from_surya_geometry(
+    *,
+    page_data: dict[str, object],
+    page_width: float,
+    page_height: float,
+) -> list[tuple[tuple[float, float, float, float], str]]:
+    raw_lines = page_data.get("lines")
+    if not isinstance(raw_lines, list):
+        return []
+    image_width = float(page_data.get("image_width") or 0.0)
+    image_height = float(page_data.get("image_height") or 0.0)
+    if image_width <= 0.0 or image_height <= 0.0:
+        return []
+
+    scale_x = page_width / image_width
+    scale_y = page_height / image_height
+    placements: list[tuple[tuple[float, float, float, float], str]] = []
+    for item in raw_lines:
+        if not isinstance(item, dict):
+            continue
+        text = _clean_overlay_line(str(item.get("text") or ""))
+        bbox = item.get("bbox")
+        if (
+            not text
+            or not isinstance(bbox, list)
+            or len(bbox) != 4
+            or not all(isinstance(value, (int, float)) for value in bbox)
+        ):
+            continue
+        x0 = min(float(bbox[0]), float(bbox[2]))
+        y0 = min(float(bbox[1]), float(bbox[3]))
+        x1 = max(float(bbox[0]), float(bbox[2]))
+        y1 = max(float(bbox[1]), float(bbox[3]))
+        bx0 = max(0.0, x0 * scale_x)
+        by0 = max(0.0, y0 * scale_y)
+        bx1 = min(page_width, x1 * scale_x)
+        by1 = min(page_height, y1 * scale_y)
+        if bx1 <= bx0 or by1 <= by0:
+            continue
+        placements.append(((bx0, by0, bx1, by1), text))
+
+    placements.sort(key=lambda item: (item[0][1], item[0][0]))
+    return placements
+
+
 def _build_overlay_page(
     *,
     page_width: float,
@@ -585,6 +746,7 @@ def _build_searchable_pdf_from_text(
     source_pdf: Path,
     text: str,
     out_pdf: Path,
+    surya_geometry_by_page: dict[int, dict[str, object]] | None = None,
 ) -> tuple[int, int]:
     from pypdf import PdfReader, PdfWriter
     import fitz  # type: ignore
@@ -618,7 +780,8 @@ def _build_searchable_pdf_from_text(
     try:
         for page_idx, source_page in enumerate(reader.pages):
             page_text = page_texts[page_idx] if page_idx < len(page_texts) else ""
-            if page_text.strip():
+            surya_page = (surya_geometry_by_page or {}).get(page_idx + 1)
+            if page_text.strip() or isinstance(surya_page, dict):
                 crop_box = source_page.cropbox
                 media_box = source_page.mediabox
                 crop_x0 = float(crop_box.left)
@@ -628,11 +791,21 @@ def _build_searchable_pdf_from_text(
                 layout_width, layout_height = page_layout_sizes[page_idx]
                 page_width = layout_width if layout_width > 0 else (crop_width if crop_width > 0 else float(media_box.width))
                 page_height = layout_height if layout_height > 0 else (crop_height if crop_height > 0 else float(media_box.height))
-                line_boxes = page_line_boxes[page_idx]
                 page_lines = _split_page_text_lines(page_text)
-                placements = _assign_lines_to_boxes(page_lines, line_boxes)
+                placements: list[tuple[tuple[float, float, float, float], str]]
+                if isinstance(surya_page, dict):
+                    placements = _placements_from_surya_geometry(
+                        page_data=surya_page,
+                        page_width=page_width,
+                        page_height=page_height,
+                    )
+                else:
+                    line_boxes = page_line_boxes[page_idx]
+                    placements = _assign_lines_to_boxes(page_lines, line_boxes)
+                    if not placements and page_lines:
+                        placements = [((4.0, 4.0, page_width - 4.0, page_height - 4.0), "\n".join(page_lines))]
                 if not placements and page_lines:
-                    placements = [((4.0, 4.0, page_width - 4.0, page_height - 4.0), " ".join(page_lines))]
+                    placements = [((4.0, 4.0, page_width - 4.0, page_height - 4.0), "\n".join(page_lines))]
                 overlay_page = _build_overlay_page(
                     page_width=page_width,
                     page_height=page_height,
@@ -730,11 +903,18 @@ def run_artifact_searchable_package(
                     "TXT artifact has no explicit page markers. "
                     "Expected '[SOURCE PAGE N]' blocks or form-feed separators."
                 )
+            surya_geometry_by_page = None
+            if engine == "surya":
+                surya_geometry_by_page = _load_surya_page_geometry(
+                    compare_dir=resolved_compare,
+                    document=document,
+                )
             out_pdf = resolved_output / document / f"{document}__{engine}_searchable.pdf"
             page_count, text_chars = _build_searchable_pdf_from_text(
                 source_pdf=source_pdf,
                 text=text,
                 out_pdf=out_pdf,
+                surya_geometry_by_page=surya_geometry_by_page,
             )
             extracted = _extract_pdf_text(out_pdf)
             if not extracted.strip():

@@ -14,6 +14,7 @@ from uniscan.ocr.artifact_searchable import (
     _build_searchable_pdf_from_text,
     _estimate_page_split_weights,
     _has_explicit_page_markers,
+    _placements_from_surya_geometry,
     _parse_artifact_filename,
     _split_lines_to_pages_by_weights,
     _split_text_to_pages,
@@ -123,6 +124,28 @@ def test_assign_lines_to_boxes_spreads_assignments_when_many_boxes() -> None:
     y_positions = [item[0][1] for item in placements]
     assert y_positions[0] <= 1.0
     assert y_positions[-1] >= 70.0
+
+
+def test_placements_from_surya_geometry_scales_and_cleans_text() -> None:
+    payload = {
+        "image_width": 1000.0,
+        "image_height": 2000.0,
+        "lines": [
+            {
+                "text": "<b>ИНСТРУМЕНТЫ</b>",
+                "bbox": [100.0, 200.0, 300.0, 260.0],
+            }
+        ],
+    }
+    placements = _placements_from_surya_geometry(
+        page_data=payload,
+        page_width=500.0,
+        page_height=1000.0,
+    )
+    assert len(placements) == 1
+    bbox, text = placements[0]
+    assert text == "ИНСТРУМЕНТЫ"
+    assert bbox == pytest.approx((50.0, 100.0, 150.0, 130.0))
 
 
 def test_build_searchable_pdf_keeps_text_when_boxes_are_tiny(monkeypatch, tmp_path: Path) -> None:

@@ -279,24 +279,46 @@ def _write_pagewise_text_artifacts(
     source_pages_1based: Sequence[int],
     page_texts: Sequence[str],
     aggregate_path: Path,
+    page_metadata: Sequence[dict[str, Any]] | None = None,
 ) -> tuple[int, Path]:
     engine_dir = output_dir / engine
     engine_dir.mkdir(parents=True, exist_ok=True)
 
     pages_payload: list[dict[str, Any]] = []
+    metadata_by_page: dict[int, dict[str, Any]] = {}
+    if page_metadata:
+        for item in page_metadata:
+            if not isinstance(item, dict):
+                continue
+            source_page = item.get("source_page")
+            if isinstance(source_page, int):
+                metadata_by_page[source_page] = item
+
     total_chars = 0
     for source_page, text in zip(source_pages_1based, page_texts, strict=True):
         page_file = engine_dir / f"page_{source_page:04d}.txt"
         page_file.write_text(text, encoding="utf-8")
         chars = len(text)
         total_chars += chars
-        pages_payload.append(
-            {
-                "source_page": source_page,
-                "file": page_file.name,
-                "text_chars": chars,
-            }
-        )
+        page_info: dict[str, Any] = {
+            "source_page": source_page,
+            "file": page_file.name,
+            "text_chars": chars,
+        }
+        sidecar_raw = metadata_by_page.get(source_page, {}).get("surya_page_lines_path")
+        if isinstance(sidecar_raw, str):
+            sidecar_src = Path(sidecar_raw)
+            if sidecar_src.exists():
+                sidecar_name = f"page_{source_page:04d}.surya.json"
+                sidecar_dst = engine_dir / sidecar_name
+                try:
+                    shutil.copy2(sidecar_src, sidecar_dst)
+                    page_info["geometry_file"] = sidecar_name
+                    page_info["geometry_type"] = "surya_text_lines"
+                except Exception:
+                    pass
+
+        pages_payload.append(page_info)
 
     markerized = _markerized_pages_text(
         page_texts=page_texts,
@@ -330,13 +352,14 @@ def _run_extraction_engine_pagewise(
     work_dir: Path,
     which_fn,
     run_cmd,
-) -> tuple[list[str], int, list[dict[str, Any]]]:
+) -> tuple[list[str], int, list[dict[str, Any]], list[dict[str, Any]]]:
     if len(image_paths) != len(source_pages_1based):
         raise ValueError("image_paths and source_pages_1based lengths must match.")
 
     page_texts: list[str] = []
     total_chars = 0
     page_errors: list[dict[str, Any]] = []
+    page_metadata: list[dict[str, Any]] = []
     for image_path, source_page in zip(image_paths, source_pages_1based, strict=True):
         page_work_dir = work_dir / f"page_{source_page:04d}"
         try:
@@ -350,6 +373,15 @@ def _run_extraction_engine_pagewise(
             )
             page_texts.append(text)
             total_chars += int(chars)
+            if engine == OCR_ENGINE_SURYA:
+                sidecar = page_work_dir / "surya_page_lines.json"
+                if sidecar.exists():
+                    page_metadata.append(
+                        {
+                            "source_page": source_page,
+                            "surya_page_lines_path": str(sidecar),
+                        }
+                    )
         except Exception as exc:
             page_texts.append("")
             page_errors.append(
@@ -363,7 +395,7 @@ def _run_extraction_engine_pagewise(
     if page_errors and not any(text.strip() for text in page_texts):
         preview = "; ".join(f"p{item['source_page']}: {item['error']}" for item in page_errors[:3])
         raise RuntimeError(f"all sampled pages failed for {engine}: {preview}")
-    return page_texts, total_chars, page_errors
+    return page_texts, total_chars, page_errors, page_metadata
 
 
 def _module_presence_probe(name: str):
@@ -477,6 +509,7 @@ def _run_surya_module_cli(
 
     payload = json.loads(results_json.read_text(encoding="utf-8"))
     collected: list[str] = []
+    sidecar_images: list[dict[str, Any]] = []
     consumed = False
     if isinstance(payload, dict):
         for image_name in ordered_names:
@@ -487,14 +520,44 @@ def _run_surya_module_cli(
             if not isinstance(pages, list):
                 continue
             consumed = True
+            image_payload: dict[str, Any] = {"image_name": image_name, "pages": []}
             for page in pages:
                 if not isinstance(page, dict):
                     continue
+                page_payload: dict[str, Any] = {}
+                image_bbox = page.get("image_bbox")
+                if (
+                    isinstance(image_bbox, (list, tuple))
+                    and len(image_bbox) == 4
+                    and all(isinstance(item, (int, float)) for item in image_bbox)
+                ):
+                    page_payload["image_bbox"] = [float(item) for item in image_bbox]
+
+                line_payload: list[dict[str, Any]] = []
                 for line in page.get("text_lines", []):
                     if isinstance(line, dict):
                         text = (line.get("text") or "").strip()
+                        bbox = line.get("bbox")
+                        if (
+                            text
+                            and isinstance(bbox, (list, tuple))
+                            and len(bbox) == 4
+                            and all(isinstance(item, (int, float)) for item in bbox)
+                        ):
+                            line_payload.append(
+                                {
+                                    "text": text,
+                                    "bbox": [float(item) for item in bbox],
+                                }
+                            )
                         if text:
                             collected.append(text)
+                if line_payload:
+                    page_payload["text_lines"] = line_payload
+                if page_payload:
+                    image_payload["pages"].append(page_payload)
+            if image_payload["pages"]:
+                sidecar_images.append(image_payload)
 
     # Fallback for unknown payload layouts.
     if not consumed:
@@ -509,6 +572,13 @@ def _run_surya_module_cli(
                         text = (line.get("text") or "").strip()
                         if text:
                             collected.append(text)
+    if sidecar_images:
+        sidecar_path = work_dir / "surya_page_lines.json"
+        sidecar_path.write_text(
+            json.dumps({"images": sidecar_images}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
     text = "\n".join(collected)
     return text, len(text)
 
@@ -1403,7 +1473,7 @@ def run_ocr_benchmark(
 
                 # Keep extraction engines page-aware: persist per-page files and
                 # write markerized aggregate text that preserves source page ids.
-                page_texts, text_chars, page_errors = _run_extraction_engine_pagewise(
+                page_texts, text_chars, page_errors, page_metadata = _run_extraction_engine_pagewise(
                     engine,
                     sampled_image_paths,
                     source_pages_1based=source_pages_1based,
@@ -1419,6 +1489,7 @@ def run_ocr_benchmark(
                     source_pages_1based=source_pages_1based,
                     page_texts=page_texts,
                     aggregate_path=artifact_path,
+                    page_metadata=page_metadata,
                 )
                 elapsed = perf_counter() - start
                 results.append(

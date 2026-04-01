@@ -368,7 +368,7 @@ def test_run_extraction_engine_pagewise_keeps_partial_results(tmp_path, monkeypa
 
     monkeypatch.setattr(ocr_benchmark_mod, "_run_extraction_engine", fake_extract)
 
-    page_texts, chars, page_errors = ocr_benchmark_mod._run_extraction_engine_pagewise(
+    page_texts, chars, page_errors, page_metadata = ocr_benchmark_mod._run_extraction_engine_pagewise(
         OCR_ENGINE_OLMOCR,
         image_paths,
         source_pages_1based=[1, 2],
@@ -382,6 +382,7 @@ def test_run_extraction_engine_pagewise_keeps_partial_results(tmp_path, monkeypa
     assert chars == 7
     assert len(page_errors) == 1
     assert page_errors[0]["source_page"] == 2
+    assert page_metadata == []
 
 
 def test_run_extraction_engine_pagewise_raises_when_all_pages_fail(tmp_path, monkeypatch) -> None:
@@ -404,6 +405,37 @@ def test_run_extraction_engine_pagewise_raises_when_all_pages_fail(tmp_path, mon
             which_fn=lambda _name: None,
             run_cmd=lambda *_args, **_kwargs: None,
         )
+
+
+def test_run_extraction_engine_pagewise_collects_surya_sidecar(tmp_path, monkeypatch) -> None:
+    image_paths = [tmp_path / "p1.png"]
+    image_paths[0].write_bytes(b"img")
+
+    def fake_extract(engine, _image_paths, *, lang, work_dir, which_fn, run_cmd):
+        assert engine == OCR_ENGINE_SURYA
+        sidecar = work_dir / "surya_page_lines.json"
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text('{"images":[]}', encoding="utf-8")
+        return "ok-surya", 8
+
+    monkeypatch.setattr(ocr_benchmark_mod, "_run_extraction_engine", fake_extract)
+
+    page_texts, chars, page_errors, page_metadata = ocr_benchmark_mod._run_extraction_engine_pagewise(
+        OCR_ENGINE_SURYA,
+        image_paths,
+        source_pages_1based=[1],
+        lang="rus",
+        work_dir=tmp_path / "work",
+        which_fn=lambda _name: None,
+        run_cmd=lambda *_args, **_kwargs: None,
+    )
+
+    assert page_texts == ["ok-surya"]
+    assert chars == 8
+    assert page_errors == []
+    assert len(page_metadata) == 1
+    assert page_metadata[0]["source_page"] == 1
+    assert Path(page_metadata[0]["surya_page_lines_path"]).exists()
 
 
 def test_surya_module_cli_uses_only_staged_inputs(tmp_path, monkeypatch) -> None:
