@@ -434,9 +434,17 @@ def _estimate_page_line_bboxes(
 
 
 def _split_page_text_lines(text: str) -> list[str]:
+    def _clean_overlay_line(raw_line: str) -> str:
+        # Strip lightweight markdown/html markers so they do not leak into the
+        # selectable text layer (<b>, <math>, etc.).
+        line = re.sub(r"</?[^>\n]+>", "", raw_line)
+        line = line.replace("\u00a0", " ")
+        line = re.sub(r"\s+", " ", line)
+        return line.strip()
+
     lines: list[str] = []
     for raw in text.splitlines():
-        line = raw.strip()
+        line = _clean_overlay_line(raw)
         if not line:
             continue
         if line.startswith("[SOURCE PAGE"):
@@ -516,13 +524,13 @@ def _assign_lines_to_boxes(
         take = max(1, int(math.ceil(remaining_lines / remaining_boxes)))
         chunk = lines[cursor : cursor + take]
         cursor += take
-        assignments.append((box, " ".join(chunk)))
+        assignments.append((box, "\n".join(chunk)))
         if cursor >= len(lines):
             break
     if cursor < len(lines) and assignments:
         last_box, last_text = assignments[-1]
-        tail = " ".join(lines[cursor:])
-        assignments[-1] = (last_box, f"{last_text} {tail}".strip())
+        tail = "\n".join(lines[cursor:])
+        assignments[-1] = (last_box, f"{last_text}\n{tail}".strip())
     return assignments
 
 
@@ -535,63 +543,37 @@ def _build_overlay_page(
 ):
     from pypdf import PdfReader
     from reportlab.pdfgen import canvas
+    from reportlab.pdfbase import pdfmetrics
 
     packet = BytesIO()
     pdf_canvas = canvas.Canvas(packet, pagesize=(page_width, page_height), pageCompression=1)
-    candidate_sizes = (8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.5, 1.2, 1.0, 0.8, 0.6, 0.4)
 
     for bbox, text in placements:
         if not text.strip():
             continue
         x0, y0, x1, y1 = bbox
-        width = max(x1 - x0 - 1.0, 1.0)
-        height = max(y1 - y0 - 1.0, 1.0)
-        chosen_size = candidate_sizes[-1]
-        chosen_leading = max(chosen_size * 1.05, 0.4)
-        chosen_lines = [text]
-        fitted = False
+        overlay_lines = [item.strip() for item in text.splitlines() if item.strip()]
+        if not overlay_lines:
+            continue
 
-        for font_size in candidate_sizes:
-            leading = max(font_size * 1.05, 0.4)
-            max_lines = max(int(height / leading), 1)
-            lines = _wrap_text_to_width(
-                text,
-                font_name=font_name,
-                font_size=font_size,
-                max_width=width,
-            )
-            if len(lines) <= max_lines:
-                chosen_size = font_size
-                chosen_leading = leading
-                chosen_lines = lines
-                fitted = True
-                break
+        line_height = max((y1 - y0) / max(len(overlay_lines), 1), 0.5)
+        for line_idx, line in enumerate(overlay_lines):
+            sub_y0 = y0 + (line_height * line_idx)
+            sub_y1 = y0 + (line_height * (line_idx + 1))
+            width = max(x1 - x0 - 0.6, 0.5)
+            height = max(sub_y1 - sub_y0 - 0.4, 0.4)
+            font_size = max(min(height * 0.80, 32.0), 0.12)
+            natural_width = max(pdfmetrics.stringWidth(line, font_name, font_size), 0.01)
+            horiz_scale = max(min((width / natural_width) * 100.0, 800.0), 10.0)
+            baseline_y = max(page_height - sub_y1 + (height - font_size) * 0.55, 0.2)
 
-        if not fitted:
-            # Preserve all text even for very small detected boxes.
-            # We intentionally shrink invisible text size instead of dropping lines.
-            min_font = 0.1
-            lines = _wrap_text_to_width(
-                text,
-                font_name=font_name,
-                font_size=min_font,
-                max_width=width,
-            )
-            chosen_lines = lines
-            if len(lines) == 0:
-                continue
-            leading = max(height / max(len(lines), 1), 0.08)
-            chosen_leading = leading
-            chosen_size = max(min(leading / 1.05, min_font), 0.05)
-
-        baseline_y = max(page_height - y0 - chosen_size, 0.5)
-        text_obj = pdf_canvas.beginText(max(x0 + 0.5, 0.5), baseline_y)
-        text_obj.setFont(font_name, chosen_size)
-        text_obj.setLeading(chosen_leading)
-        text_obj.setTextRenderMode(3)  # invisible selectable text
-        for line in chosen_lines:
+            text_obj = pdf_canvas.beginText(max(x0 + 0.2, 0.2), baseline_y)
+            text_obj.setFont(font_name, font_size)
+            text_obj.setTextRenderMode(3)  # invisible selectable text
+            if abs(horiz_scale - 100.0) > 0.5:
+                text_obj.setHorizScale(horiz_scale)
             text_obj.textLine(line)
-        pdf_canvas.drawText(text_obj)
+            pdf_canvas.drawText(text_obj)
 
     pdf_canvas.save()
     packet.seek(0)
