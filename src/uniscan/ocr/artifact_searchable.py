@@ -494,6 +494,46 @@ def _split_line_to_word_fragments(
     return placements or [((x0, y0, x1, y1), line)]
 
 
+def _expand_lines_to_target_count(
+    lines: Sequence[str],
+    *,
+    target_count: int,
+) -> list[str]:
+    normalized = [line.strip() for line in lines if line and line.strip()]
+    if not normalized:
+        return []
+    if target_count <= len(normalized):
+        return list(normalized)
+
+    segments: list[list[str]] = [re.findall(r"\S+", line) for line in normalized]
+    segments = [seg for seg in segments if seg]
+    if not segments:
+        return list(normalized)
+
+    while len(segments) < target_count:
+        split_idx = -1
+        split_size = 0
+        for idx, seg in enumerate(segments):
+            if len(seg) > split_size:
+                split_size = len(seg)
+                split_idx = idx
+        if split_idx < 0 or split_size <= 1:
+            break
+
+        source = segments.pop(split_idx)
+        mid = len(source) // 2
+        left = source[:mid]
+        right = source[mid:]
+        if left:
+            segments.insert(split_idx, left)
+            split_idx += 1
+        if right:
+            segments.insert(split_idx, right)
+
+    result = [" ".join(seg).strip() for seg in segments if seg]
+    return [line for line in result if line]
+
+
 def _assign_lines_to_boxes(
     lines: Sequence[str],
     boxes: Sequence[tuple[float, float, float, float]],
@@ -1085,7 +1125,18 @@ def _build_searchable_pdf_from_text(
                             page_width=page_width,
                             page_height=page_height,
                         )
-                        placements = _assign_lines_to_boxes(page_lines, geometry_boxes)
+                        fit_lines = page_lines
+                        if geometry_boxes and page_lines:
+                            # Chandra often emits paragraph-like lines.
+                            # Expand lines towards geometry density so one
+                            # placement row is not overloaded with too much text.
+                            min_target = max(1, int(len(geometry_boxes) * 0.85))
+                            if len(page_lines) < min_target:
+                                fit_lines = _expand_lines_to_target_count(
+                                    page_lines,
+                                    target_count=min_target,
+                                )
+                        placements = _assign_lines_to_boxes(fit_lines, geometry_boxes)
                         if not placements:
                             placements = _placements_from_geometry_text_with_linefit(
                                 page_data=surya_page,

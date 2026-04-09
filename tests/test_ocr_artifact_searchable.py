@@ -13,6 +13,7 @@ from uniscan.ocr.artifact_searchable import (
     _assign_lines_to_boxes,
     _build_searchable_pdf_from_text,
     _estimate_page_split_weights,
+    _expand_lines_to_target_count,
     _geometry_boxes_in_reading_order,
     _geometry_lines_in_reading_order,
     _has_explicit_page_markers,
@@ -128,6 +129,14 @@ def test_split_line_to_word_fragments_keeps_single_token() -> None:
     parts = _split_line_to_word_fragments("ГОСТ19126", bbox=(0.0, 0.0, 100.0, 20.0))
     assert len(parts) == 1
     assert parts[0][1] == "ГОСТ19126"
+
+
+def test_expand_lines_to_target_count_splits_long_lines() -> None:
+    source = ["A B C D E F G H", "I J K L"]
+    expanded = _expand_lines_to_target_count(source, target_count=5)
+    assert len(expanded) == 5
+    assert "A B" in " ".join(expanded)
+    assert "K L" in " ".join(expanded)
 
 
 def test_assign_lines_to_boxes_merges_row_segments() -> None:
