@@ -19,6 +19,7 @@ from uniscan.ocr.artifact_searchable import (
     _placements_from_geometry_text_with_linefit,
     _placements_from_surya_geometry,
     _parse_artifact_filename,
+    _split_line_to_word_fragments,
     _split_lines_to_pages_by_weights,
     _split_text_to_pages,
     build_compare_txt_from_benchmark,
@@ -109,6 +110,23 @@ def test_assign_lines_to_boxes_balances_lines() -> None:
     assert len(placements) == 2
     assert "L1" in placements[0][1]
     assert "L5" in placements[1][1]
+
+
+def test_split_line_to_word_fragments_splits_into_tokens() -> None:
+    parts = _split_line_to_word_fragments(
+        "ИНСТРУМЕНТЫ МЕДИЦИНСКИЕ МЕТАЛЛИЧЕСКИЕ",
+        bbox=(10.0, 20.0, 210.0, 40.0),
+    )
+    assert len(parts) == 3
+    assert parts[0][1].startswith("ИНСТРУМЕНТЫ")
+    assert parts[-1][1].strip() == "МЕТАЛЛИЧЕСКИЕ"
+    assert parts[0][0][0] < parts[1][0][0] < parts[2][0][0]
+
+
+def test_split_line_to_word_fragments_keeps_single_token() -> None:
+    parts = _split_line_to_word_fragments("ГОСТ19126", bbox=(0.0, 0.0, 100.0, 20.0))
+    assert len(parts) == 1
+    assert parts[0][1] == "ГОСТ19126"
 
 
 def test_assign_lines_to_boxes_merges_row_segments() -> None:

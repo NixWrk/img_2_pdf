@@ -454,6 +454,42 @@ def _split_page_text_lines(text: str) -> list[str]:
     return lines
 
 
+def _split_line_to_word_fragments(
+    line: str,
+    *,
+    bbox: tuple[float, float, float, float],
+) -> list[tuple[tuple[float, float, float, float], str]]:
+    x0, y0, x1, y1 = bbox
+    width = x1 - x0
+    if width <= 0.5:
+        return [((x0, y0, x1, y1), line)]
+
+    tokens = re.findall(r"\S+", line)
+    if len(tokens) <= 1:
+        return [((x0, y0, x1, y1), line)]
+
+    token_units = [max(len(token), 1) for token in tokens]
+    gap_units = 1
+    total_units = float(sum(token_units) + gap_units * (len(tokens) - 1))
+    if total_units <= 0.0:
+        return [((x0, y0, x1, y1), line)]
+
+    placements: list[tuple[tuple[float, float, float, float], str]] = []
+    cursor = x0
+    for idx, token in enumerate(tokens):
+        token_w = width * (float(token_units[idx]) / total_units)
+        fx0 = cursor
+        fx1 = min(x1, fx0 + token_w)
+        if fx1 > fx0:
+            text = f"{token} " if idx < (len(tokens) - 1) else token
+            placements.append(((fx0, y0, fx1, y1), text))
+        cursor = fx1
+        if idx < (len(tokens) - 1):
+            cursor = min(x1, cursor + (width * float(gap_units) / total_units))
+
+    return placements or [((x0, y0, x1, y1), line)]
+
+
 def _assign_lines_to_boxes(
     lines: Sequence[str],
     boxes: Sequence[tuple[float, float, float, float]],
@@ -956,20 +992,25 @@ def _build_overlay_page(
         for line_idx, line in enumerate(overlay_lines):
             sub_y0 = y0 + (line_height * line_idx)
             sub_y1 = y0 + (line_height * (line_idx + 1))
-            width = max(x1 - x0 - 0.6, 0.5)
-            height = max(sub_y1 - sub_y0 - 0.4, 0.4)
-            font_size = max(min(height * 0.80, 32.0), 0.12)
-            natural_width = max(pdfmetrics.stringWidth(line, font_name, font_size), 0.01)
-            horiz_scale = max(min((width / natural_width) * 100.0, 800.0), 10.0)
-            baseline_y = max(page_height - sub_y1 + (height - font_size) * 0.55, 0.2)
+            sub_bbox = (x0, sub_y0, x1, sub_y1)
+            fragments = _split_line_to_word_fragments(line, bbox=sub_bbox)
+            for frag_bbox, frag_text in fragments:
+                fx0, fy0, fx1, fy1 = frag_bbox
+                width = max(fx1 - fx0 - 0.6, 0.5)
+                height = max(fy1 - fy0 - 0.4, 0.4)
+                font_size = max(min(height * 0.80, 32.0), 0.12)
+                natural_width = max(pdfmetrics.stringWidth(frag_text, font_name, font_size), 0.01)
+                # Avoid aggressive stretching: it hurts selection fidelity.
+                horiz_scale = max(min((width / natural_width) * 100.0, 220.0), 35.0)
+                baseline_y = max(page_height - fy1 + (height - font_size) * 0.55, 0.2)
 
-            text_obj = pdf_canvas.beginText(max(x0 + 0.2, 0.2), baseline_y)
-            text_obj.setFont(font_name, font_size)
-            text_obj.setTextRenderMode(3)  # invisible selectable text
-            if abs(horiz_scale - 100.0) > 0.5:
-                text_obj.setHorizScale(horiz_scale)
-            text_obj.textLine(line)
-            pdf_canvas.drawText(text_obj)
+                text_obj = pdf_canvas.beginText(max(fx0 + 0.2, 0.2), baseline_y)
+                text_obj.setFont(font_name, font_size)
+                text_obj.setTextRenderMode(3)  # invisible selectable text
+                if abs(horiz_scale - 100.0) > 0.5:
+                    text_obj.setHorizScale(horiz_scale)
+                text_obj.textLine(frag_text)
+                pdf_canvas.drawText(text_obj)
 
     pdf_canvas.save()
     packet.seek(0)
