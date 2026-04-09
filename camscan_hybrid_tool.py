@@ -21,7 +21,7 @@ import numpy as np
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp"}
 PDF_EXTS = {".pdf"}
-ASCII_TMP_ROOT = Path(os.environ.get("SystemDrive", "C:")) / "_ocrmypdf_tmp"
+ASCII_TMP_ROOT = Path(os.environ.get("SystemDrive", "C:")) / "_uniscan_tmp"
 PROJECT_ROOT = Path(__file__).resolve().parent
 THIRD_PARTY_ROOT = PROJECT_ROOT / "camscan_suhren"
 
@@ -151,8 +151,6 @@ class App(tk.Tk):
         self.camera_shots = tk.IntVar(value=1)
         self.camera_delay = tk.DoubleVar(value=1.0)
 
-        self.ocr_placeholder = tk.BooleanVar(value=False)
-
         self.stage = tk.StringVar(value="Idle")
         self.current = tk.StringVar(value="-")
         self.percent = tk.StringVar(value="0%")
@@ -241,9 +239,6 @@ class App(tk.Tk):
             width=18,
             state="readonly",
         ).pack(side="left", padx=8)
-        ttk.Checkbutton(row2, text="OCR (coming later)", variable=self.ocr_placeholder, state="disabled").pack(
-            side="left", padx=14
-        )
 
         cam = ttk.LabelFrame(root, text="Camera options")
         cam.pack(fill="x", **pad)

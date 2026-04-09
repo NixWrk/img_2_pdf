@@ -12,8 +12,8 @@ import cv2
 import numpy as np
 
 # PIL's default decompression-bomb guard is 178 956 970 px.
-# We cap renders slightly below that so every downstream consumer
-# (ocrmypdf, surya, mineru, …) can open the resulting images safely.
+# We cap renders slightly below that so downstream tools can open
+# rendered pages safely.
 _MAX_RENDER_PIXELS: int = 150_000_000
 
 
@@ -21,8 +21,8 @@ def _safe_render_dpi(page_rect, requested_dpi: int, max_pixels: int = _MAX_RENDE
     """Return the highest integer DPI ≤ *requested_dpi* that keeps the
     rendered page within *max_pixels* total pixels.
 
-    This prevents PIL ``DecompressionBombError`` in every downstream tool
-    that opens the rendered PNG (ocrmypdf, surya, mineru, …).
+    This prevents PIL ``DecompressionBombError`` in downstream tools
+    that open rendered PNG pages.
     """
     w_pt: float = page_rect.width   # page width in PDF points (1 pt = 1/72 in)
     h_pt: float = page_rect.height
