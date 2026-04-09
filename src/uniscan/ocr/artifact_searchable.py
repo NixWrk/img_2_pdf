@@ -243,6 +243,69 @@ def _split_lines_to_pages_by_weights(
     return pages[:page_count]
 
 
+def _split_text_to_pages_by_token_weights(
+    text: str,
+    *,
+    page_count: int,
+    page_weights: Sequence[float],
+    line_token_span: int = 14,
+) -> list[str]:
+    if page_count <= 0:
+        return []
+    if page_count == 1:
+        return [text]
+
+    tokens = _TOKEN_RE.findall(text)
+    if not tokens:
+        return [""] * page_count
+
+    weights = [max(float(item), 0.0) for item in page_weights[:page_count]]
+    if len(weights) < page_count:
+        weights.extend([1.0] * (page_count - len(weights)))
+    if sum(weights) <= 0.0:
+        weights = [1.0] * page_count
+
+    total_weight = float(sum(weights))
+    total_tokens = len(tokens)
+    raw_counts = [(total_tokens * weight / total_weight) for weight in weights]
+    counts = [int(math.floor(value)) for value in raw_counts]
+    used = sum(counts)
+    remainder = total_tokens - used
+    if remainder > 0:
+        order = sorted(
+            range(page_count),
+            key=lambda idx: (
+                raw_counts[idx] - counts[idx],
+                raw_counts[idx],
+                -idx,
+            ),
+            reverse=True,
+        )
+        for idx in order[:remainder]:
+            counts[idx] += 1
+
+    pages: list[str] = []
+    cursor = 0
+    for count in counts:
+        chunk = tokens[cursor : cursor + count]
+        cursor += count
+        if not chunk:
+            pages.append("")
+            continue
+        lines: list[str] = []
+        for idx in range(0, len(chunk), max(1, line_token_span)):
+            lines.append(" ".join(chunk[idx : idx + max(1, line_token_span)]))
+        pages.append("\n".join(lines).strip())
+
+    if cursor < total_tokens and pages:
+        tail_tokens = tokens[cursor:]
+        tail_text = " ".join(tail_tokens).strip()
+        pages[-1] = f"{pages[-1]}\n{tail_text}".strip() if pages[-1] else tail_text
+    if len(pages) < page_count:
+        pages.extend([""] * (page_count - len(pages)))
+    return pages[:page_count]
+
+
 def _estimate_page_split_weights(
     page_line_boxes: Sequence[Sequence[tuple[float, float, float, float]]],
 ) -> list[float]:
@@ -1444,13 +1507,37 @@ def _build_searchable_pdf_from_text(
     page_texts = _split_text_to_pages(text, page_count)
     marker_pages_detected = bool(_PAGE_MARKER_RE.search(text)) or ("\f" in text)
     if not marker_pages_detected:
-        all_lines = _split_page_text_lines(text)
-        page_weights = _estimate_page_split_weights(page_line_boxes)
-        page_texts = _split_lines_to_pages_by_weights(
-            all_lines,
-            page_count=page_count,
-            page_weights=page_weights,
-        )
+        geometry_weight_candidates: list[float] = []
+        if geometry_linefit_prefer and surya_geometry_by_page:
+            for page_idx in range(1, page_count + 1):
+                page_data = surya_geometry_by_page.get(page_idx)
+                if not isinstance(page_data, dict):
+                    geometry_weight_candidates.append(0.0)
+                    continue
+                raw_lines = page_data.get("lines")
+                if not isinstance(raw_lines, list):
+                    geometry_weight_candidates.append(0.0)
+                    continue
+                token_count = 0
+                for item in raw_lines:
+                    if not isinstance(item, dict):
+                        continue
+                    token_count += len(_TOKEN_RE.findall(str(item.get("text") or "")))
+                geometry_weight_candidates.append(float(token_count))
+        if geometry_weight_candidates and sum(geometry_weight_candidates) > 0.0:
+            page_texts = _split_text_to_pages_by_token_weights(
+                text,
+                page_count=page_count,
+                page_weights=geometry_weight_candidates,
+            )
+        else:
+            all_lines = _split_page_text_lines(text)
+            page_weights = _estimate_page_split_weights(page_line_boxes)
+            page_texts = _split_lines_to_pages_by_weights(
+                all_lines,
+                page_count=page_count,
+                page_weights=page_weights,
+            )
 
     try:
         for page_idx, source_page in enumerate(reader.pages):

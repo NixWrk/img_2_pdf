@@ -26,6 +26,7 @@ from uniscan.ocr.artifact_searchable import (
     _split_line_to_token_boxes,
     _split_line_to_word_fragments,
     _split_lines_to_pages_by_weights,
+    _split_text_to_pages_by_token_weights,
     _split_text_to_pages,
     build_compare_txt_from_benchmark,
     run_artifact_searchable_package,
@@ -93,6 +94,20 @@ def test_split_lines_to_pages_by_weights() -> None:
     assert counts[1] > counts[0]
     assert counts[1] > counts[2]
     assert sum(counts) == 12
+
+
+def test_split_text_to_pages_by_token_weights_prefers_heavier_pages() -> None:
+    text = " ".join(f"T{i}" for i in range(24))
+    pages = _split_text_to_pages_by_token_weights(
+        text,
+        page_count=3,
+        page_weights=[1.0, 4.0, 1.0],
+        line_token_span=6,
+    )
+    token_counts = [len(page.split()) for page in pages]
+    assert token_counts[1] > token_counts[0]
+    assert token_counts[1] > token_counts[2]
+    assert sum(token_counts) == 24
 
 
 def test_estimate_page_split_weights_clips_outliers() -> None:
