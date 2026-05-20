@@ -90,3 +90,38 @@ def test_replace_entry_image_returns_false_for_unknown_id(tmp_path) -> None:
     ok = session.replace_entry_image("missing", original_image=_img(50))
     assert not ok
     session.close()
+
+
+def test_add_image_with_contour_stores_raw_and_contour(tmp_path) -> None:
+    import numpy as np
+
+    session = CaptureSession(store=PageStore(root_dir=tmp_path))
+    raw = _img(20)
+    warped = _img(180)
+    contour = np.array([[0, 0], [10, 0], [10, 8], [0, 8]], dtype=np.float32)
+    entry = session.add_image_with_contour(
+        name="spread",
+        raw_image=raw,
+        warped_image=warped,
+        contour=contour,
+        backend="opencv_quad",
+    )
+
+    assert entry.raw_path.exists()
+    assert int(entry.raw_image[0, 0, 0]) == 20
+    assert int(entry.original_image[0, 0, 0]) == 180
+    assert entry.detected_backend == "opencv_quad"
+    assert entry.detected_contour is not None
+    assert entry.detected_contour.shape == (4, 2)
+    session.close()
+
+
+def test_replace_raw_updates_raw_only(tmp_path) -> None:
+    session = CaptureSession(store=PageStore(root_dir=tmp_path))
+    entry = session.add_image(name="page", image=_img(50))
+    new_raw = _img(120)
+    entry.replace_raw(new_raw)
+    assert int(entry.raw_image[0, 0, 0]) == 120
+    # Original stays at the previous value because raw and original were separate copies.
+    assert int(entry.original_image[0, 0, 0]) == 50
+    session.close()

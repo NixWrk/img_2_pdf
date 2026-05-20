@@ -3,31 +3,31 @@ import numpy as np
 from uniscan.storage import PageStore
 
 
-def _img() -> np.ndarray:
+def _img(value: int = 0) -> np.ndarray:
     out = np.zeros((40, 60, 3), dtype=np.uint8)
-    out[:, :] = (10, 20, 30)
+    out[:, :] = (value, value + 10, value + 20)
     return out
 
 
 def test_page_store_add_read_remove(tmp_path) -> None:
     store = PageStore(root_dir=tmp_path)
     entry_id = "entry_a"
-    original_path, current_path, preview_original_path, preview_current_path, thumb_path = store.add_page(
-        entry_id,
-        _img(),
-    )
+    paths = store.add_page(entry_id, _img())
 
-    assert original_path.exists()
-    assert current_path.exists()
-    assert preview_original_path.exists()
-    assert preview_current_path.exists()
-    assert thumb_path.exists()
-    assert store.read_image(current_path).shape == (40, 60, 3)
-    assert store.read_image(preview_original_path).shape == (40, 60, 3)
+    assert paths.raw.exists()
+    assert paths.original.exists()
+    assert paths.current.exists()
+    assert paths.preview_raw.exists()
+    assert paths.preview_original.exists()
+    assert paths.preview_current.exists()
+    assert paths.thumb.exists()
+    assert store.read_image(paths.current).shape == (40, 60, 3)
+    assert store.read_image(paths.preview_original).shape == (40, 60, 3)
 
     store.remove_page(entry_id)
-    assert not original_path.exists()
-    assert not current_path.exists()
+    assert not paths.original.exists()
+    assert not paths.current.exists()
+    assert not paths.raw.exists()
 
 
 def test_page_store_cleanup_session(tmp_path) -> None:
@@ -38,3 +38,15 @@ def test_page_store_cleanup_session(tmp_path) -> None:
 
     store.close()
     assert not session_dir.exists()
+
+
+def test_page_store_writes_raw_distinct_from_warped(tmp_path) -> None:
+    store = PageStore(root_dir=tmp_path)
+    raw = _img(10)
+    warped = _img(200)
+    paths = store.add_page("entry_pair", raw, warped)
+
+    raw_back = store.read_image(paths.raw)
+    warped_back = store.read_image(paths.original)
+    assert int(raw_back[0, 0, 0]) == 10
+    assert int(warped_back[0, 0, 0]) == 200

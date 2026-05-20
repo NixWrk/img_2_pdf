@@ -9,7 +9,7 @@ from uuid import uuid4
 import numpy as np
 
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
-from uniscan.storage import PageStore
+from uniscan.storage import PagePaths, PageStore
 
 
 @dataclass(slots=True)
@@ -18,62 +18,121 @@ class CaptureEntry:
 
     name: str
     store: PageStore
-    original_path: Path
-    current_path: Path
-    preview_original_path: Path
-    preview_current_path: Path
-    thumb_path: Path
+    paths: PagePaths
+    detected_contour: np.ndarray | None = None
+    detected_backend: str | None = None
     selected: bool = False
     entry_id: str = field(default_factory=lambda: uuid4().hex)
 
     @classmethod
     def from_image(cls, *, name: str, image: np.ndarray, store: PageStore) -> "CaptureEntry":
-        entry_id = uuid4().hex
-        original_path, current_path, preview_original_path, preview_current_path, thumb_path = store.add_page(
-            entry_id,
-            image,
+        """Create an entry from a single image (raw == warped, no contour)."""
+        return cls.from_raw_and_warped(
+            name=name,
+            raw_image=image,
+            warped_image=image,
+            contour=None,
+            backend=None,
+            store=store,
         )
+
+    @classmethod
+    def from_raw_and_warped(
+        cls,
+        *,
+        name: str,
+        raw_image: np.ndarray,
+        warped_image: np.ndarray,
+        contour: np.ndarray | None,
+        backend: str | None,
+        store: PageStore,
+    ) -> "CaptureEntry":
+        entry_id = uuid4().hex
+        paths = store.add_page(entry_id, raw_image, warped_image)
         return cls(
             name=name,
             store=store,
-            original_path=original_path,
-            current_path=current_path,
-            preview_original_path=preview_original_path,
-            preview_current_path=preview_current_path,
-            thumb_path=thumb_path,
+            paths=paths,
+            detected_contour=contour,
+            detected_backend=backend,
             entry_id=entry_id,
         )
 
+    # Path shortcuts (backwards-compatible attributes used by existing code/tests).
+
+    @property
+    def raw_path(self) -> Path:
+        return self.paths.raw
+
+    @property
+    def original_path(self) -> Path:
+        return self.paths.original
+
+    @property
+    def current_path(self) -> Path:
+        return self.paths.current
+
+    @property
+    def preview_raw_path(self) -> Path:
+        return self.paths.preview_raw
+
+    @property
+    def preview_original_path(self) -> Path:
+        return self.paths.preview_original
+
+    @property
+    def preview_current_path(self) -> Path:
+        return self.paths.preview_current
+
+    @property
+    def thumb_path(self) -> Path:
+        return self.paths.thumb
+
+    # Image accessors.
+
+    @property
+    def raw_image(self) -> np.ndarray:
+        return self.store.read_image(self.paths.raw)
+
+    @property
+    def preview_raw_image(self) -> np.ndarray:
+        return self.store.read_image(self.paths.preview_raw)
+
     @property
     def original_image(self) -> np.ndarray:
-        return self.store.read_image(self.original_path)
+        return self.store.read_image(self.paths.original)
 
     @original_image.setter
     def original_image(self, image: np.ndarray) -> None:
-        self.store.write_image(self.original_path, image)
-        self.store.write_preview(self.preview_original_path, image)
+        self.store.write_image(self.paths.original, image)
+        self.store.write_preview(self.paths.preview_original, image)
 
     @property
     def current_image(self) -> np.ndarray:
-        return self.store.read_image(self.current_path)
+        return self.store.read_image(self.paths.current)
 
     @current_image.setter
     def current_image(self, image: np.ndarray) -> None:
-        self.store.write_image(self.current_path, image)
-        self.store.write_preview(self.preview_current_path, image)
-        self.store.write_thumbnail(self.thumb_path, image)
+        self.store.write_image(self.paths.current, image)
+        self.store.write_preview(self.paths.preview_current, image)
+        self.store.write_thumbnail(self.paths.thumb, image)
 
     @property
     def preview_original_image(self) -> np.ndarray:
-        return self.store.read_image(self.preview_original_path)
+        return self.store.read_image(self.paths.preview_original)
 
     @property
     def preview_current_image(self) -> np.ndarray:
-        return self.store.read_image(self.preview_current_path)
+        return self.store.read_image(self.paths.preview_current)
 
     @property
     def thumbnail_image(self) -> np.ndarray:
-        return self.store.read_image(self.thumb_path)
+        return self.store.read_image(self.paths.thumb)
+
+    def replace_raw(self, raw_image: np.ndarray) -> None:
+        """Replace the immutable raw source (used when retaking or replacing a page)."""
+        self.store.write_image(self.paths.raw, raw_image)
+        self.store.write_preview(self.paths.preview_raw, raw_image)
 
 
 class CaptureSession:
@@ -103,11 +162,38 @@ class CaptureSession:
         self._entries.append(entry)
         return entry
 
+    def add_image_with_contour(
+        self,
+        *,
+        name: str,
+        raw_image: np.ndarray,
+        warped_image: np.ndarray,
+        contour: np.ndarray | None,
+        backend: str | None,
+    ) -> CaptureEntry:
+        entry = CaptureEntry.from_raw_and_warped(
+            name=name,
+            raw_image=raw_image,
+            warped_image=warped_image,
+            contour=contour,
+            backend=backend,
+            store=self.store,
+        )
+        self._entries.append(entry)
+        return entry
+
     def add_images(self, items: list[tuple[str, np.ndarray]]) -> list[CaptureEntry]:
         added: list[CaptureEntry] = []
         for name, image in items:
             added.append(self.add_image(name=name, image=image))
         return added
+
+    def insert_entry_after(self, after_entry_id: str, entry: CaptureEntry) -> bool:
+        index = self._find_index(after_entry_id)
+        if index is None:
+            return False
+        self._entries.insert(index + 1, entry)
+        return True
 
     def move(self, entry_id: str, distance: int) -> bool:
         """Move entry up/down by distance and return whether move succeeded."""
@@ -135,6 +221,14 @@ class CaptureSession:
         self._entries = kept
         return before - len(self._entries)
 
+    def remove_entry(self, entry_id: str) -> bool:
+        index = self._find_index(entry_id)
+        if index is None:
+            return False
+        self.store.remove_page(entry_id)
+        del self._entries[index]
+        return True
+
     def apply_postprocess(self, postprocess_name: str) -> None:
         if postprocess_name not in POSTPROCESSING_OPTIONS:
             raise ValueError(f"Unsupported postprocess mode: {postprocess_name}")
@@ -149,6 +243,9 @@ class CaptureSession:
         original_image: np.ndarray,
         current_image: np.ndarray | None = None,
         name: str | None = None,
+        raw_image: np.ndarray | None = None,
+        contour: np.ndarray | None = None,
+        backend: str | None = None,
     ) -> bool:
         """Replace entry images in-place while preserving ordering and identity."""
         index = self._find_index(entry_id)
@@ -156,10 +253,15 @@ class CaptureSession:
             return False
 
         entry = self._entries[index]
+        if raw_image is not None:
+            entry.replace_raw(raw_image)
         entry.original_image = original_image
         entry.current_image = original_image if current_image is None else current_image
         if name is not None and name.strip():
             entry.name = name.strip()
+        if contour is not None or backend is not None:
+            entry.detected_contour = contour
+            entry.detected_backend = backend
         return True
 
     def selected_entries(self) -> list[CaptureEntry]:

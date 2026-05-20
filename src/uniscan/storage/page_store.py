@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
@@ -13,8 +14,21 @@ import numpy as np
 from uniscan.io.loaders import imwrite_unicode
 
 
+@dataclass(slots=True, frozen=True)
+class PagePaths:
+    """File paths for a single page entry on disk."""
+
+    raw: Path
+    original: Path
+    current: Path
+    preview_raw: Path
+    preview_original: Path
+    preview_current: Path
+    thumb: Path
+
+
 class PageStore:
-    """Manage per-session page files (original/current/previews/thumbnail)."""
+    """Manage per-session page files (raw/original/current/previews/thumbnail)."""
 
     def __init__(self, root_dir: Path | None = None, *, keep_on_close: bool = False) -> None:
         base = Path(root_dir) if root_dir is not None else Path(tempfile.gettempdir()) / "uniscan_cache"
@@ -24,15 +38,18 @@ class PageStore:
         self.pages_dir.mkdir(parents=True, exist_ok=True)
         self.keep_on_close = keep_on_close
 
-    def paths_for_entry(self, entry_id: str) -> tuple[Path, Path, Path, Path, Path]:
+    def paths_for_entry(self, entry_id: str) -> PagePaths:
         page_dir = self.pages_dir / entry_id
         page_dir.mkdir(parents=True, exist_ok=True)
-        original = page_dir / "original.png"
-        current = page_dir / "current.png"
-        preview_original = page_dir / "preview_original.jpg"
-        preview_current = page_dir / "preview_current.jpg"
-        thumb = page_dir / "thumb.jpg"
-        return original, current, preview_original, preview_current, thumb
+        return PagePaths(
+            raw=page_dir / "raw.png",
+            original=page_dir / "original.png",
+            current=page_dir / "current.png",
+            preview_raw=page_dir / "preview_raw.jpg",
+            preview_original=page_dir / "preview_original.jpg",
+            preview_current=page_dir / "preview_current.jpg",
+            thumb=page_dir / "thumb.jpg",
+        )
 
     def read_image(self, path: Path) -> np.ndarray:
         data = np.fromfile(str(path), dtype=np.uint8)
@@ -74,14 +91,30 @@ class PageStore:
         if not imwrite_unicode(path, thumb):
             raise RuntimeError(f"Cannot write page thumbnail: {path}")
 
-    def add_page(self, entry_id: str, image: np.ndarray) -> tuple[Path, Path, Path, Path, Path]:
-        original_path, current_path, preview_original_path, preview_current_path, thumb_path = self.paths_for_entry(entry_id)
-        self.write_image(original_path, image)
-        self.write_image(current_path, image)
-        self.write_preview(preview_original_path, image)
-        self.write_preview(preview_current_path, image)
-        self.write_thumbnail(thumb_path, image)
-        return original_path, current_path, preview_original_path, preview_current_path, thumb_path
+    def add_page(
+        self,
+        entry_id: str,
+        raw_image: np.ndarray,
+        warped_image: np.ndarray | None = None,
+    ) -> PagePaths:
+        """
+        Persist a page to disk.
+
+        `raw_image` is the immutable source. `warped_image` is the rectified
+        result (after document detection / UVDoc). If `warped_image` is None,
+        the raw image is used for both (no rectification was applied).
+        """
+        if warped_image is None:
+            warped_image = raw_image
+        paths = self.paths_for_entry(entry_id)
+        self.write_image(paths.raw, raw_image)
+        self.write_image(paths.original, warped_image)
+        self.write_image(paths.current, warped_image)
+        self.write_preview(paths.preview_raw, raw_image)
+        self.write_preview(paths.preview_original, warped_image)
+        self.write_preview(paths.preview_current, warped_image)
+        self.write_thumbnail(paths.thumb, warped_image)
+        return paths
 
     def remove_page(self, entry_id: str) -> None:
         page_dir = self.pages_dir / entry_id

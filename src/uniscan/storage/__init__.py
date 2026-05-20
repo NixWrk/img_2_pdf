@@ -1,5 +1,5 @@
 """Disk-backed storage for session pages."""
 
-from .page_store import PageStore
+from .page_store import PagePaths, PageStore
 
-__all__ = ["PageStore"]
+__all__ = ["PagePaths", "PageStore"]

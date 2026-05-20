@@ -28,3 +28,41 @@ def test_process_loaded_items_without_detector() -> None:
     )
     pages = process_loaded_items(loaded, options=options)
     assert len(pages) == 2
+
+
+def test_process_loaded_items_returns_page_results_with_raw() -> None:
+    loaded = [("sample.png", _img())]
+    options = PipelineOptions(
+        detect_document=False,
+        two_page_mode=False,
+        postprocess_name="None",
+    )
+    pages = process_loaded_items(loaded, options=options)
+    assert len(pages) == 1
+    page = pages[0]
+    assert page.name == "sample.png"
+    assert page.raw is not None
+    assert page.warped is not None
+    assert page.current is not None
+    assert page.raw.shape == _img().shape
+
+
+def _spread_image() -> np.ndarray:
+    width, height = 800, 500
+    image = np.full((height, width, 3), 235, dtype=np.uint8)
+    image[:, 395:405] = 30  # dark gutter
+    return image
+
+
+def test_process_loaded_items_two_page_mode_splits_at_gutter() -> None:
+    options = PipelineOptions(
+        detect_document=False,
+        two_page_mode=True,
+        postprocess_name="None",
+    )
+    pages = process_loaded_items([("spread.png", _spread_image())], options=options)
+    assert len(pages) == 2
+    # Left half should be roughly half the width, plus or minus the gutter offset.
+    assert 350 < pages[0].warped.shape[1] < 450
+    assert pages[0].name.endswith("[L]")
+    assert pages[1].name.endswith("[R]")

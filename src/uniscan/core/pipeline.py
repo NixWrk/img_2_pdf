@@ -10,7 +10,13 @@ import img2pdf
 import numpy as np
 
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
-from uniscan.core.scanner_adapter import DEFAULT_ACTIVE_DOCUMENT_BACKENDS, scan_with_document_detector
+from uniscan.core.scanner_adapter import (
+    DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
+    DETECTOR_BACKEND_OPENCV,
+    _find_quad_contour,
+    scan_with_document_detector,
+)
+from uniscan.core.spread import split_spread_accurate
 from uniscan.io.loaders import imwrite_unicode
 
 LoadedItem = tuple[str, np.ndarray]
@@ -25,8 +31,20 @@ class PipelineOptions:
     postprocess_name: str = "None"
 
 
+@dataclass(slots=True)
+class PageResult:
+    """One page produced by the pipeline."""
+
+    name: str
+    raw: np.ndarray
+    warped: np.ndarray
+    current: np.ndarray
+    contour: np.ndarray | None
+    backend: str | None
+
+
 def split_spread(image: np.ndarray) -> list[np.ndarray]:
-    """Split a two-page spread into left and right pages."""
+    """Naive 50/50 spread split, kept for backwards compatibility."""
     _, width = image.shape[:2]
     if width < 2:
         return [image]
@@ -38,6 +56,34 @@ def split_spread(image: np.ndarray) -> list[np.ndarray]:
     return [left, right]
 
 
+def _safe_split_proportional(image: np.ndarray, *, ratio: float) -> list[np.ndarray]:
+    """Split an image at a horizontal ratio (used to keep raw aligned with warped split)."""
+    height, width = image.shape[:2]
+    if width < 2:
+        return [image]
+    cut = max(1, min(width - 1, int(round(width * ratio))))
+    left = image[:, :cut]
+    right = image[:, cut:]
+    if left.size == 0 or right.size == 0:
+        return [image]
+    return [left, right]
+
+
+def _augment_overlay_contour(scan_output, raw_image: np.ndarray) -> np.ndarray | None:
+    """
+    When UVDoc rectified the page without producing a contour, run a fast CV
+    detector on the raw frame so the UI can still draw a boundary overlay.
+    """
+    if scan_output.contour is not None:
+        return scan_output.contour
+    if not scan_output.detected:
+        return None
+    try:
+        return _find_quad_contour(raw_image)
+    except Exception:
+        return None
+
+
 def process_loaded_items(
     loaded_items: list[LoadedItem],
     *,
@@ -45,13 +91,13 @@ def process_loaded_items(
     scanner_root: Path | None = None,
     on_progress: ProgressCb | None = None,
     cancel_cb: CancelCb | None = None,
-) -> list[np.ndarray]:
-    """Process loaded input items and return page images in order."""
+) -> list[PageResult]:
+    """Process loaded input items and return PageResult list in order."""
     if options.postprocess_name not in POSTPROCESSING_OPTIONS:
         raise ValueError(f"Unsupported postprocess mode: {options.postprocess_name}")
 
     postprocess_fn = POSTPROCESSING_OPTIONS[options.postprocess_name]
-    pages: list[np.ndarray] = []
+    pages: list[PageResult] = []
 
     total = len(loaded_items)
     for index, (name, image) in enumerate(loaded_items, start=1):
@@ -64,10 +110,56 @@ def process_loaded_items(
             backends=DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
             scanner_root=scanner_root,
         )
-        working = scan_output.warped if scan_output.warped is not None else image
-        processed = postprocess_fn(working)
-        split_pages = split_spread(processed) if options.two_page_mode else [processed]
-        pages.extend(split_pages)
+        warped = scan_output.warped if scan_output.warped is not None else image
+        contour = _augment_overlay_contour(scan_output, image)
+        backend = scan_output.backend
+
+        if options.two_page_mode:
+            warped_halves = split_spread_accurate(warped, fallback="midpoint")
+            if len(warped_halves) == 2:
+                # Estimate split ratio from the warped result and replay it on raw
+                warped_width = warped.shape[1]
+                left_warped_width = warped_halves[0].shape[1]
+                ratio = left_warped_width / max(1, warped_width)
+                raw_halves = _safe_split_proportional(image, ratio=ratio)
+                for half_index, (raw_half, warped_half) in enumerate(zip(raw_halves, warped_halves)):
+                    current_half = postprocess_fn(warped_half)
+                    suffix = "L" if half_index == 0 else "R"
+                    pages.append(
+                        PageResult(
+                            name=f"{name} [{suffix}]",
+                            raw=raw_half,
+                            warped=warped_half,
+                            current=current_half,
+                            contour=None,
+                            backend=backend,
+                        )
+                    )
+            else:
+                current = postprocess_fn(warped)
+                pages.append(
+                    PageResult(
+                        name=name,
+                        raw=image,
+                        warped=warped,
+                        current=current,
+                        contour=contour,
+                        backend=backend,
+                    )
+                )
+        else:
+            current = postprocess_fn(warped)
+            pages.append(
+                PageResult(
+                    name=name,
+                    raw=image,
+                    warped=warped,
+                    current=current,
+                    contour=contour,
+                    backend=backend,
+                )
+            )
+
         if on_progress is not None:
             on_progress(index, total, name)
 
