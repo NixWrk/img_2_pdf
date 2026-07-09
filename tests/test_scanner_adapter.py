@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import cv2
 import numpy as np
 
@@ -8,6 +10,7 @@ from uniscan.core.scanner_adapter import (
     DETECTOR_BACKEND_OPENCV,
     DETECTOR_BACKEND_OPENCV_HOUGH,
     DETECTOR_BACKEND_OPENCV_MINRECT,
+    DETECTOR_BACKEND_OFFICE_LENS_ONNX,
     DETECTOR_BACKEND_PADDLEOCR_UVDOC,
     DETECTOR_BACKEND_UVDOC,
     scan_with_document_detector,
@@ -52,24 +55,30 @@ def test_scanner_adapter_disabled_returns_original() -> None:
     assert np.array_equal(result.warped, image)
 
 
-def test_scanner_adapter_defaults_to_paddleocr_uvdoc(monkeypatch) -> None:
+def test_scanner_adapter_defaults_to_office_lens_onnx(monkeypatch) -> None:
     image = _perspective_doc()
     expected = np.full((300, 240, 3), 195, dtype=np.uint8)
+    quad = np.array([[10, 20], [230, 20], [230, 280], [10, 280]], dtype=np.float32)
 
-    class _FakeModel:
-        def predict(self, _input):
-            return [{"doctr_img": expected}]
+    class _FakeRunner:
+        def process_image(self, image_rgb, mode="auto"):
+            assert mode == "auto"
+            assert image_rgb.shape == image.shape
+            return SimpleNamespace(
+                warped=expected,
+                mask_result=SimpleNamespace(quad=quad),
+            )
 
     monkeypatch.setattr(
-        "uniscan.core.scanner_adapter._load_uvdoc_model",
-        lambda _cache_home=None: _FakeModel(),
+        "uniscan.core.scanner_adapter._load_office_lens_model",
+        lambda: _FakeRunner(),
     )
 
     result = scan_with_document_detector(image, enabled=True)
 
-    assert result.backend == DETECTOR_BACKEND_PADDLEOCR_UVDOC
+    assert result.backend == DETECTOR_BACKEND_OFFICE_LENS_ONNX
     assert result.detected is True
-    assert result.contour is None
+    assert result.contour is not None
     assert np.array_equal(result.warped, expected)
 
 

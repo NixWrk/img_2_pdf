@@ -8,6 +8,7 @@ import numpy as np
 from uniscan.cli import main
 from uniscan.core.scanner_adapter import (
     DETECTOR_BACKEND_OPENCV,
+    DETECTOR_BACKEND_OFFICE_LENS_ONNX,
     DETECTOR_BACKEND_PADDLEOCR_UVDOC,
     ScanAdapterError,
     ScanOutput,
@@ -81,7 +82,7 @@ def test_run_crop_benchmark_preserves_natural_input_order(tmp_path, monkeypatch)
     }
 
 
-def test_run_crop_benchmark_defaults_to_paddleocr_uvdoc(tmp_path, monkeypatch) -> None:
+def test_run_crop_benchmark_defaults_to_office_lens_onnx(tmp_path, monkeypatch) -> None:
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "out"
     input_dir.mkdir()
@@ -116,11 +117,14 @@ def test_run_crop_benchmark_defaults_to_paddleocr_uvdoc(tmp_path, monkeypatch) -
         output_dir=output_dir,
     )
 
-    assert seen_backends == [DETECTOR_BACKEND_PADDLEOCR_UVDOC]
-    assert [result.backend for result in results] == [DETECTOR_BACKEND_PADDLEOCR_UVDOC]
+    assert seen_backends == [DETECTOR_BACKEND_OFFICE_LENS_ONNX]
+    assert [result.backend for result in results] == [DETECTOR_BACKEND_OFFICE_LENS_ONNX]
 
 
-def test_run_crop_benchmark_keeps_other_backends_when_one_is_unavailable(tmp_path, monkeypatch) -> None:
+def test_run_crop_benchmark_keeps_other_backends_when_one_is_unavailable(
+    tmp_path,
+    monkeypatch,
+) -> None:
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "out"
     input_dir.mkdir()
@@ -219,8 +223,8 @@ def test_cli_benchmark_crop_uses_runner_and_returns_success(monkeypatch, tmp_pat
                 "Result",
                 (),
                 {
-                    "backend": DETECTOR_BACKEND_PADDLEOCR_UVDOC,
-                    "output_pdf": output_dir / "input_paddleocr_uvdoc.pdf",
+                    "backend": DETECTOR_BACKEND_OFFICE_LENS_ONNX,
+                    "output_pdf": output_dir / "input_office_lens_onnx.pdf",
                     "detected_pages": 2,
                     "total_pages": 2,
                     "error": None,
@@ -234,4 +238,4 @@ def test_cli_benchmark_crop_uses_runner_and_returns_success(monkeypatch, tmp_pat
     stdout = capsys.readouterr().out
 
     assert exit_code == 0
-    assert "paddleocr_uvdoc" in stdout
+    assert "office_lens_onnx" in stdout

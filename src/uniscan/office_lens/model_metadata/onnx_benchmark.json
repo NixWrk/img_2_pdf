@@ -1,0 +1,22 @@
+[
+  {
+    "file": "mnv2_ep42_wb_quant.ort",
+    "provider": "CPUExecutionProvider",
+    "runs": 100,
+    "meanMs": 4.84717900166288,
+    "medianMs": 4.870299948379397,
+    "p95Ms": 5.483000073581934,
+    "minMs": 4.065099987201393,
+    "maxMs": 5.973300081677735
+  },
+  {
+    "file": "triclass_doc_classifier.ort",
+    "provider": "CPUExecutionProvider",
+    "runs": 100,
+    "meanMs": 0.6632800027728081,
+    "medianMs": 0.6596999592147768,
+    "p95Ms": 0.7744000758975744,
+    "minMs": 0.5538999103009701,
+    "maxMs": 0.8990000933408737
+  }
+]

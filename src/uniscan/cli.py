@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
         "--backends",
         nargs="+",
         default=None,
-        help="Backend names to run. Defaults to paddleocr_uvdoc.",
+        help="Backend names to run. Defaults to office_lens_onnx.",
     )
     benchmark_parser.add_argument(
         "--scanner-root",

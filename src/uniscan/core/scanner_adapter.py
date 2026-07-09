@@ -23,7 +23,12 @@ DETECTOR_BACKEND_OPENCV_HOUGH = "opencv_hough"
 DETECTOR_BACKEND_OPENCV_MINRECT = "opencv_minrect"
 DETECTOR_BACKEND_UVDOC = "uvdoc"
 DETECTOR_BACKEND_PADDLEOCR_UVDOC = "paddleocr_uvdoc"
-DEFAULT_ACTIVE_DOCUMENT_BACKENDS = (DETECTOR_BACKEND_PADDLEOCR_UVDOC,)
+DETECTOR_BACKEND_OFFICE_LENS_ONNX = "office_lens_onnx"
+DEFAULT_ACTIVE_DOCUMENT_BACKENDS = (
+    DETECTOR_BACKEND_OFFICE_LENS_ONNX,
+    DETECTOR_BACKEND_PADDLEOCR_UVDOC,
+    DETECTOR_BACKEND_CV_HYBRID,
+)
 
 
 class ScanAdapterError(RuntimeError):
@@ -89,6 +94,31 @@ def _load_uvdoc_model(cache_home_str: str | None = None) -> Any:
             "Cannot import PaddleOCR UVDoc. Install paddleocr and paddlepaddle first."
         ) from exc
     return TextImageUnwarping()
+
+
+@lru_cache(maxsize=1)
+def _load_office_lens_model() -> Any:
+    try:
+        from uniscan.office_lens import OfficeLensOnnx
+    except Exception as exc:  # pragma: no cover - import depends on optional runtime deps
+        raise ScanAdapterError(
+            "Cannot import Office Lens ONNX adapter. Install onnxruntime first."
+        ) from exc
+    return OfficeLensOnnx()
+
+
+def _image_bgr_to_rgb(image: np.ndarray) -> np.ndarray:
+    if image.ndim == 2:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+    if image.ndim == 3 and image.shape[2] == 4:
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2RGB)
+    return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+
+def _image_rgb_to_bgr(image: np.ndarray) -> np.ndarray:
+    if image.ndim == 2:
+        return image
+    return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
 
 def _resize_for_detection(image: np.ndarray, *, max_side: int = 1600) -> tuple[np.ndarray, float]:
@@ -427,6 +457,28 @@ def _camscan_document_detector(image: np.ndarray, *, scanner_root: Path | None =
     )
 
 
+def _office_lens_document_detector(image: np.ndarray) -> ScanOutput:
+    runner = _load_office_lens_model()
+    result = runner.process_image(_image_bgr_to_rgb(image), mode="auto")
+    quad = result.mask_result.quad
+    if result.warped is None or quad is None:
+        return ScanOutput(
+            warped=image,
+            contour=None,
+            backend=None,
+            detected=False,
+            raw_result=result,
+        )
+
+    return ScanOutput(
+        warped=_image_rgb_to_bgr(result.warped),
+        contour=quad.astype(np.float32),
+        backend=DETECTOR_BACKEND_OFFICE_LENS_ONNX,
+        detected=True,
+        raw_result=result,
+    )
+
+
 def _uvdoc_document_detector(image: np.ndarray, *, cache_home: Path | None = None) -> ScanOutput:
     model = _load_uvdoc_model(str(cache_home) if cache_home is not None else None)
     result_list = model.predict(image)
@@ -481,6 +533,9 @@ def probe_detector_backend(
         DETECTOR_BACKEND_OPENCV_MINRECT,
     ):
         return
+    if backend == DETECTOR_BACKEND_OFFICE_LENS_ONNX:
+        _load_office_lens_model()
+        return
     if backend in (DETECTOR_BACKEND_UVDOC, DETECTOR_BACKEND_PADDLEOCR_UVDOC):
         _load_uvdoc_model(str(uvdoc_cache_home) if uvdoc_cache_home is not None else None)
         return
@@ -508,7 +563,9 @@ def scan_with_document_detector(
 
     for backend in selected_backends:
         try:
-            if backend == DETECTOR_BACKEND_CAMSCAN:
+            if backend == DETECTOR_BACKEND_OFFICE_LENS_ONNX:
+                result = _office_lens_document_detector(image)
+            elif backend == DETECTOR_BACKEND_CAMSCAN:
                 result = _camscan_document_detector(image, scanner_root=scanner_root)
             elif backend == DETECTOR_BACKEND_OPENCV:
                 result = _opencv_document_detector(image)

@@ -18,7 +18,8 @@ dependencies = [
   "pillow>=10.0",
   "img2pdf>=0.5",
   "pymupdf>=1.24",
-  "customtkinter>=5.2"
+  "customtkinter>=5.2",
+  "onnxruntime>=1.18"
 ]
 
 [project.optional-dependencies]
@@ -30,12 +31,16 @@ dev = [
 
 [project.scripts]
 uniscan = "uniscan.cli:main"
+uniscan-office-lens = "uniscan.office_lens.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"uniscan.office_lens" = ["models/*.ort", "model_metadata/*.json"]
 
 [tool.ruff]
 line-length = 100
