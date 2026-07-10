@@ -209,6 +209,53 @@ def test_run_batch_pipeline_places_content_on_standard_page(tmp_path) -> None:
     assert report["pages"][0]["layoutApplied"] is True
 
 
+def test_run_batch_pipeline_reports_cleanup_and_lighting_diagnostics(tmp_path) -> None:
+    source = tmp_path / "uneven.png"
+    image = np.full((320, 480, 3), 210, dtype=np.uint8)
+    image[:, :150] = 115
+    cv2.putText(
+        image,
+        "Document line",
+        (45, 180),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.9,
+        (25, 25, 25),
+        2,
+        cv2.LINE_AA,
+    )
+    cv2.circle(image, (370, 90), 24, (255, 255, 255), -1)
+    image[25, 25] = 0
+    ok, encoded = cv2.imencode(".png", image)
+    assert ok
+    encoded.tofile(str(source))
+
+    result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "cleanup.pdf",
+        images_dir=tmp_path / "cleanup-pages",
+        detect_document=False,
+        lens_mode="none",
+        binarization_method="sauvola",
+        binarization_window=31,
+        despeckle_strength="conservative",
+        lighting_diagnostics=True,
+    )
+
+    output = cv2.imread(str(result.image_outputs[0]), cv2.IMREAD_GRAYSCALE)
+    assert set(np.unique(output).tolist()).issubset({0, 255})
+    page = result.pages[0]
+    assert page.binarization_method == "sauvola"
+    assert page.despeckle_removed_components >= 1
+    assert page.shadow_fraction is not None and page.shadow_fraction > 0.05
+    assert page.glare_fraction is not None and page.glare_fraction > 0.001
+    assert "uneven_shadow" in page.lighting_warnings
+    report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    assert report["binarizationMethod"] == "sauvola"
+    assert report["despeckleStrength"] == "conservative"
+    assert report["lightingDiagnostics"] is True
+    assert report["pages"][0]["despeckleRemovedComponents"] >= 1
+
+
 def test_run_batch_pipeline_applies_and_reports_orientation(tmp_path) -> None:
     source = tmp_path / "sideways.png"
     _write_sideways_text_page(source)
@@ -264,6 +311,18 @@ def test_run_batch_pipeline_rejects_unknown_geometry_methods(tmp_path) -> None:
             output_pdf=tmp_path / "uvdoc-auto.pdf",
             dewarp_method="none",
             auto_dewarp_uvdoc=True,
+        )
+    with pytest.raises(ValueError, match="Unsupported binarization"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=tmp_path / "binarization.pdf",
+            binarization_method="missing",
+        )
+    with pytest.raises(ValueError, match="Unsupported despeckle"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=tmp_path / "despeckle.pdf",
+            despeckle_strength="missing",
         )
 
 

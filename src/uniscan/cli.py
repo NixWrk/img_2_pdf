@@ -11,6 +11,8 @@ from uniscan.tools import (
     DESKEW_METHOD_CHOICES,
     DEWARP_METHOD_CHOICES,
     DEFAULT_QUALITY_BACKENDS,
+    BINARIZATION_CHOICES,
+    DESPECKLE_CHOICES,
     DETECTOR_POLICY_CHOICES,
     LENS_MODE_CHOICES,
     ORIENTATION_METHOD_CHOICES,
@@ -161,6 +163,35 @@ def main(argv: list[str] | None = None) -> int:
         default="center",
         help="Vertical content alignment on a standard page.",
     )
+    convert_parser.add_argument(
+        "--binarization",
+        choices=BINARIZATION_CHOICES,
+        default="none",
+        help="Document binarization algorithm.",
+    )
+    convert_parser.add_argument(
+        "--binarization-window",
+        type=int,
+        default=31,
+        help="Local window for Sauvola/Wolf (even values are rounded up).",
+    )
+    convert_parser.add_argument(
+        "--binarization-k",
+        type=float,
+        default=None,
+        help="Optional Sauvola/Wolf coefficient from 0 to 1.",
+    )
+    convert_parser.add_argument(
+        "--despeckle",
+        choices=DESPECKLE_CHOICES,
+        default="none",
+        help="Remove only isolated specks at the selected strength.",
+    )
+    convert_parser.add_argument(
+        "--lighting-diagnostics",
+        action="store_true",
+        help="Measure shadows, possible glare, and clipped pixels in the JSON report.",
+    )
 
     benchmark_parser = subparsers.add_parser(
         "benchmark-crop",
@@ -276,6 +307,11 @@ def main(argv: list[str] | None = None) -> int:
                 page_margin_mm=args.page_margin_mm,
                 horizontal_alignment=args.align_x,
                 vertical_alignment=args.align_y,
+                binarization_method=args.binarization,
+                binarization_window=args.binarization_window,
+                binarization_k=args.binarization_k,
+                despeckle_strength=args.despeckle,
+                lighting_diagnostics=args.lighting_diagnostics,
                 uvdoc_cache_home=args.uvdoc_cache,
             )
         except (OSError, RuntimeError, ValueError) as exc:

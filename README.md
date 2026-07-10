@@ -69,6 +69,12 @@ Useful options:
   `--auto-dewarp-uvdoc` to explicitly permit its optional UVDoc fallback. `textline`
 - `--page-layout {none,a4,letter}` places the detected content box on a consistent page; margins
   and alignment are controlled by `--page-margin-mm`, `--align-x`, and `--align-y`.
+- `--binarization {none,fixed,otsu,sauvola,wolf}` selects document thresholding; adaptive methods
+  use `--binarization-window` and optional `--binarization-k`.
+- `--despeckle {none,conservative,normal,strong}` removes only isolated micro-components and
+  reports how many nearby punctuation-like components were protected.
+- `--lighting-diagnostics` records shadow, possible-glare, clipped-pixel, and unevenness metrics
+  without modifying the page.
   works fully offline, while UVDoc requires its optional PaddleOCR runtime.
 - `--illumination-correction` opts into experimental shadow/highlight normalization.
 - `--pdf-dpi 300` controls PDF rendering and export DPI.

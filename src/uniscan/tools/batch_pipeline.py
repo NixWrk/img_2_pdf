@@ -20,6 +20,14 @@ from uniscan.core.layout import (
     VERTICAL_ALIGNMENTS,
     layout_document_page,
 )
+from uniscan.core.cleanup import (
+    BINARIZATION_CHOICES,
+    BINARIZATION_NONE,
+    DESPECKLE_CHOICES,
+    DESPECKLE_NONE,
+    DespeckleDiagnostics,
+    analyze_lighting,
+)
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.dewarp import (
     DEWARP_METHOD_AUTO,
@@ -31,7 +39,7 @@ from uniscan.core.dewarp import (
 from uniscan.core.preprocess import (
     DESKEW_METHOD_CHOICES,
     PREPROCESS_PRESETS,
-    apply_enhancements,
+    apply_enhancements_with_diagnostics,
     deskew_document,
     PreprocessSettings,
     resolve_lens_mode_profile,
@@ -115,6 +123,16 @@ class PageRunReport:
     content_confidence: float = 0.0
     layout_scale: float = 1.0
     layout_reason: str | None = None
+    binarization_method: str = "none"
+    despeckle_strength: str = "none"
+    despeckle_removed_components: int = 0
+    despeckle_removed_pixels: int = 0
+    despeckle_protected_components: int = 0
+    shadow_fraction: float | None = None
+    glare_fraction: float | None = None
+    clipped_pixel_fraction: float | None = None
+    lighting_unevenness: float | None = None
+    lighting_warnings: tuple[str, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -292,6 +310,11 @@ def _report_payload(
     page_margin_mm: float,
     horizontal_alignment: str,
     vertical_alignment: str,
+    binarization_method: str,
+    binarization_window: int,
+    binarization_k: float | None,
+    despeckle_strength: str,
+    lighting_diagnostics: bool,
 ) -> dict[str, object]:
     detected_pages = sum(page.detected for page in pages)
     fallback_pages = sum(page.fallback_reason is not None for page in pages)
@@ -311,6 +334,11 @@ def _report_payload(
         "pageMarginMm": page_margin_mm,
         "horizontalAlignment": horizontal_alignment,
         "verticalAlignment": vertical_alignment,
+        "binarizationMethod": binarization_method,
+        "binarizationWindow": binarization_window,
+        "binarizationK": binarization_k,
+        "despeckleStrength": despeckle_strength,
+        "lightingDiagnostics": lighting_diagnostics,
         "totalPages": len(pages),
         "detectedPages": detected_pages,
         "fallbackPages": fallback_pages,
@@ -349,6 +377,16 @@ def _report_payload(
                 "contentConfidence": page.content_confidence,
                 "layoutScale": page.layout_scale,
                 "layoutReason": page.layout_reason,
+                "binarizationMethod": page.binarization_method,
+                "despeckleStrength": page.despeckle_strength,
+                "despeckleRemovedComponents": page.despeckle_removed_components,
+                "despeckleRemovedPixels": page.despeckle_removed_pixels,
+                "despeckleProtectedComponents": page.despeckle_protected_components,
+                "shadowFraction": page.shadow_fraction,
+                "glareFraction": page.glare_fraction,
+                "clippedPixelFraction": page.clipped_pixel_fraction,
+                "lightingUnevenness": page.lighting_unevenness,
+                "lightingWarnings": list(page.lighting_warnings),
             }
             for page in pages
         ],
@@ -424,6 +462,11 @@ def run_batch_pipeline(
     page_margin_mm: float = 10.0,
     horizontal_alignment: str = "center",
     vertical_alignment: str = "center",
+    binarization_method: str = BINARIZATION_NONE,
+    binarization_window: int = 31,
+    binarization_k: float | None = None,
+    despeckle_strength: str = DESPECKLE_NONE,
+    lighting_diagnostics: bool = False,
     uvdoc_cache_home: Path | None = None,
     cancel_cb: CancelCb | None = None,
 ) -> BatchPipelineResult:
@@ -437,6 +480,8 @@ def run_batch_pipeline(
     deskew_method = deskew_method.strip().lower()
     dewarp_method = dewarp_method.strip().lower()
     page_layout = page_layout.strip().lower()
+    binarization_method = binarization_method.strip().lower()
+    despeckle_strength = despeckle_strength.strip().lower()
     if orientation_method not in ORIENTATION_METHOD_CHOICES:
         raise ValueError(f"Unsupported orientation method: {orientation_method}")
     if deskew_method not in DESKEW_METHOD_CHOICES:
@@ -451,6 +496,14 @@ def run_batch_pipeline(
         raise ValueError(f"Unsupported horizontal alignment: {horizontal_alignment}")
     if vertical_alignment not in VERTICAL_ALIGNMENTS:
         raise ValueError(f"Unsupported vertical alignment: {vertical_alignment}")
+    if binarization_method not in BINARIZATION_CHOICES:
+        raise ValueError(f"Unsupported binarization method: {binarization_method}")
+    if int(binarization_window) < 3:
+        raise ValueError("Binarization window must be >= 3.")
+    if binarization_k is not None and not 0.0 <= float(binarization_k) <= 1.0:
+        raise ValueError("Binarization k must be between 0 and 1.")
+    if despeckle_strength not in DESPECKLE_CHOICES:
+        raise ValueError(f"Unsupported despeckle strength: {despeckle_strength}")
 
     output_pdf = Path(output_pdf).with_suffix(".pdf")
     report_path = Path(report_path) if report_path else output_pdf.with_suffix(".pdf.report.json")
@@ -468,9 +521,23 @@ def run_batch_pipeline(
         preprocess_settings = replace(
             preprocess_settings,
             correct_illumination=bool(illumination_correction),
+            binarization_method=binarization_method,
+            binarization_window=int(binarization_window),
+            binarization_k=binarization_k,
+            despeckle_strength=despeckle_strength,
         )
-    elif illumination_correction:
-        preprocess_settings = PreprocessSettings(correct_illumination=True)
+    elif (
+        illumination_correction
+        or binarization_method != BINARIZATION_NONE
+        or despeckle_strength != DESPECKLE_NONE
+    ):
+        preprocess_settings = PreprocessSettings(
+            correct_illumination=bool(illumination_correction),
+            binarization_method=binarization_method,
+            binarization_window=int(binarization_window),
+            binarization_k=binarization_k,
+            despeckle_strength=despeckle_strength,
+        )
     detector_backends = _resolve_detector_policy(detector_policy)
     options = PipelineOptions(
         detect_document=bool(detect_document),
@@ -526,8 +593,17 @@ def run_batch_pipeline(
                         auto_use_uvdoc=auto_dewarp_uvdoc,
                     )
                 current = postprocess(dewarped)
+                lighting = analyze_lighting(dewarped) if lighting_diagnostics else None
+                despeckle_diagnostics = DespeckleDiagnostics(
+                    strength=DESPECKLE_NONE,
+                    applied=False,
+                    reason="disabled",
+                )
                 if preprocess_settings is not None:
-                    current = apply_enhancements(current, preprocess_settings)
+                    current, despeckle_diagnostics = apply_enhancements_with_diagnostics(
+                        current,
+                        preprocess_settings,
+                    )
                 current, layout_diagnostics = layout_document_page(
                     current,
                     method=page_layout,
@@ -580,6 +656,20 @@ def run_batch_pipeline(
                         content_confidence=layout_diagnostics.content_confidence,
                         layout_scale=layout_diagnostics.scale,
                         layout_reason=layout_diagnostics.reason,
+                        binarization_method=binarization_method,
+                        despeckle_strength=despeckle_strength,
+                        despeckle_removed_components=despeckle_diagnostics.removed_components,
+                        despeckle_removed_pixels=despeckle_diagnostics.removed_pixels,
+                        despeckle_protected_components=despeckle_diagnostics.protected_components,
+                        shadow_fraction=(
+                            lighting.shadow_fraction if lighting is not None else None
+                        ),
+                        glare_fraction=(lighting.glare_fraction if lighting is not None else None),
+                        clipped_pixel_fraction=(
+                            lighting.clipped_pixel_fraction if lighting is not None else None
+                        ),
+                        lighting_unevenness=(lighting.unevenness if lighting is not None else None),
+                        lighting_warnings=(lighting.warnings if lighting is not None else ()),
                     )
                 )
 
@@ -602,6 +692,11 @@ def run_batch_pipeline(
             page_margin_mm=float(page_margin_mm),
             horizontal_alignment=horizontal_alignment,
             vertical_alignment=vertical_alignment,
+            binarization_method=binarization_method,
+            binarization_window=int(binarization_window),
+            binarization_k=(float(binarization_k) if binarization_k is not None else None),
+            despeckle_strength=despeckle_strength,
+            lighting_diagnostics=bool(lighting_diagnostics),
         )
         staged_targets, final_image_paths = _stage_outputs(
             staged_page_paths=staged_page_paths,

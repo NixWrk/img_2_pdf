@@ -11,6 +11,7 @@ from .cleanup import (
     BINARIZATION_FIXED,
     BINARIZATION_NONE,
     DESPECKLE_NONE,
+    DespeckleDiagnostics,
     binarize_document,
     despeckle_document,
 )
@@ -131,8 +132,11 @@ def correct_illumination(image: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(color, cv2.COLOR_LAB2BGR)
 
 
-def apply_enhancements(image: np.ndarray, settings: PreprocessSettings) -> np.ndarray:
-    """Apply denoise, contrast/brightness, and optional binary threshold."""
+def apply_enhancements_with_diagnostics(
+    image: np.ndarray,
+    settings: PreprocessSettings,
+) -> tuple[np.ndarray, DespeckleDiagnostics]:
+    """Apply cleanup and return the safety evidence from the despeckle stage."""
     out = correct_illumination(image) if settings.correct_illumination else image
     denoise = max(0, int(settings.denoise))
     if denoise > 0:
@@ -160,11 +164,17 @@ def apply_enhancements(image: np.ndarray, settings: PreprocessSettings) -> np.nd
         window_size=int(settings.binarization_window),
         k=settings.binarization_k,
     )
-    out, _despeckle_diagnostics = despeckle_document(
+    out, despeckle_diagnostics = despeckle_document(
         out,
         strength=settings.despeckle_strength,
     )
 
+    return out, despeckle_diagnostics
+
+
+def apply_enhancements(image: np.ndarray, settings: PreprocessSettings) -> np.ndarray:
+    """Apply denoise, contrast/brightness, binarization, and safe despeckle."""
+    out, _diagnostics = apply_enhancements_with_diagnostics(image, settings)
     return out
 
 

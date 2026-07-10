@@ -16,6 +16,8 @@ All notable changes to UniScan are documented here. The project follows Semantic
   and alignment.
 - Dependency-free Otsu, Sauvola, and Wolf binarization; isolated-speck removal that protects nearby
   punctuation; and separate shadow, glare, and clipped-pixel diagnostics.
+- Batch CLI and JSON reporting for binarization parameters, despeckle safety counts, and optional
+  lighting evidence.
 
 - Independent boundary, deskew, and local-dewarp stages with per-page JSON diagnostics.
 - Offline text-line dewarp for curved or wavy pages, with confidence-based no-op fallback.

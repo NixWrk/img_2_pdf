@@ -57,6 +57,19 @@ content box after cleanup, crops unused source margins, and fits it onto a stand
 `--page-margin-mm`, `--align-x`, and `--align-y` provide document-wide reproducible margins and
 alignment. The default `none` path is a zero-cost identity operation.
 
+## Document cleanup and lighting evidence
+
+The cleanup stage exposes global `fixed`/`otsu` thresholding and local `sauvola`/`wolf`
+binarization. Sauvola and Wolf use local mean and standard deviation, so they tolerate smooth page
+shadows better than one document-wide threshold. `--despeckle` removes only tiny connected
+components that have no nearby ink; punctuation-like dots close to a text body are counted as
+protected and retained.
+
+`--lighting-diagnostics` is non-destructive. It records smooth-shadow fraction, anomalous clipped
+highlight fraction, all clipped pixels, illumination range/unevenness, and warning codes. A glare
+warning means detail may be absent in the source; illumination correction must not claim to recover
+such clipped detail.
+
 `--dewarp textline` is the dependency-free mode. It:
 
 1. builds a local foreground mask;
