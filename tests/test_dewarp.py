@@ -5,13 +5,16 @@ import numpy as np
 import pytest
 
 from uniscan.core.dewarp import (
+    DEWARP_METHOD_AUTO,
     DEWARP_METHOD_NONE,
     DEWARP_METHOD_PADDLEOCR_UVDOC,
     DEWARP_METHOD_TEXTLINE,
+    DewarpDiagnostics,
     DewarpModel,
     apply_dewarp_model,
     dewarp_document,
     estimate_textline_dewarp_model,
+    measure_dewarp_quality,
     normalize_control_points,
 )
 from uniscan.core.scanner_adapter import ScanOutput
@@ -57,6 +60,9 @@ def test_textline_dewarp_reduces_synthetic_page_curvature() -> None:
     assert diagnostics.applied is True
     assert diagnostics.line_count >= 3
     assert diagnostics.max_displacement_px > 2.0
+    assert diagnostics.selected_method == DEWARP_METHOD_TEXTLINE
+    assert diagnostics.curvature_after_px < diagnostics.curvature_before_px
+    assert diagnostics.duration_ms > 0.0
     assert _first_line_residual_rms(corrected, character_x) < (
         _first_line_residual_rms(image, character_x) * 0.35
     )
@@ -98,6 +104,100 @@ def test_textline_dewarp_keeps_straight_page_unchanged() -> None:
     assert diagnostics.applied is False
     assert diagnostics.reason == "curvature_below_threshold"
     np.testing.assert_array_equal(corrected, image)
+
+
+def test_auto_dewarp_selects_validated_textline_candidate() -> None:
+    image, character_x = _curved_text_page()
+
+    corrected, diagnostics = dewarp_document(image, method=DEWARP_METHOD_AUTO)
+
+    assert diagnostics.applied is True
+    assert diagnostics.selected_method == DEWARP_METHOD_TEXTLINE
+    assert diagnostics.curvature_after_px < diagnostics.curvature_before_px * 0.5
+    assert diagnostics.blank_border_after <= diagnostics.blank_border_before + 0.01
+    assert diagnostics.aspect_change == 0.0
+    assert _first_line_residual_rms(corrected, character_x) < 2.0
+
+
+def test_auto_dewarp_keeps_straight_page_and_does_not_start_uvdoc(monkeypatch) -> None:
+    image, _character_x = _curved_text_page(amplitude=0.0)
+    uvdoc_calls = 0
+
+    def unexpected_uvdoc(*_args, **_kwargs):
+        nonlocal uvdoc_calls
+        uvdoc_calls += 1
+        raise AssertionError("UVDoc must be explicitly enabled")
+
+    monkeypatch.setattr("uniscan.core.dewarp._uvdoc_dewarp", unexpected_uvdoc)
+    corrected, diagnostics = dewarp_document(image, method=DEWARP_METHOD_AUTO)
+
+    assert diagnostics.applied is False
+    assert diagnostics.reason == "curvature_below_threshold"
+    assert uvdoc_calls == 0
+    np.testing.assert_array_equal(corrected, image)
+
+
+def test_auto_dewarp_rejects_candidate_without_curvature_improvement(monkeypatch) -> None:
+    image, _character_x = _curved_text_page()
+
+    monkeypatch.setattr(
+        "uniscan.core.dewarp._textline_dewarp",
+        lambda source, *, model: (
+            source.copy(),
+            DewarpDiagnostics(
+                method=DEWARP_METHOD_TEXTLINE,
+                applied=True,
+                line_count=8,
+                max_displacement_px=12.0,
+            ),
+        ),
+    )
+
+    corrected, diagnostics = dewarp_document(image, method=DEWARP_METHOD_AUTO)
+
+    assert diagnostics.applied is False
+    assert diagnostics.selected_method == DEWARP_METHOD_NONE
+    assert diagnostics.reason == "textline_rejected:curvature_not_improved"
+    np.testing.assert_array_equal(corrected, image)
+
+
+def test_auto_dewarp_can_use_explicit_uvdoc_fallback(monkeypatch) -> None:
+    image = np.full((200, 160, 3), 230, dtype=np.uint8)
+    expected = image.copy()
+    expected[40:160, 50:110] = 220
+
+    monkeypatch.setattr(
+        "uniscan.core.dewarp._uvdoc_dewarp",
+        lambda _image, *, cache_home: (
+            expected,
+            DewarpDiagnostics(
+                method=DEWARP_METHOD_PADDLEOCR_UVDOC,
+                applied=True,
+            ),
+        ),
+    )
+
+    corrected, diagnostics = dewarp_document(
+        image,
+        method=DEWARP_METHOD_AUTO,
+        auto_use_uvdoc=True,
+    )
+
+    np.testing.assert_array_equal(corrected, expected)
+    assert diagnostics.applied is True
+    assert diagnostics.selected_method == DEWARP_METHOD_PADDLEOCR_UVDOC
+    assert diagnostics.reason == "textline_fallback:insufficient_text_lines"
+
+
+def test_measure_dewarp_quality_reports_curvature() -> None:
+    curved, _character_x = _curved_text_page()
+    straight, _character_x = _curved_text_page(amplitude=0.0)
+
+    curved_metrics = measure_dewarp_quality(curved)
+    straight_metrics = measure_dewarp_quality(straight)
+
+    assert curved_metrics.line_count >= 3
+    assert curved_metrics.curvature_rms_px > straight_metrics.curvature_rms_px + 1.0
 
 
 def test_dewarp_none_and_invalid_method() -> None:

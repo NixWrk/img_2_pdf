@@ -64,7 +64,9 @@ Useful options:
 - `--two-page` splits book spreads using gutter detection with midpoint fallback.
 - `--orientation {none,auto}` selects conservative 0/90/180/270 correction without OCR.
 - `--deskew {none,hybrid,hough,min_area}` selects small-angle rotation correction.
-- `--dewarp {none,textline,paddleocr_uvdoc}` removes local page waves after cropping; `textline`
+- `--dewarp {none,auto,textline,paddleocr_uvdoc}` removes local page waves after cropping; `auto`
+  validates geometry improvement and selects the offline text-line backend by default. Add
+  `--auto-dewarp-uvdoc` to explicitly permit its optional UVDoc fallback. `textline`
   works fully offline, while UVDoc requires its optional PaddleOCR runtime.
 - `--illumination-correction` opts into experimental shadow/highlight normalization.
 - `--pdf-dpi 300` controls PDF rendering and export DPI.

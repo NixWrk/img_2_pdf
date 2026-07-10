@@ -16,6 +16,7 @@ from uniscan.core.pipeline import PipelineOptions, process_loaded_items
 from uniscan.core.orientation import ORIENTATION_METHOD_CHOICES, orient_document
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.dewarp import (
+    DEWARP_METHOD_AUTO,
     DEWARP_METHOD_CHOICES,
     DEWARP_METHOD_PADDLEOCR_UVDOC,
     DewarpDiagnostics,
@@ -90,8 +91,17 @@ class PageRunReport:
     deskew_angle_degrees: float = 0.0
     dewarp_method: str = "none"
     dewarp_applied: bool = False
+    dewarp_selected_method: str = "none"
     dewarp_line_count: int = 0
     dewarp_max_displacement_px: float = 0.0
+    dewarp_curvature_before_px: float = 0.0
+    dewarp_curvature_after_px: float = 0.0
+    dewarp_blank_border_before: float = 0.0
+    dewarp_blank_border_after: float = 0.0
+    dewarp_edge_ink_before: float = 0.0
+    dewarp_edge_ink_after: float = 0.0
+    dewarp_aspect_change: float = 0.0
+    dewarp_duration_ms: float = 0.0
     dewarp_reason: str | None = None
 
 
@@ -265,6 +275,7 @@ def _report_payload(
     orientation_method: str,
     deskew_method: str,
     dewarp_method: str,
+    auto_dewarp_uvdoc: bool,
 ) -> dict[str, object]:
     detected_pages = sum(page.detected for page in pages)
     fallback_pages = sum(page.fallback_reason is not None for page in pages)
@@ -279,6 +290,7 @@ def _report_payload(
         "orientationMethod": orientation_method,
         "deskewMethod": deskew_method,
         "dewarpMethod": dewarp_method,
+        "autoDewarpUvdoc": auto_dewarp_uvdoc,
         "totalPages": len(pages),
         "detectedPages": detected_pages,
         "fallbackPages": fallback_pages,
@@ -299,8 +311,17 @@ def _report_payload(
                 "deskewAngleDegrees": page.deskew_angle_degrees,
                 "dewarpMethod": page.dewarp_method,
                 "dewarpApplied": page.dewarp_applied,
+                "dewarpSelectedMethod": page.dewarp_selected_method,
                 "dewarpLineCount": page.dewarp_line_count,
                 "dewarpMaxDisplacementPx": page.dewarp_max_displacement_px,
+                "dewarpCurvatureBeforePx": page.dewarp_curvature_before_px,
+                "dewarpCurvatureAfterPx": page.dewarp_curvature_after_px,
+                "dewarpBlankBorderBefore": page.dewarp_blank_border_before,
+                "dewarpBlankBorderAfter": page.dewarp_blank_border_after,
+                "dewarpEdgeInkBefore": page.dewarp_edge_ink_before,
+                "dewarpEdgeInkAfter": page.dewarp_edge_ink_after,
+                "dewarpAspectChange": page.dewarp_aspect_change,
+                "dewarpDurationMs": page.dewarp_duration_ms,
                 "dewarpReason": page.dewarp_reason,
             }
             for page in pages
@@ -372,6 +393,7 @@ def run_batch_pipeline(
     orientation_method: str = "none",
     deskew_method: str = "none",
     dewarp_method: str = "none",
+    auto_dewarp_uvdoc: bool = False,
     uvdoc_cache_home: Path | None = None,
     cancel_cb: CancelCb | None = None,
 ) -> BatchPipelineResult:
@@ -390,6 +412,8 @@ def run_batch_pipeline(
         raise ValueError(f"Unsupported deskew method: {deskew_method}")
     if dewarp_method not in DEWARP_METHOD_CHOICES:
         raise ValueError(f"Unsupported dewarp method: {dewarp_method}")
+    if auto_dewarp_uvdoc and dewarp_method != DEWARP_METHOD_AUTO:
+        raise ValueError("auto_dewarp_uvdoc requires dewarp_method='auto'.")
 
     output_pdf = Path(output_pdf).with_suffix(".pdf")
     report_path = Path(report_path) if report_path else output_pdf.with_suffix(".pdf.report.json")
@@ -454,6 +478,7 @@ def run_batch_pipeline(
                     dewarp_diagnostics = DewarpDiagnostics(
                         method=dewarp_method,
                         applied=True,
+                        selected_method=DEWARP_METHOD_PADDLEOCR_UVDOC,
                         reason="applied_by_detection_backend",
                     )
                 else:
@@ -461,6 +486,7 @@ def run_batch_pipeline(
                         deskewed,
                         method=dewarp_method,
                         uvdoc_cache_home=uvdoc_cache_home,
+                        auto_use_uvdoc=auto_dewarp_uvdoc,
                     )
                 current = postprocess(dewarped)
                 if preprocess_settings is not None:
@@ -486,8 +512,17 @@ def run_batch_pipeline(
                         deskew_angle_degrees=round(float(deskew_angle), 3),
                         dewarp_method=dewarp_method,
                         dewarp_applied=dewarp_diagnostics.applied,
+                        dewarp_selected_method=dewarp_diagnostics.selected_method,
                         dewarp_line_count=dewarp_diagnostics.line_count,
                         dewarp_max_displacement_px=dewarp_diagnostics.max_displacement_px,
+                        dewarp_curvature_before_px=dewarp_diagnostics.curvature_before_px,
+                        dewarp_curvature_after_px=dewarp_diagnostics.curvature_after_px,
+                        dewarp_blank_border_before=dewarp_diagnostics.blank_border_before,
+                        dewarp_blank_border_after=dewarp_diagnostics.blank_border_after,
+                        dewarp_edge_ink_before=dewarp_diagnostics.edge_ink_before,
+                        dewarp_edge_ink_after=dewarp_diagnostics.edge_ink_after,
+                        dewarp_aspect_change=dewarp_diagnostics.aspect_change,
+                        dewarp_duration_ms=dewarp_diagnostics.duration_ms,
                         dewarp_reason=dewarp_diagnostics.reason,
                     )
                 )
@@ -506,6 +541,7 @@ def run_batch_pipeline(
             orientation_method=orientation_method,
             deskew_method=deskew_method,
             dewarp_method=dewarp_method,
+            auto_dewarp_uvdoc=bool(auto_dewarp_uvdoc),
         )
         staged_targets, final_image_paths = _stage_outputs(
             staged_page_paths=staged_page_paths,

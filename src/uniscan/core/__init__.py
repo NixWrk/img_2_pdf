@@ -2,15 +2,18 @@
 
 from .geometry import order_quad_points, warp_perspective_from_points
 from .dewarp import (
+    DEWARP_METHOD_AUTO,
     DEWARP_METHOD_CHOICES,
     DEWARP_METHOD_NONE,
     DEWARP_METHOD_PADDLEOCR_UVDOC,
     DEWARP_METHOD_TEXTLINE,
     DewarpDiagnostics,
     DewarpModel,
+    DewarpQualityMetrics,
     apply_dewarp_model,
     dewarp_document,
     estimate_textline_dewarp_model,
+    measure_dewarp_quality,
     normalize_control_points,
 )
 from .pipeline import PipelineOptions, build_pdf_from_images, process_loaded_items, split_spread
@@ -61,11 +64,13 @@ __all__ = [
     "DESKEW_METHOD_MIN_AREA",
     "DESKEW_METHOD_NONE",
     "DEWARP_METHOD_CHOICES",
+    "DEWARP_METHOD_AUTO",
     "DEWARP_METHOD_NONE",
     "DEWARP_METHOD_PADDLEOCR_UVDOC",
     "DEWARP_METHOD_TEXTLINE",
     "DewarpDiagnostics",
     "DewarpModel",
+    "DewarpQualityMetrics",
     "LENS_MODE_CUSTOM",
     "LENS_MODE_PROFILES",
     "LENS_MODE_VALUES",
@@ -95,6 +100,7 @@ __all__ = [
     "estimate_document_skew",
     "estimate_page_orientation",
     "infer_lens_mode",
+    "measure_dewarp_quality",
     "order_quad_points",
     "normalize_control_points",
     "orient_document",

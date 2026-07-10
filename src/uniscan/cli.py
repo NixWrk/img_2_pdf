@@ -128,6 +128,11 @@ def main(argv: list[str] | None = None) -> int:
         default="none",
         help="Correct local page waves independently from boundary detection.",
     )
+    convert_parser.add_argument(
+        "--auto-dewarp-uvdoc",
+        action="store_true",
+        help="Allow --dewarp auto to use optional UVDoc (may initialize its model cache).",
+    )
 
     benchmark_parser = subparsers.add_parser(
         "benchmark-crop",
@@ -225,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
                 orientation_method=args.orientation,
                 deskew_method=args.deskew,
                 dewarp_method=args.dewarp,
+                auto_dewarp_uvdoc=args.auto_dewarp_uvdoc,
                 uvdoc_cache_home=args.uvdoc_cache,
             )
         except (OSError, RuntimeError, ValueError) as exc:

@@ -137,12 +137,37 @@ def test_run_batch_pipeline_applies_and_reports_textline_dewarp(tmp_path) -> Non
     )
 
     assert result.pages[0].dewarp_applied is True
+    assert result.pages[0].dewarp_selected_method == "textline"
     assert result.pages[0].dewarp_line_count >= 3
     assert result.pages[0].dewarp_max_displacement_px > 2.0
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert report["dewarpMethod"] == "textline"
     assert report["pages"][0]["dewarpApplied"] is True
+    assert report["pages"][0]["dewarpSelectedMethod"] == "textline"
     assert report["pages"][0]["dewarpReason"] is None
+
+
+def test_run_batch_pipeline_auto_dewarp_reports_quality_metrics(tmp_path) -> None:
+    source = tmp_path / "curved-auto.png"
+    _write_curved_text_page(source)
+
+    result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "auto-dewarped.pdf",
+        detect_document=False,
+        lens_mode="none",
+        dewarp_method="auto",
+    )
+
+    page = result.pages[0]
+    assert page.dewarp_selected_method == "textline"
+    assert page.dewarp_curvature_after_px < page.dewarp_curvature_before_px
+    assert page.dewarp_duration_ms > 0.0
+    report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    report_page = report["pages"][0]
+    assert report["autoDewarpUvdoc"] is False
+    assert report_page["dewarpSelectedMethod"] == "textline"
+    assert report_page["dewarpCurvatureAfterPx"] < report_page["dewarpCurvatureBeforePx"]
 
 
 def test_run_batch_pipeline_applies_and_reports_orientation(tmp_path) -> None:
@@ -193,6 +218,13 @@ def test_run_batch_pipeline_rejects_unknown_geometry_methods(tmp_path) -> None:
             inputs=[source],
             output_pdf=tmp_path / "dewarp.pdf",
             dewarp_method="missing",
+        )
+    with pytest.raises(ValueError, match="requires dewarp_method='auto'"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=tmp_path / "uvdoc-auto.pdf",
+            dewarp_method="none",
+            auto_dewarp_uvdoc=True,
         )
 
 

@@ -44,6 +44,12 @@ action because it uses layout evidence rather than a small-angle line estimate.
 
 ## Removing page waves
 
+`--dewarp auto` is the safe default candidate for automatic processing. It measures curvature,
+blank borders, edge ink, and aspect ratio before and after correction, and rejects a candidate that
+does not improve the measurable geometry or introduces artifacts. It tries the offline text-line
+model first. UVDoc fallback requires the explicit `--auto-dewarp-uvdoc` flag so preview or batch
+processing never downloads or initializes a heavyweight model unexpectedly.
+
 `--dewarp textline` is the dependency-free mode. It:
 
 1. builds a local foreground mask;
@@ -88,8 +94,9 @@ current custom license is non-commercial and share-alike despite the repository 
 
 ## Diagnostics and examples
 
-The JSON run report records the selected methods, deskew angle, whether dewarp was applied, the
-number of supporting text lines, maximum displacement, and any no-op reason.
+The JSON run report records requested and selected methods, deskew angle, whether dewarp was
+applied, supporting text lines, maximum displacement, curvature before/after, blank-border and
+edge-ink ratios, aspect change, dewarp latency, and any no-op or rejection reason.
 
 Synthetic regression tests cover curved and straight pages. Real examples should be added before
 tuning thresholds: camera photos near a book spine, rippled loose paper, roller-scanner waves, and

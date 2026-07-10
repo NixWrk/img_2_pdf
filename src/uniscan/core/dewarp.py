@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+import time
 import warnings
 
 import cv2
 import numpy as np
 
 DEWARP_METHOD_NONE = "none"
+DEWARP_METHOD_AUTO = "auto"
 DEWARP_METHOD_TEXTLINE = "textline"
 DEWARP_METHOD_PADDLEOCR_UVDOC = "paddleocr_uvdoc"
 DEWARP_METHOD_CHOICES = (
     DEWARP_METHOD_NONE,
+    DEWARP_METHOD_AUTO,
     DEWARP_METHOD_TEXTLINE,
     DEWARP_METHOD_PADDLEOCR_UVDOC,
 )
@@ -25,10 +28,30 @@ class DewarpDiagnostics:
 
     method: str
     applied: bool
+    selected_method: str = DEWARP_METHOD_NONE
     line_count: int = 0
     max_displacement_px: float = 0.0
     curvature_rms_px: float = 0.0
+    curvature_before_px: float = 0.0
+    curvature_after_px: float = 0.0
+    blank_border_before: float = 0.0
+    blank_border_after: float = 0.0
+    edge_ink_before: float = 0.0
+    edge_ink_after: float = 0.0
+    aspect_change: float = 0.0
+    duration_ms: float = 0.0
     reason: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class DewarpQualityMetrics:
+    """Image-only geometry evidence used to accept or reject a dewarp candidate."""
+
+    curvature_rms_px: float
+    line_count: int
+    blank_border_ratio: float
+    edge_ink_ratio: float
+    aspect_ratio: float
 
 
 @dataclass(slots=True, frozen=True)
@@ -190,6 +213,95 @@ def _aggregate_curve(curves: list[np.ndarray], height: int) -> np.ndarray | None
     return curve
 
 
+def _border_values(gray: np.ndarray, border: int) -> np.ndarray:
+    return np.concatenate(
+        (
+            gray[:border, :].reshape(-1),
+            gray[-border:, :].reshape(-1),
+            gray[border:-border, :border].reshape(-1),
+            gray[border:-border, -border:].reshape(-1),
+        )
+    )
+
+
+def measure_dewarp_quality(image: np.ndarray) -> DewarpQualityMetrics:
+    """Measure local curvature and common warp artifacts without recognizing text."""
+    if image.size == 0 or len(image.shape) < 2:
+        return DewarpQualityMetrics(0.0, 0, 1.0, 0.0, 0.0)
+
+    analysis, scale = _resize_for_analysis(image)
+    gray = _to_gray(analysis)
+    mask = _foreground_mask(gray)
+    curves = _line_curves(mask)
+    curve = _aggregate_curve(curves, analysis.shape[0])
+    curvature = 0.0
+    if curve is not None:
+        curvature = float(np.sqrt(np.mean(np.square(curve)))) / scale
+
+    height, width = gray.shape[:2]
+    border = max(1, min(height, width) // 50)
+    border_values = _border_values(gray, border)
+    blank_border = float(np.count_nonzero((border_values <= 4) | (border_values >= 251))) / max(
+        1, border_values.size
+    )
+    edge_mask = _border_values(mask, border)
+    edge_ink = float(np.count_nonzero(edge_mask)) / max(1, edge_mask.size)
+    return DewarpQualityMetrics(
+        curvature_rms_px=round(curvature, 3),
+        line_count=len(curves),
+        blank_border_ratio=round(blank_border, 6),
+        edge_ink_ratio=round(edge_ink, 6),
+        aspect_ratio=round(width / max(1.0, float(height)), 6),
+    )
+
+
+def _candidate_rejection_reason(
+    before: DewarpQualityMetrics,
+    after: DewarpQualityMetrics,
+    *,
+    require_curvature_improvement: bool,
+) -> str | None:
+    if after.aspect_ratio <= 0.0:
+        return "invalid_output_size"
+    aspect_change = abs(float(np.log(after.aspect_ratio / max(1e-6, before.aspect_ratio))))
+    if aspect_change > 0.15:
+        return "excessive_aspect_change"
+    if after.blank_border_ratio > before.blank_border_ratio + 0.15:
+        return "new_blank_borders"
+    if after.edge_ink_ratio > before.edge_ink_ratio + 0.04:
+        return "content_moved_to_edge"
+    if require_curvature_improvement and before.line_count >= 3:
+        if after.line_count < 3:
+            return "textline_evidence_lost"
+        required_improvement = max(0.15, before.curvature_rms_px * 0.05)
+        if after.curvature_rms_px > before.curvature_rms_px - required_improvement:
+            return "curvature_not_improved"
+    return None
+
+
+def _quality_diagnostics(
+    diagnostics: DewarpDiagnostics,
+    *,
+    before: DewarpQualityMetrics,
+    after: DewarpQualityMetrics,
+    started: float,
+) -> DewarpDiagnostics:
+    aspect_change = 0.0
+    if before.aspect_ratio > 0.0 and after.aspect_ratio > 0.0:
+        aspect_change = abs(float(np.log(after.aspect_ratio / before.aspect_ratio)))
+    return replace(
+        diagnostics,
+        curvature_before_px=before.curvature_rms_px,
+        curvature_after_px=after.curvature_rms_px,
+        blank_border_before=before.blank_border_ratio,
+        blank_border_after=after.blank_border_ratio,
+        edge_ink_before=before.edge_ink_ratio,
+        edge_ink_after=after.edge_ink_ratio,
+        aspect_change=round(aspect_change, 6),
+        duration_ms=round((time.perf_counter() - started) * 1000.0, 3),
+    )
+
+
 def estimate_textline_dewarp_model(
     image: np.ndarray,
     *,
@@ -323,19 +435,135 @@ def _uvdoc_dewarp(
     )
 
 
+def _automatic_dewarp(
+    image: np.ndarray,
+    *,
+    before: DewarpQualityMetrics,
+    uvdoc_cache_home: Path | None,
+    auto_use_uvdoc: bool,
+    model: DewarpModel | None,
+) -> tuple[np.ndarray, DewarpDiagnostics, DewarpQualityMetrics]:
+    textline_candidate, textline_diagnostics = _textline_dewarp(image, model=model)
+    if textline_diagnostics.applied:
+        after = measure_dewarp_quality(textline_candidate)
+        rejection = None
+        if model is None:
+            rejection = _candidate_rejection_reason(
+                before,
+                after,
+                require_curvature_improvement=True,
+            )
+        if rejection is None:
+            return (
+                textline_candidate,
+                replace(
+                    textline_diagnostics,
+                    method=DEWARP_METHOD_AUTO,
+                    selected_method=DEWARP_METHOD_TEXTLINE,
+                ),
+                after,
+            )
+        textline_reason = f"textline_rejected:{rejection}"
+    else:
+        textline_reason = textline_diagnostics.reason or "textline_no_result"
+
+    if auto_use_uvdoc:
+        try:
+            uvdoc_candidate, uvdoc_diagnostics = _uvdoc_dewarp(
+                image,
+                cache_home=uvdoc_cache_home,
+            )
+        # Optional third-party runtimes may surface backend-specific exception types. Automatic
+        # mode must remain a safe no-op; explicit UVDoc mode still propagates its error.
+        except Exception as exc:
+            return (
+                image.copy(),
+                DewarpDiagnostics(
+                    method=DEWARP_METHOD_AUTO,
+                    applied=False,
+                    line_count=textline_diagnostics.line_count,
+                    curvature_rms_px=textline_diagnostics.curvature_rms_px,
+                    reason=f"{textline_reason};uvdoc_unavailable:{type(exc).__name__}",
+                ),
+                before,
+            )
+        if uvdoc_diagnostics.applied:
+            uvdoc_after = measure_dewarp_quality(uvdoc_candidate)
+            rejection = _candidate_rejection_reason(
+                before,
+                uvdoc_after,
+                require_curvature_improvement=before.line_count >= 3,
+            )
+            if rejection is None:
+                return (
+                    uvdoc_candidate,
+                    replace(
+                        uvdoc_diagnostics,
+                        method=DEWARP_METHOD_AUTO,
+                        selected_method=DEWARP_METHOD_PADDLEOCR_UVDOC,
+                        reason=f"textline_fallback:{textline_reason}",
+                    ),
+                    uvdoc_after,
+                )
+            uvdoc_reason = f"uvdoc_rejected:{rejection}"
+        else:
+            uvdoc_reason = uvdoc_diagnostics.reason or "uvdoc_no_result"
+        textline_reason = f"{textline_reason};{uvdoc_reason}"
+
+    return (
+        image.copy(),
+        DewarpDiagnostics(
+            method=DEWARP_METHOD_AUTO,
+            applied=False,
+            line_count=textline_diagnostics.line_count,
+            max_displacement_px=textline_diagnostics.max_displacement_px,
+            curvature_rms_px=textline_diagnostics.curvature_rms_px,
+            reason=textline_reason,
+        ),
+        before,
+    )
+
+
 def dewarp_document(
     image: np.ndarray,
     *,
     method: str = DEWARP_METHOD_TEXTLINE,
     uvdoc_cache_home: Path | None = None,
+    auto_use_uvdoc: bool = False,
     model: DewarpModel | None = None,
 ) -> tuple[np.ndarray, DewarpDiagnostics]:
     """Straighten local page curvature without changing boundary detection policy."""
     normalized = method.strip().lower()
+    started = time.perf_counter()
     if normalized == DEWARP_METHOD_NONE:
         return image, DewarpDiagnostics(method=normalized, applied=False, reason="disabled")
+    before = measure_dewarp_quality(image)
+    if normalized == DEWARP_METHOD_AUTO:
+        corrected, diagnostics, after = _automatic_dewarp(
+            image,
+            before=before,
+            uvdoc_cache_home=uvdoc_cache_home,
+            auto_use_uvdoc=auto_use_uvdoc,
+            model=model,
+        )
+        return corrected, _quality_diagnostics(
+            diagnostics,
+            before=before,
+            after=after,
+            started=started,
+        )
     if normalized == DEWARP_METHOD_TEXTLINE:
-        return _textline_dewarp(image, model=model)
+        corrected, diagnostics = _textline_dewarp(image, model=model)
+        diagnostics = replace(
+            diagnostics,
+            selected_method=DEWARP_METHOD_TEXTLINE if diagnostics.applied else DEWARP_METHOD_NONE,
+        )
+        return corrected, _quality_diagnostics(
+            diagnostics,
+            before=before,
+            after=measure_dewarp_quality(corrected),
+            started=started,
+        )
     if normalized == DEWARP_METHOD_PADDLEOCR_UVDOC:
         corrected, diagnostics = _uvdoc_dewarp(image, cache_home=uvdoc_cache_home)
         if model is not None:
@@ -350,5 +578,16 @@ def dewarp_document(
                 ),
                 reason="uvdoc_with_user_adjustment",
             )
-        return corrected, diagnostics
+        diagnostics = replace(
+            diagnostics,
+            selected_method=(
+                DEWARP_METHOD_PADDLEOCR_UVDOC if diagnostics.applied else DEWARP_METHOD_NONE
+            ),
+        )
+        return corrected, _quality_diagnostics(
+            diagnostics,
+            before=before,
+            after=measure_dewarp_quality(corrected),
+            started=started,
+        )
     raise ValueError(f"Unsupported dewarp method: {method}")

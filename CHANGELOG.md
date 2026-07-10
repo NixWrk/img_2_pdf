@@ -8,6 +8,8 @@ All notable changes to UniScan are documented here. The project follows Semantic
 
 - Conservative local 0/90/180/270 page orientation based on layout and baseline evidence, with no
   OCR dependency and confidence-based no-op diagnostics.
+- Validated automatic dewarp selection with curvature/artifact metrics and an explicitly enabled
+  optional UVDoc fallback.
 
 - Independent boundary, deskew, and local-dewarp stages with per-page JSON diagnostics.
 - Offline text-line dewarp for curved or wavy pages, with confidence-based no-op fallback.

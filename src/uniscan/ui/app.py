@@ -22,6 +22,7 @@ from uniscan.export import (
 )
 from uniscan.core.geometry import warp_perspective_from_points
 from uniscan.core.dewarp import (
+    DEWARP_METHOD_AUTO,
     DEWARP_METHOD_NONE,
     DEWARP_METHOD_TEXTLINE,
     DewarpModel,
@@ -85,6 +86,7 @@ RESOLUTIONS = [
 
 DEWARP_UI_METHODS = {
     "None": DEWARP_METHOD_NONE,
+    "Automatic (validated)": DEWARP_METHOD_AUTO,
     "Text lines (offline)": DEWARP_METHOD_TEXTLINE,
 }
 DESKEW_UI_METHODS = {
@@ -2527,7 +2529,7 @@ class UnifiedScanApp(ctk.CTk):
             self._set_status("Select page(s) to remove waves.")
             return
 
-        self.dewarp_method_var.set("Text lines (offline)")
+        self.dewarp_method_var.set("Automatic (validated)")
         diagnostics = []
         for idx in indices:
             entry = self.session.entries[idx]
