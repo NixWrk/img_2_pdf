@@ -1,4 +1,7 @@
-# Next Steps
+# Historical roadmap through version 0.1.0
+
+> This plan records completed baseline work. Current priorities and acceptance criteria live in
+> [`roadmap.md`](roadmap.md).
 
 This roadmap keeps UniScan focused on the pre-OCR stage: acquire pages, correct document
 geometry, clean images, and export images or a plain merged PDF.

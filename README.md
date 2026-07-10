@@ -157,4 +157,5 @@ both the GUI and CLI without development Python. See
 - `src/uniscan/tools/quality_benchmark.py` — ground-truth quality regression tool.
 - `src/uniscan/ui` — desktop Import → Scan → Review → Export workflow.
 
-The prioritized development roadmap is in [`docs/next_steps.md`](docs/next_steps.md).
+The canonical implementation roadmap is in [`docs/roadmap.md`](docs/roadmap.md). Older plan
+documents are retained as implementation history.

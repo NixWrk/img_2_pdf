@@ -1,5 +1,8 @@
 ﻿# UniScan PC Plan (Pre-OCR Layer)
 
+> Historical plan: current priorities and acceptance criteria live in
+> [`roadmap.md`](roadmap.md). Checkboxes below describe the earlier unification effort.
+
 ## Product Goal
 
 Deliver a PC-first Office Lens analogue for document preparation:

@@ -1,4 +1,7 @@
-# Follow-up plan after 0.1.0
+# Historical follow-up plan after 0.1.0
+
+> Superseded by the canonical [`roadmap.md`](roadmap.md). This file is retained to explain earlier
+> release and architecture decisions.
 
 This plan keeps OCR out of scope and focuses on turning the verified preview into a maintainable
 Windows scanning application.
