@@ -90,6 +90,23 @@ def test_apply_enhancements_can_correct_illumination() -> None:
     assert not np.array_equal(apply_enhancements(image, settings), image)
 
 
+def test_apply_enhancements_supports_adaptive_binarization_and_despeckle() -> None:
+    image = np.full((120, 180, 3), 240, dtype=np.uint8)
+    cv2.putText(image, "Text", (30, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (20, 20, 20), 2)
+    image[10, 10] = 0
+    settings = PreprocessSettings(
+        binarization_method="sauvola",
+        binarization_window=31,
+        despeckle_strength="conservative",
+    )
+
+    result = apply_enhancements(image, settings)
+
+    assert result.ndim == 2
+    assert set(np.unique(result).tolist()).issubset({0, 255})
+    assert result[10, 10] == 255
+
+
 def test_deskew_document_returns_angle_for_rotated_content() -> None:
     base = np.full((160, 220, 3), 255, dtype=np.uint8)
     cv2.rectangle(base, (40, 60), (180, 100), (0, 0, 0), -1)

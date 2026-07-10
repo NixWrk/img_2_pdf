@@ -7,6 +7,14 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from .cleanup import (
+    BINARIZATION_FIXED,
+    BINARIZATION_NONE,
+    DESPECKLE_NONE,
+    binarize_document,
+    despeckle_document,
+)
+
 DESKEW_METHOD_NONE = "none"
 DESKEW_METHOD_HYBRID = "hybrid"
 DESKEW_METHOD_HOUGH = "hough"
@@ -27,6 +35,10 @@ class PreprocessSettings:
     threshold: int = 170
     apply_threshold: bool = False
     correct_illumination: bool = False
+    binarization_method: str = BINARIZATION_NONE
+    binarization_window: int = 31
+    binarization_k: float | None = None
+    despeckle_strength: str = DESPECKLE_NONE
 
 
 @dataclass(slots=True, frozen=True)
@@ -138,12 +150,20 @@ def apply_enhancements(image: np.ndarray, settings: PreprocessSettings) -> np.nd
 
     out = cv2.convertScaleAbs(out, alpha=float(settings.contrast), beta=int(settings.brightness))
 
-    if settings.apply_threshold:
-        if len(out.shape) == 3:
-            gray = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = out
-        _, out = cv2.threshold(gray, int(settings.threshold), 255, cv2.THRESH_BINARY)
+    binarization = settings.binarization_method
+    if binarization == BINARIZATION_NONE and settings.apply_threshold:
+        binarization = BINARIZATION_FIXED
+    out = binarize_document(
+        out,
+        method=binarization,
+        threshold=int(settings.threshold),
+        window_size=int(settings.binarization_window),
+        k=settings.binarization_k,
+    )
+    out, _despeckle_diagnostics = despeckle_document(
+        out,
+        strength=settings.despeckle_strength,
+    )
 
     return out
 
