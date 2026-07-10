@@ -6,7 +6,7 @@ Deliver a PC-first Office Lens analogue for document preparation:
 
 1. Fast flow: `Import/Scan -> Review -> Export`.
 2. Clear preprocessing UX: visible `Before/After`, presets, manual corner edit.
-3. Memory-safe handling of large batches (disk-backed pages, streaming pipeline).
+3. Memory-conscious handling of large batches (disk-backed pages and file-by-file processing).
 4. Stable merged PDF and image export for downstream OCR systems.
 
 ## Current Status
@@ -15,6 +15,7 @@ Deliver a PC-first Office Lens analogue for document preparation:
 2. Camera capture, import, page review, and export are active.
 3. Background jobs with progress/cancel are active.
 4. Core tests for session/pipeline/export are active.
+5. Headless `convert` pipeline for files/folders/PDF to images and merged PDF is active.
 
 ## Implementation Stages
 
@@ -22,7 +23,8 @@ Deliver a PC-first Office Lens analogue for document preparation:
 
 1. [x] Cache workspace manager for page assets.
 2. [x] Disk-backed session entries with lazy loading.
-3. [x] Streaming import to avoid full-memory batches.
+3. [x] File-by-file import to avoid materializing an entire folder.
+   One multi-page PDF is still rendered as one in-memory page list.
 4. [x] Streaming export from disk-backed pages.
 5. [ ] High-volume memory regression tests.
 
@@ -44,10 +46,11 @@ Deliver a PC-first Office Lens analogue for document preparation:
 
 ### Stage D: Scan Quality
 
-1. [ ] Robust contour fallback and glare reduction.
+1. [x] Robust detector cascade and contour fallback.
+   Glare reduction remains open.
 2. [ ] Deskew/orientation correction tuning.
 3. [ ] Text enhancement profile tuning.
-4. [ ] Better two-page split center detection.
+4. [x] Gutter-based two-page split with midpoint fallback.
 5. [ ] Preview and processing latency optimization.
 
 ### Stage E: Production Readiness

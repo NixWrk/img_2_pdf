@@ -4,7 +4,7 @@
 
 Keep one stable crop backend for production use and preserve the benchmark flow as a regression check.
 
-Current result from the real batch test:
+Historical result from the UVDoc evaluation (superseded by the bundled Office Lens backend):
 
 1. `paddleocr_uvdoc` is the only backend that stayed reliable on the full photo series.
 2. The OpenCV variants are useful as references, but they are not the active production path.
@@ -12,7 +12,8 @@ Current result from the real batch test:
 
 Input: one folder with source photos.
 
-Output: one production PDF from `paddleocr_uvdoc`, plus optional reference PDFs when explicitly requested.
+Current output: one production PDF from `office_lens_onnx`, plus optional reference PDFs when
+explicitly requested.
 
 ## Scope
 
@@ -21,7 +22,7 @@ This is a validation sketch, not the final production batch pipeline.
 The sketch should:
 
 1. Keep folder order exactly as listed by the existing natural-sort loader.
-2. Use `paddleocr_uvdoc` as the default and only active backend.
+2. Use bundled `office_lens_onnx` as the default active backend.
 3. Allow explicit opt-in runs for reference backends during diagnostics.
 4. Export one merged PDF per selected backend.
 5. Write clear backend-specific output names.
@@ -41,12 +42,13 @@ Add a CLI command that takes an input folder and output directory, processes the
 4. `test(cli): cover backend benchmark flow`
 Add deterministic tests for backend selection, output naming, processing order, and PDF export orchestration without depending on live model downloads.
 
-5. `chore(config): make paddleocr_uvdoc the default crop backend`
-Reduce the active crop path to the one backend that passed the real-series test consistently.
+5. `chore(config): select the production default crop backend`
+This historical step originally selected UVDoc; the later Office Lens integration replaced it
+with the bundled offline `office_lens_onnx` backend.
 
 ## Acceptance Criteria
 
-1. `uniscan benchmark-crop --input <folder> --output <dir>` produces a `paddleocr_uvdoc` PDF by default.
+1. `uniscan benchmark-crop --input <folder> --output <dir>` produces an `office_lens_onnx` PDF by default.
 2. The output order matches the folder order from the source directory.
 3. Missing optional backends do not break explicit diagnostic runs.
 4. Tests validate the orchestration layer and backend adapter contract.

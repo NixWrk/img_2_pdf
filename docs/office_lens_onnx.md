@@ -69,4 +69,5 @@ The folder must contain:
 
 ## Dependencies
 
-The adapter needs `onnxruntime`, `opencv-python`, `numpy`, and optionally `pillow` for EXIF-aware file reads. These are declared in `pyproject.toml`.
+The adapter directly needs `onnxruntime`, `opencv-python`, and `numpy`; it can use `pillow` for
+EXIF-aware file reads. All four are declared as package runtime dependencies in `pyproject.toml`.

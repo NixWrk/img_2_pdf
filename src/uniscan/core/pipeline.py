@@ -12,7 +12,6 @@ import numpy as np
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.scanner_adapter import (
     DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
-    DETECTOR_BACKEND_OPENCV,
     _find_quad_contour,
     scan_with_document_detector,
 )

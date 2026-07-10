@@ -1499,9 +1499,6 @@ class UnifiedScanApp(ctk.CTk):
             if cached is not None:
                 return cached
 
-            display_image = _display_image_for(entry)
-            source_shape = entry.raw_image.shape[:2]
-
             # Prefer the already-detected contour from import / previous edit.
             existing = entry.detected_contour
             if existing is not None and not auto_detect:

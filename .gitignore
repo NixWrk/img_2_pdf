@@ -2,7 +2,10 @@ __pycache__/
 *.py[cod]
 *.pyo
 .pytest_cache/
+.coverage
+htmlcov/
 .ruff_cache/
+.understand-anything/
 .paddlex_cache/
 .hf_cache/
 .modelscope_cache/

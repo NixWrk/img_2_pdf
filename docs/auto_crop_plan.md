@@ -1,5 +1,8 @@
 # Auto Crop Upgrade Plan
 
+> Historical design note. The current production cascade is documented in `README.md` and uses
+> bundled Office Lens ONNX first, optional PaddleOCR UVDoc second, and OpenCV hybrid as fallback.
+
 ## Goal
 
 Reduce manual corner editing for long document batches by improving automatic page boundary detection.
@@ -10,7 +13,9 @@ Reduce manual corner editing for long document batches by improving automatic pa
 Current external scanner logic already integrated in the project. Keep it as one candidate, but stop relying on it as the only path.
 
 2. OpenCV quad detector
-Classical CV pipeline: grayscale, blur, threshold/edges, morphology, contour ranking, quadrilateral fitting, perspective warp. This is the lowest-friction offline fallback and should be the default baseline.
+Classical CV pipeline: grayscale, blur, threshold/edges, morphology, contour ranking,
+quadrilateral fitting, perspective warp. This remains the lowest-friction offline fallback; it
+is no longer the production default.
 
 3. PaddleOCR UVDoc
 Model-based image rectification is available in PaddleOCR as `TextImageUnwarping (UVDoc)`. This is promising for hard perspective cases, but adds model download/runtime weight and should be an optional test branch, not the first-line dependency.
