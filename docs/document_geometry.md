@@ -56,12 +56,16 @@ separate post-crop stage. It can handle deformation beyond the single common ver
 by the offline method, but requires the large optional runtime and model cache.
 
 The GUI currently offers the offline method so preview remains local and predictable. Use
-Workspace → Processing → Remove page waves, or Page tools → Remove page waves.
+Workspace → Processing → Remove page waves or Page tools → Auto remove waves. If the automatic
+curve needs correction, Page tools → Adjust dewarp points opens the source model and a live
+corrected preview. The points are normalized, saved with the page, and replayed identically at
+preview and export resolution.
 
 ## Automation and source policy
 
-Page dewarping remains fully automatic. UniScan will not add a manual mesh, control points, or
-per-page curve editing. A new backend is accepted only when:
+Page dewarping is automatic-first. A user may adjust the model's control points when confidence or
+the preview is unsatisfactory, but does not need to construct the model from scratch. A new
+automatic backend is accepted only when:
 
 - its implementation is available in a public repository;
 - the code and model weights have explicit, compatible terms;
@@ -83,8 +87,12 @@ number of supporting text lines, maximum displacement, and any no-op reason.
 
 Synthetic regression tests cover curved and straight pages. Real examples should be added before
 tuning thresholds: camera photos near a book spine, rippled loose paper, roller-scanner waves, and
-pages with few or no text lines behave differently. Difficult cases will be handled by automatic
-backend selection, model ensembles, and confidence-based fallback rather than manual geometry.
+pages with few or no text lines behave differently. Difficult cases use automatic backend
+selection and confidence-based fallback first, with persisted control points as the correction
+layer when the selected model is close but not exact.
+
+OCR is explicitly out of scope. Future 90°/180° orientation may use a dedicated image classifier,
+but it must not introduce text recognition or searchable-document assembly into this pipeline.
 
 No ScanTailor GPL source was copied. The implementation uses an independent OpenCV/NumPy design;
 ScanTailor served as a feature and workflow reference.

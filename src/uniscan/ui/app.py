@@ -21,7 +21,14 @@ from uniscan.export import (
     export_image_paths_as_pdf,
 )
 from uniscan.core.geometry import warp_perspective_from_points
-from uniscan.core.dewarp import DEWARP_METHOD_NONE, DEWARP_METHOD_TEXTLINE, dewarp_document
+from uniscan.core.dewarp import (
+    DEWARP_METHOD_NONE,
+    DEWARP_METHOD_TEXTLINE,
+    DewarpModel,
+    apply_dewarp_model,
+    dewarp_document,
+    estimate_textline_dewarp_model,
+)
 from uniscan.core.pipeline import PageResult, PipelineOptions, process_loaded_items
 from uniscan.core.preprocess import (
     DESKEW_METHOD_HOUGH,
@@ -810,7 +817,7 @@ class UnifiedScanApp(ctk.CTk):
     def open_page_tools_dialog(self) -> None:
         window = ctk.CTkToplevel(self)
         window.title("Page tools")
-        window.geometry("440x440")
+        window.geometry("440x460")
         window.resizable(False, False)
         window.transient(self)
 
@@ -854,16 +861,10 @@ class UnifiedScanApp(ctk.CTk):
         add(2, 1, "Auto deskew", self.auto_deskew_selected)
         add(3, 0, "Retake with camera", self.retake_selected_page_from_camera)
         add(3, 1, "Split book spread", self.split_selected_as_spread)
-        add(4, 0, "Remove page waves", self.remove_waves_selected)
-        add(4, 1, "Refresh pages", self.refresh_page_list)
-        ctk.CTkButton(body, text="Close", command=window.destroy).grid(
-            row=5,
-            column=0,
-            columnspan=2,
-            sticky="ew",
-            padx=6,
-            pady=6,
-        )
+        add(4, 0, "Auto remove waves", self.remove_waves_selected)
+        add(4, 1, "Adjust dewarp points", self.open_dewarp_points_editor)
+        add(5, 0, "Refresh pages", self.refresh_page_list)
+        add(5, 1, "Close", window.destroy)
 
         window.grab_set()
 
@@ -1124,9 +1125,22 @@ class UnifiedScanApp(ctk.CTk):
         out = fn(image)
         return apply_enhancements(out, self._current_preprocess_settings())
 
-    def _apply_dewarp(self, image: np.ndarray):
+    def _entry_dewarp_model(self, entry) -> DewarpModel | None:
+        if entry is None or entry.dewarp_control_points is None:
+            return None
+        return DewarpModel(
+            method=DEWARP_METHOD_TEXTLINE,
+            control_points=entry.dewarp_control_points,
+            source="user",
+        )
+
+    def _apply_dewarp(self, image: np.ndarray, *, entry=None):
         method = DEWARP_UI_METHODS.get(self.dewarp_method_var.get(), DEWARP_METHOD_NONE)
-        return dewarp_document(image, method=method)
+        return dewarp_document(
+            image,
+            method=method,
+            model=self._entry_dewarp_model(entry),
+        )
 
     def _review_before_image(self, entry) -> np.ndarray:
         """Raw source with the detected contour drawn over it."""
@@ -1157,7 +1171,7 @@ class UnifiedScanApp(ctk.CTk):
             base = entry.preview_original_image
         else:
             base = entry.original_image
-        dewarped, _diagnostics = self._apply_dewarp(base)
+        dewarped, _diagnostics = self._apply_dewarp(base, entry=entry)
         return self._apply_postprocess(dewarped)
 
     def _show_in_preview(self, image: np.ndarray) -> None:
@@ -2355,7 +2369,7 @@ class UnifiedScanApp(ctk.CTk):
             self.postprocess_var.get(), POSTPROCESSING_OPTIONS["None"]
         )
         settings = self._current_preprocess_settings()
-        dewarped, diagnostics = self._apply_dewarp(entry.original_image)
+        dewarped, diagnostics = self._apply_dewarp(entry.original_image, entry=entry)
         base = postprocess_fn(dewarped)
         entry.current_image = apply_enhancements(base, settings)
         return diagnostics
@@ -2488,7 +2502,9 @@ class UnifiedScanApp(ctk.CTk):
         self.dewarp_method_var.set("Text lines (offline)")
         diagnostics = []
         for idx in indices:
-            diagnostics.append(self._reprocess_entry_from_original(self.session.entries[idx]))
+            entry = self.session.entries[idx]
+            entry.clear_dewarp_control_points()
+            diagnostics.append(self._reprocess_entry_from_original(entry))
         self.refresh_page_list(keep_index=indices[-1])
         applied = sum(item.applied for item in diagnostics)
         max_displacement = max((item.max_displacement_px for item in diagnostics), default=0.0)
@@ -2496,6 +2512,251 @@ class UnifiedScanApp(ctk.CTk):
             f"Removed page waves on {applied}/{len(indices)} page(s); "
             f"max correction {max_displacement:.1f}px."
         )
+
+    def open_dewarp_points_editor(self) -> None:
+        index, entry = self._single_selected_entry()
+        if entry is None or index is None:
+            self._set_status("Select exactly one page to adjust dewarp points.")
+            return
+
+        source = entry.original_image
+        source_height, source_width = source.shape[:2]
+        scale = min(450 / max(1, source_width), 520 / max(1, source_height), 1.0)
+        display_width = max(1, int(round(source_width * scale)))
+        display_height = max(1, int(round(source_height * scale)))
+        display_source = cv2.resize(
+            source,
+            (display_width, display_height),
+            interpolation=cv2.INTER_AREA,
+        )
+
+        if entry.dewarp_control_points is not None:
+            initial_points = list(entry.dewarp_control_points)
+            initial_message = "Loaded saved page correction."
+        else:
+            automatic_model, automatic_diagnostics = estimate_textline_dewarp_model(source)
+            if automatic_model is not None:
+                initial_points = list(automatic_model.control_points)
+                initial_message = (
+                    f"Automatic model: {automatic_diagnostics.line_count} supporting lines, "
+                    f"{automatic_diagnostics.max_displacement_px:.1f}px max correction."
+                )
+            else:
+                initial_points = [
+                    (float(x), 0.0) for x in np.linspace(0.0, 1.0, 9, dtype=np.float32)
+                ]
+                initial_message = (
+                    "Automatic model was not confident; adjust the neutral points if needed."
+                )
+
+        window = ctk.CTkToplevel(self)
+        window.title("Adjust dewarp control points")
+        window.geometry(f"{max(980, display_width * 2 + 80)}x{max(700, display_height + 150)}")
+        window.minsize(960, 680)
+        window.transient(self)
+
+        ctk.CTkLabel(
+            window,
+            text="Automatic dewarp with user correction",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        ).pack(anchor="w", padx=16, pady=(14, 2))
+        ctk.CTkLabel(
+            window,
+            text=(
+                "Drag the blue points vertically. The guides show the same correction at "
+                "three page heights; the right pane is the resulting preview."
+            ),
+            text_color=("#60646c", "#a0a4ab"),
+        ).pack(anchor="w", padx=16, pady=(0, 10))
+
+        panes = ctk.CTkFrame(window)
+        panes.pack(fill=ctk.BOTH, expand=True, padx=16, pady=(0, 10))
+        panes.grid_columnconfigure(0, weight=1)
+        panes.grid_columnconfigure(1, weight=1)
+        panes.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(panes, text="Source model").grid(
+            row=0, column=0, sticky="w", padx=8, pady=(8, 4)
+        )
+        ctk.CTkLabel(panes, text="Corrected preview").grid(
+            row=0, column=1, sticky="w", padx=8, pady=(8, 4)
+        )
+
+        left_canvas = tk.Canvas(
+            panes,
+            width=display_width,
+            height=display_height,
+            bg="#202225",
+            highlightthickness=1,
+            highlightbackground="#45484d",
+        )
+        right_canvas = tk.Canvas(
+            panes,
+            width=display_width,
+            height=display_height,
+            bg="#202225",
+            highlightthickness=1,
+            highlightbackground="#45484d",
+        )
+        left_canvas.grid(row=1, column=0, padx=8, pady=(0, 8))
+        right_canvas.grid(row=1, column=1, padx=8, pady=(0, 8))
+
+        def to_photo(image: np.ndarray) -> ImageTk.PhotoImage:
+            if image.ndim == 2:
+                rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+            else:
+                rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            return ImageTk.PhotoImage(Image.fromarray(rgb))
+
+        state = {
+            "points": initial_points,
+            "active": None,
+            "source_photo": to_photo(display_source),
+            "corrected_photo": None,
+        }
+        left_canvas.create_image(0, 0, anchor=tk.NW, image=state["source_photo"])
+        status = tk.StringVar(value=initial_message)
+
+        def current_model(*, source_name: str = "user") -> DewarpModel:
+            return DewarpModel(
+                method=DEWARP_METHOD_TEXTLINE,
+                control_points=tuple(state["points"]),
+                source=source_name,
+            )
+
+        def draw_overlay() -> None:
+            left_canvas.delete("dewarp-overlay")
+            point_x = np.asarray([point[0] for point in state["points"]], dtype=np.float32)
+            point_y = np.asarray([point[1] for point in state["points"]], dtype=np.float32)
+            guide_x = np.linspace(0.0, 1.0, 160, dtype=np.float32)
+            guide_y = np.interp(guide_x, point_x, point_y)
+            for anchor in (0.25, 0.5, 0.75):
+                coords: list[float] = []
+                for x_value, displacement in zip(guide_x, guide_y):
+                    coords.extend(
+                        [
+                            float(x_value * (display_width - 1)),
+                            float((anchor + displacement) * display_height),
+                        ]
+                    )
+                left_canvas.create_line(
+                    *coords,
+                    fill="#36a3ff",
+                    width=2 if anchor == 0.5 else 1,
+                    tags="dewarp-overlay",
+                )
+            for point_index, (x_value, displacement) in enumerate(state["points"]):
+                x_pos = x_value * (display_width - 1)
+                y_pos = (0.5 + displacement) * display_height
+                radius = 6
+                left_canvas.create_oval(
+                    x_pos - radius,
+                    y_pos - radius,
+                    x_pos + radius,
+                    y_pos + radius,
+                    fill="#1f6aa5",
+                    outline="#ffffff",
+                    width=1,
+                    tags=("dewarp-overlay", f"point-{point_index}"),
+                )
+
+        def render_corrected() -> None:
+            corrected = apply_dewarp_model(display_source, current_model())
+            state["corrected_photo"] = to_photo(corrected)
+            right_canvas.delete("all")
+            right_canvas.create_image(
+                0,
+                0,
+                anchor=tk.NW,
+                image=state["corrected_photo"],
+            )
+
+        def nearest_point(x_pos: float, y_pos: float) -> int | None:
+            best_index = None
+            best_distance = 16.0
+            for point_index, (x_value, displacement) in enumerate(state["points"]):
+                px = x_value * (display_width - 1)
+                py = (0.5 + displacement) * display_height
+                distance = float(np.hypot(x_pos - px, y_pos - py))
+                if distance < best_distance:
+                    best_distance = distance
+                    best_index = point_index
+            return best_index
+
+        def on_down(event) -> None:
+            state["active"] = nearest_point(event.x, event.y)
+
+        def on_move(event) -> None:
+            active = state["active"]
+            if active is None:
+                return
+            x_value, _old_displacement = state["points"][active]
+            displacement = float(np.clip((event.y / display_height) - 0.5, -0.2, 0.2))
+            state["points"][active] = (x_value, displacement)
+            draw_overlay()
+
+        def on_up(_event) -> None:
+            if state["active"] is None:
+                return
+            state["active"] = None
+            render_corrected()
+            status.set("User-adjusted preview. Apply to save these points for the page.")
+
+        def use_automatic() -> None:
+            model, diagnostics = estimate_textline_dewarp_model(source)
+            if model is None:
+                status.set(f"Automatic model unavailable: {diagnostics.reason}.")
+                return
+            state["points"] = list(model.control_points)
+            draw_overlay()
+            render_corrected()
+            status.set(f"Automatic model restored from {diagnostics.line_count} supporting lines.")
+
+        def use_neutral() -> None:
+            state["points"] = [(float(x), 0.0) for x in np.linspace(0.0, 1.0, 9, dtype=np.float32)]
+            draw_overlay()
+            render_corrected()
+            status.set("Neutral correction model. The page will not be locally warped.")
+
+        def apply_points() -> None:
+            try:
+                entry.set_dewarp_control_points(state["points"])
+                self.dewarp_method_var.set("Text lines (offline)")
+                diagnostics = self._reprocess_entry_from_original(entry)
+                self.refresh_page_list(keep_index=index)
+                self._set_status(
+                    f"Saved {len(entry.dewarp_control_points or ())} dewarp points; "
+                    f"max correction {diagnostics.max_displacement_px:.1f}px."
+                )
+                window.destroy()
+            except Exception as exc:
+                messagebox.showerror("Dewarp Control Points", str(exc))
+
+        left_canvas.bind("<Button-1>", on_down)
+        left_canvas.bind("<B1-Motion>", on_move)
+        left_canvas.bind("<ButtonRelease-1>", on_up)
+        draw_overlay()
+        render_corrected()
+
+        ctk.CTkLabel(window, textvariable=status, anchor="w").pack(fill=ctk.X, padx=16, pady=(0, 8))
+        actions = ctk.CTkFrame(window, fg_color="transparent")
+        actions.pack(fill=ctk.X, padx=16, pady=(0, 14))
+        ctk.CTkButton(actions, text="Use automatic", command=use_automatic).pack(side=ctk.LEFT)
+        ctk.CTkButton(
+            actions,
+            text="Neutral curve",
+            fg_color="transparent",
+            border_width=1,
+            command=use_neutral,
+        ).pack(side=ctk.LEFT, padx=8)
+        ctk.CTkButton(actions, text="Apply points", command=apply_points).pack(side=ctk.RIGHT)
+        ctk.CTkButton(
+            actions,
+            text="Cancel",
+            fg_color="transparent",
+            border_width=1,
+            command=window.destroy,
+        ).pack(side=ctk.RIGHT, padx=8)
+        window.grab_set()
 
     def _on_review_processing_slider_change(self, _value: float) -> None:
         self.update_page_preview()

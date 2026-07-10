@@ -53,6 +53,7 @@ def test_session_entries_are_disk_backed(tmp_path) -> None:
 def test_entry_original_image_setter_writes_to_disk(tmp_path) -> None:
     session = CaptureSession(store=PageStore(root_dir=tmp_path))
     entry = session.add_image(name="orig", image=_img(10))
+    entry.set_dewarp_control_points([(0.0, 0.0), (0.5, 0.02), (1.0, 0.0)])
     replacement = _img(200)
     entry.original_image = replacement
 
@@ -61,6 +62,19 @@ def test_entry_original_image_setter_writes_to_disk(tmp_path) -> None:
     assert int(reloaded[0, 0, 0]) == 200
     preview = entry.preview_original_image
     assert preview.shape == replacement.shape
+    assert entry.dewarp_control_points is None
+    session.close()
+
+
+def test_entry_validates_dewarp_control_points(tmp_path) -> None:
+    session = CaptureSession(store=PageStore(root_dir=tmp_path))
+    entry = session.add_image(name="dewarp", image=_img(10))
+
+    entry.set_dewarp_control_points([(1.0, 0.0), (0.5, 0.02), (0.0, 0.0)])
+
+    assert entry.dewarp_control_points == ((0.0, 0.0), (0.5, 0.02), (1.0, 0.0))
+    entry.clear_dewarp_control_points()
+    assert entry.dewarp_control_points is None
     session.close()
 
 

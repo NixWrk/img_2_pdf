@@ -28,6 +28,7 @@ def test_session_manifest_round_trip(tmp_path) -> None:
         backend="fake",
     )
     first.selected = True
+    first.set_dewarp_control_points([(0.0, 0.0), (0.5, 0.015), (1.0, 0.0)])
     session.add_image(name="second", image=_image(30))
     session.save_manifest(manifest)
     session.close(preserve=True)
@@ -39,6 +40,7 @@ def test_session_manifest_round_trip(tmp_path) -> None:
     assert restored.entries[0].selected is True
     assert restored.entries[0].detected_backend == "fake"
     np.testing.assert_array_equal(restored.entries[0].detected_contour, first.detected_contour)
+    assert restored.entries[0].dewarp_control_points == first.dewarp_control_points
     assert int(restored.entries[1].current_image.mean()) == 30
     discard_autosave(restored, manifest)
     assert not manifest.exists()

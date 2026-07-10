@@ -31,6 +31,35 @@ class DewarpDiagnostics:
     reason: str | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class DewarpModel:
+    """Normalized vertical displacement points that can be edited and replayed."""
+
+    method: str
+    control_points: tuple[tuple[float, float], ...]
+    source: str = "automatic"
+    line_count: int = 0
+
+
+def normalize_control_points(
+    control_points: tuple[tuple[float, float], ...] | list[tuple[float, float]],
+) -> tuple[tuple[float, float], ...]:
+    """Validate, sort, and normalize persisted dewarp control points."""
+    points = np.asarray(control_points, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 2 or not 3 <= points.shape[0] <= 32:
+        raise ValueError("Dewarp control points must contain 3..32 (x, displacement) pairs.")
+    if not np.isfinite(points).all():
+        raise ValueError("Dewarp control points must be finite.")
+    points = points[np.argsort(points[:, 0])]
+    if np.any(np.diff(points[:, 0]) <= 0.0):
+        raise ValueError("Dewarp control point x coordinates must be unique.")
+    if points[0, 0] < 0.0 or points[-1, 0] > 1.0:
+        raise ValueError("Dewarp control point x coordinates must be between 0 and 1.")
+    if np.any(np.abs(points[:, 1]) > 0.25):
+        raise ValueError("Dewarp control point displacement exceeds 25% of page height.")
+    return tuple((float(x), float(y)) for x, y in points)
+
+
 def _to_gray(image: np.ndarray) -> np.ndarray:
     if image.ndim == 2:
         return image
@@ -161,9 +190,16 @@ def _aggregate_curve(curves: list[np.ndarray], height: int) -> np.ndarray | None
     return curve
 
 
-def _textline_dewarp(image: np.ndarray) -> tuple[np.ndarray, DewarpDiagnostics]:
+def estimate_textline_dewarp_model(
+    image: np.ndarray,
+    *,
+    control_point_count: int = 9,
+) -> tuple[DewarpModel | None, DewarpDiagnostics]:
+    """Estimate an editable normalized curve from several agreeing text lines."""
+    if not 3 <= control_point_count <= 32:
+        raise ValueError("control_point_count must be between 3 and 32.")
     if image.size == 0 or min(image.shape[:2]) < 80:
-        return image.copy(), DewarpDiagnostics(
+        return None, DewarpDiagnostics(
             method=DEWARP_METHOD_TEXTLINE,
             applied=False,
             reason="image_too_small",
@@ -174,7 +210,7 @@ def _textline_dewarp(image: np.ndarray) -> tuple[np.ndarray, DewarpDiagnostics]:
     curves = _line_curves(mask)
     curve = _aggregate_curve(curves, analysis.shape[0])
     if curve is None:
-        return image.copy(), DewarpDiagnostics(
+        return None, DewarpDiagnostics(
             method=DEWARP_METHOD_TEXTLINE,
             applied=False,
             line_count=len(curves),
@@ -184,7 +220,7 @@ def _textline_dewarp(image: np.ndarray) -> tuple[np.ndarray, DewarpDiagnostics]:
     curvature_rms = float(np.sqrt(np.mean(np.square(curve))))
     peak = float(np.max(np.abs(curve)))
     if peak < 0.75 or curvature_rms < 0.25:
-        return image.copy(), DewarpDiagnostics(
+        return None, DewarpDiagnostics(
             method=DEWARP_METHOD_TEXTLINE,
             applied=False,
             line_count=len(curves),
@@ -193,14 +229,38 @@ def _textline_dewarp(image: np.ndarray) -> tuple[np.ndarray, DewarpDiagnostics]:
             reason="curvature_below_threshold",
         )
 
+    point_x = np.linspace(0.0, 1.0, control_point_count, dtype=np.float32)
+    curve_x = np.linspace(0.0, 1.0, curve.size, dtype=np.float32)
+    point_y = np.interp(point_x, curve_x, curve).astype(np.float32) / analysis.shape[0]
+    model = DewarpModel(
+        method=DEWARP_METHOD_TEXTLINE,
+        control_points=normalize_control_points(list(zip(point_x, point_y))),
+        source="automatic",
+        line_count=len(curves),
+    )
+    return model, DewarpDiagnostics(
+        method=DEWARP_METHOD_TEXTLINE,
+        applied=True,
+        line_count=len(curves),
+        max_displacement_px=round(peak / scale, 3),
+        curvature_rms_px=round(curvature_rms / scale, 3),
+    )
+
+
+def apply_dewarp_model(image: np.ndarray, model: DewarpModel) -> np.ndarray:
+    """Apply an automatic or user-adjusted normalized displacement curve."""
+    points = normalize_control_points(model.control_points)
     height, width = image.shape[:2]
-    analysis_x = np.linspace(0.0, curve.size - 1, width, dtype=np.float32)
-    displacement = np.interp(
-        analysis_x,
-        np.arange(curve.size, dtype=np.float32),
-        curve,
-    ).astype(np.float32)
-    displacement /= scale
+    point_x = np.asarray([point[0] for point in points], dtype=np.float32)
+    point_y = np.asarray([point[1] for point in points], dtype=np.float32)
+    normalized_x = np.linspace(0.0, 1.0, width, dtype=np.float32)
+    displacement = np.interp(normalized_x, point_x, point_y).astype(np.float32) * height
+    smooth_sigma = max(1.0, width / 180.0)
+    displacement = cv2.GaussianBlur(
+        displacement.reshape(1, -1),
+        (0, 0),
+        sigmaX=smooth_sigma,
+    ).reshape(-1)
 
     map_x = np.broadcast_to(np.arange(width, dtype=np.float32), (height, width)).copy()
     map_y = np.broadcast_to(np.arange(height, dtype=np.float32)[:, None], (height, width)).copy()
@@ -212,13 +272,34 @@ def _textline_dewarp(image: np.ndarray) -> tuple[np.ndarray, DewarpDiagnostics]:
         interpolation=cv2.INTER_CUBIC,
         borderMode=cv2.BORDER_REPLICATE,
     )
-    return corrected, DewarpDiagnostics(
-        method=DEWARP_METHOD_TEXTLINE,
-        applied=True,
-        line_count=len(curves),
-        max_displacement_px=round(float(np.max(np.abs(displacement))), 3),
-        curvature_rms_px=round(float(np.sqrt(np.mean(np.square(displacement)))), 3),
-    )
+    return corrected
+
+
+def _textline_dewarp(
+    image: np.ndarray,
+    *,
+    model: DewarpModel | None = None,
+) -> tuple[np.ndarray, DewarpDiagnostics]:
+    diagnostics: DewarpDiagnostics
+    if model is None:
+        model, diagnostics = estimate_textline_dewarp_model(image)
+        if model is None:
+            return image.copy(), diagnostics
+    else:
+        points = normalize_control_points(model.control_points)
+        displacements = np.asarray([point[1] for point in points], dtype=np.float64)
+        diagnostics = DewarpDiagnostics(
+            method=DEWARP_METHOD_TEXTLINE,
+            applied=True,
+            line_count=model.line_count,
+            max_displacement_px=round(float(np.max(np.abs(displacements))) * image.shape[0], 3),
+            curvature_rms_px=round(
+                float(np.sqrt(np.mean(np.square(displacements)))) * image.shape[0],
+                3,
+            ),
+            reason="user_adjusted_model" if model.source == "user" else None,
+        )
+    return apply_dewarp_model(image, model), diagnostics
 
 
 def _uvdoc_dewarp(
@@ -247,13 +328,27 @@ def dewarp_document(
     *,
     method: str = DEWARP_METHOD_TEXTLINE,
     uvdoc_cache_home: Path | None = None,
+    model: DewarpModel | None = None,
 ) -> tuple[np.ndarray, DewarpDiagnostics]:
     """Straighten local page curvature without changing boundary detection policy."""
     normalized = method.strip().lower()
     if normalized == DEWARP_METHOD_NONE:
         return image, DewarpDiagnostics(method=normalized, applied=False, reason="disabled")
     if normalized == DEWARP_METHOD_TEXTLINE:
-        return _textline_dewarp(image)
+        return _textline_dewarp(image, model=model)
     if normalized == DEWARP_METHOD_PADDLEOCR_UVDOC:
-        return _uvdoc_dewarp(image, cache_home=uvdoc_cache_home)
+        corrected, diagnostics = _uvdoc_dewarp(image, cache_home=uvdoc_cache_home)
+        if model is not None:
+            corrected = apply_dewarp_model(corrected, model)
+            diagnostics = DewarpDiagnostics(
+                method=normalized,
+                applied=True,
+                line_count=model.line_count,
+                max_displacement_px=round(
+                    max(abs(point[1]) for point in model.control_points) * corrected.shape[0],
+                    3,
+                ),
+                reason="uvdoc_with_user_adjustment",
+            )
+        return corrected, diagnostics
     raise ValueError(f"Unsupported dewarp method: {method}")

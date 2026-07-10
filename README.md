@@ -75,6 +75,8 @@ report outputs are staged and published together, so cancellation/failure preser
 Boundary detection, deskew, and local dewarp are independent stages; their selected methods and
 per-page results are recorded in the JSON report. See
 [`docs/document_geometry.md`](docs/document_geometry.md).
+The GUI can persist per-page dewarp control points when the automatic curve needs correction;
+changing the page geometry invalidates those points. OCR remains outside the project scope.
 
 ## Runtime diagnostics
 

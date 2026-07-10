@@ -21,7 +21,7 @@ UniScan закрывает путь `камера/изображения/PDF →
 
 1. адаптивная бинаризация с выбираемым методом и настраиваемыми параметрами;
 2. явные области содержимого и страницы, единые поля и выравнивание по всему документу;
-3. несколько автоматических dewarp-backends с выбором по confidence и типу деформации;
+3. несколько автоматических dewarp-backends с control points для коррекции выбранной модели;
 4. зоны изображений и заливки для смешанных текстово-графических страниц;
 5. регулируемая очистка точек с визуализацией удаляемых объектов;
 6. явные проекты и профили обработки, а не только аварийное autosave-состояние;
@@ -36,7 +36,7 @@ UniScan закрывает путь `камера/изображения/PDF →
 | Поиск документа | Не является camera document scanner | ONNX Office Lens, OpenCV fallback, optional UVDoc, ручные углы | UniScan функциональнее для фотографий |
 | Развороты | Auto/manual cutters, типы страниц, адаптация разреза к разным размерам, fill offcut | Автопоиск корешка с midpoint fallback и ручные инструменты | ScanTailor точнее и лучше управляется |
 | Наклон | Отдельная стадия, ручной/автоматический режим, deviation и сортировка проблемных страниц | Otsu + `minAreaRect`, без оценки доверия и статистики по документу | ScanTailor зрелее; алгоритм UniScan уязвим к рамкам и крупным изображениям |
-| Кривизна книги | Автоматическая и ручная цилиндрическая модель, редактируемые верхняя/нижняя линии и depth | Independent offline text-line dewarp и optional UVDoc, без ручной сетки | Дальнейшее развитие UniScan — только automatic backends и confidence fallback |
+| Кривизна книги | Автоматическая и ручная цилиндрическая модель, редактируемые верхняя/нижняя линии и depth | Offline text-line dewarp, optional UVDoc и сохранённые control points | Automatic-first подход сохранён, но пользователь может исправить ошибку модели |
 | Содержимое и поля | Content box, page box, auto/manual/original margins, выравнивание, guides, физические единицы | Отсутствуют как отдельная стадия | Крупный функциональный пробел UniScan |
 | Ч/б обработка | Otsu, Sauvola, Wolf, illumination normalization, Savitzky-Golay и morphology smoothing | Fixed adaptive Gaussian, ручной global threshold в preset, optional illumination correction | ScanTailor дает существенно больше контроля |
 | Шум | Регулируемый despeckle и отдельная визуализация удаленных точек | NLMeans denoise без семантики размера компонента и preview удалений | ScanTailor удобнее для архивного текста |
@@ -98,7 +98,8 @@ UniScan закрывает путь `камера/изображения/PDF →
 
 ### P2 — книги и смешанный контент
 
-- Автоматический выбор между text-line, UVDoc и дополнительными permissive-licensed backends.
+- Автоматический выбор между text-line, UVDoc и дополнительными permissive-licensed backends;
+  control points остаются общей correction layer поверх выбранной модели.
 - Picture/fill zones и отдельная обработка текстовой маски.
 - Ограниченный worker pool с сохранением порядка, атомарностью output и лимитом памяти.
 

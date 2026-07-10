@@ -8,6 +8,7 @@ All notable changes to UniScan are documented here. The project follows Semantic
 
 - Independent boundary, deskew, and local-dewarp stages with per-page JSON diagnostics.
 - Offline text-line dewarp for curved or wavy pages, with confidence-based no-op fallback.
+- Persisted per-page dewarp control points with side-by-side corrected preview.
 - Selectable hybrid, Hough-line, and foreground-box deskew estimators.
 - Direct CLI access to the OpenCV quad, Hough, and minimum-rectangle boundary backends.
 
@@ -15,7 +16,8 @@ All notable changes to UniScan are documented here. The project follows Semantic
 
 - GUI processing now exposes page-wave removal, and Page tools allows choosing the deskew
   estimator before applying automatic rotation correction.
-- Dewarp scope is explicitly automatic-only: no manual mesh or per-page curve editor is planned.
+- Dewarp remains automatic-first while allowing correction of the generated model through control
+  points; OCR remains out of scope.
 
 ## [0.1.0] - 2026-07-10
 

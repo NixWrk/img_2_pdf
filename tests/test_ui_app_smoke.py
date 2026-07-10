@@ -61,6 +61,15 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.page_count_var.get() == "2 pages"
         assert app.toolbar_export_button.cget("state") == "normal"
         assert app._single_selected_entry()[1].name == "second.png"
+        app.open_dewarp_points_editor()
+        app.update()
+        dewarp_editors = [
+            child
+            for child in app.winfo_children()
+            if hasattr(child, "title") and child.title() == "Adjust dewarp control points"
+        ]
+        assert len(dewarp_editors) == 1
+        dewarp_editors[0].destroy()
         preview_calls: list[str] = []
         original_preview = app._review_after_image
 

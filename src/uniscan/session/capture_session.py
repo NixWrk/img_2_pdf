@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import numpy as np
 
+from uniscan.core.dewarp import normalize_control_points
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.storage import PagePaths, PageStore
 
@@ -25,6 +26,7 @@ class CaptureEntry:
     paths: PagePaths
     detected_contour: np.ndarray | None = None
     detected_backend: str | None = None
+    dewarp_control_points: tuple[tuple[float, float], ...] | None = None
     selected: bool = False
     entry_id: str = field(default_factory=lambda: uuid4().hex)
 
@@ -110,6 +112,7 @@ class CaptureEntry:
     def original_image(self, image: np.ndarray) -> None:
         self.store.write_image(self.paths.original, image)
         self.store.write_preview(self.paths.preview_original, image)
+        self.dewarp_control_points = None
 
     @property
     def current_image(self) -> np.ndarray:
@@ -137,6 +140,15 @@ class CaptureEntry:
         """Replace the immutable raw source (used when retaking or replacing a page)."""
         self.store.write_image(self.paths.raw, raw_image)
         self.store.write_preview(self.paths.preview_raw, raw_image)
+
+    def set_dewarp_control_points(
+        self,
+        control_points: tuple[tuple[float, float], ...] | list[tuple[float, float]],
+    ) -> None:
+        self.dewarp_control_points = normalize_control_points(control_points)
+
+    def clear_dewarp_control_points(self) -> None:
+        self.dewarp_control_points = None
 
 
 class CaptureSession:
@@ -292,6 +304,11 @@ class CaptureSession:
                         if entry.detected_contour is not None
                         else None
                     ),
+                    "dewarpControlPoints": (
+                        [list(point) for point in entry.dewarp_control_points]
+                        if entry.dewarp_control_points is not None
+                        else None
+                    ),
                 }
                 for entry in self._entries
             ],
@@ -355,6 +372,17 @@ class CaptureSession:
             contour = np.asarray(contour_raw, dtype=np.float32) if contour_raw is not None else None
             if contour is not None and (contour.shape != (4, 2) or not np.isfinite(contour).all()):
                 raise ValueError(f"Invalid detected contour for session entry: {entry_id}")
+            control_points_raw = item.get("dewarpControlPoints")
+            try:
+                control_points = (
+                    normalize_control_points(control_points_raw)
+                    if control_points_raw is not None
+                    else None
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Invalid dewarp control points for session entry: {entry_id}"
+                ) from exc
             session.add_entry(
                 CaptureEntry(
                     name=str(item.get("name", entry_id)),
@@ -362,6 +390,7 @@ class CaptureSession:
                     paths=paths,
                     detected_contour=contour,
                     detected_backend=item.get("detectedBackend"),
+                    dewarp_control_points=control_points,
                     selected=bool(item.get("selected", False)),
                     entry_id=entry_id,
                 )

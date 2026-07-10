@@ -8,7 +8,11 @@ from uniscan.core.dewarp import (
     DEWARP_METHOD_NONE,
     DEWARP_METHOD_PADDLEOCR_UVDOC,
     DEWARP_METHOD_TEXTLINE,
+    DewarpModel,
+    apply_dewarp_model,
     dewarp_document,
+    estimate_textline_dewarp_model,
+    normalize_control_points,
 )
 from uniscan.core.scanner_adapter import ScanOutput
 
@@ -58,6 +62,34 @@ def test_textline_dewarp_reduces_synthetic_page_curvature() -> None:
     )
 
 
+def test_automatic_model_can_be_replayed_and_user_adjusted() -> None:
+    image, _character_x = _curved_text_page()
+    model, diagnostics = estimate_textline_dewarp_model(image)
+
+    assert model is not None
+    assert diagnostics.applied is True
+    replayed = apply_dewarp_model(image, model)
+    direct, _direct_diagnostics = dewarp_document(image, method=DEWARP_METHOD_TEXTLINE)
+    np.testing.assert_array_equal(replayed, direct)
+
+    adjusted_points = list(model.control_points)
+    middle_x, middle_y = adjusted_points[len(adjusted_points) // 2]
+    adjusted_points[len(adjusted_points) // 2] = (middle_x, middle_y + 0.01)
+    adjusted = DewarpModel(
+        method=DEWARP_METHOD_TEXTLINE,
+        control_points=tuple(adjusted_points),
+        source="user",
+    )
+    corrected, adjusted_diagnostics = dewarp_document(
+        image,
+        method=DEWARP_METHOD_TEXTLINE,
+        model=adjusted,
+    )
+
+    assert adjusted_diagnostics.reason == "user_adjusted_model"
+    assert not np.array_equal(corrected, replayed)
+
+
 def test_textline_dewarp_keeps_straight_page_unchanged() -> None:
     image, _character_x = _curved_text_page(amplitude=0.0)
 
@@ -76,6 +108,10 @@ def test_dewarp_none_and_invalid_method() -> None:
     np.testing.assert_array_equal(unchanged, image)
     with pytest.raises(ValueError, match="Unsupported dewarp method"):
         dewarp_document(image, method="missing")
+    with pytest.raises(ValueError, match="3..32"):
+        normalize_control_points([(0.0, 0.0), (1.0, 0.0)])
+    with pytest.raises(ValueError, match="unique"):
+        normalize_control_points([(0.0, 0.0), (0.0, 0.1), (1.0, 0.0)])
 
 
 def test_uvdoc_is_available_as_independent_dewarp_stage(monkeypatch) -> None:
