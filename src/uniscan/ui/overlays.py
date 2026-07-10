@@ -53,7 +53,9 @@ def draw_quad_overlay(
     for point in pts_int:
         center = (int(point[0]), int(point[1]))
         cv2.circle(canvas, center, corner_radius, corner_color, thickness=-1, lineType=cv2.LINE_AA)
-        cv2.circle(canvas, center, corner_radius, (255, 255, 255), thickness=1, lineType=cv2.LINE_AA)
+        cv2.circle(
+            canvas, center, corner_radius, (255, 255, 255), thickness=1, lineType=cv2.LINE_AA
+        )
 
     return canvas
 

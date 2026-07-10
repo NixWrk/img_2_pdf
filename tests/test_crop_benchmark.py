@@ -167,7 +167,9 @@ def test_run_crop_benchmark_keeps_other_backends_when_one_is_unavailable(
     assert failed_result.error == "uvdoc missing"
 
 
-def test_run_crop_benchmark_ignores_its_own_output_pdfs_in_input_folder(tmp_path, monkeypatch) -> None:
+def test_run_crop_benchmark_ignores_its_own_output_pdfs_in_input_folder(
+    tmp_path, monkeypatch
+) -> None:
     input_dir = tmp_path / "input"
     input_dir.mkdir()
     _write_image(input_dir / "page1.png", 40)

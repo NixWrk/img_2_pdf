@@ -11,7 +11,9 @@ class CameraHealth:
     color: str
 
 
-def camera_health_state(*, is_open: bool, is_previewing: bool, error_text: str | None = None) -> CameraHealth:
+def camera_health_state(
+    *, is_open: bool, is_previewing: bool, error_text: str | None = None
+) -> CameraHealth:
     if error_text:
         return CameraHealth(label="Camera: Error", color="#d94f4f")
     if is_previewing:

@@ -178,7 +178,9 @@ def _find_quad_contour(image: np.ndarray) -> np.ndarray | None:
     candidate_maps = _candidate_maps(gray)
 
     for candidate_map in candidate_maps:
-        contours, _hierarchy = cv2.findContours(candidate_map, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _hierarchy = cv2.findContours(
+            candidate_map, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
+        )
         for contour in contours:
             area = float(cv2.contourArea(contour))
             if area < min_area:
@@ -200,7 +202,9 @@ def _find_quad_contour(image: np.ndarray) -> np.ndarray | None:
 
     best_rect: np.ndarray | None = None
     best_rect_score = -1.0
-    contours, _hierarchy = cv2.findContours(candidate_maps[0], cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _hierarchy = cv2.findContours(
+        candidate_maps[0], cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
+    )
     for contour in contours:
         area = float(cv2.contourArea(contour))
         if area < min_area:
@@ -223,7 +227,9 @@ def _find_minrect_contour(image: np.ndarray) -> np.ndarray | None:
     best_score = -1.0
 
     for candidate_map in _candidate_maps(gray):
-        contours, _hierarchy = cv2.findContours(candidate_map, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _hierarchy = cv2.findContours(
+            candidate_map, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
+        )
         for contour in contours:
             area = float(cv2.contourArea(contour))
             if area < min_area:
@@ -238,7 +244,9 @@ def _find_minrect_contour(image: np.ndarray) -> np.ndarray | None:
     return best_rect
 
 
-def _intersection_from_hough_lines(line_a: tuple[float, float], line_b: tuple[float, float]) -> np.ndarray | None:
+def _intersection_from_hough_lines(
+    line_a: tuple[float, float], line_b: tuple[float, float]
+) -> np.ndarray | None:
     rho1, theta1 = line_a
     rho2, theta2 = line_b
     matrix = np.array(
@@ -307,7 +315,9 @@ def _find_hough_quad_contour(image: np.ndarray) -> np.ndarray | None:
     vertical_positions = [(line, _line_x_at_y(line, center_y)) for line in vertical]
     horizontal_positions = [(line, _line_y_at_x(line, center_x)) for line in horizontal]
     vertical_positions = [(line, x_pos) for line, x_pos in vertical_positions if x_pos is not None]
-    horizontal_positions = [(line, y_pos) for line, y_pos in horizontal_positions if y_pos is not None]
+    horizontal_positions = [
+        (line, y_pos) for line, y_pos in horizontal_positions if y_pos is not None
+    ]
     if len(vertical_positions) < 2 or len(horizontal_positions) < 2:
         return None
 
@@ -430,7 +440,9 @@ def _opencv_hybrid_document_detector(image: np.ndarray) -> ScanOutput:
     )
 
 
-def _camscan_document_detector(image: np.ndarray, *, scanner_root: Path | None = None) -> ScanOutput:
+def _camscan_document_detector(
+    image: np.ndarray, *, scanner_root: Path | None = None
+) -> ScanOutput:
     scanner_module = _import_scanner_with_optional_root(optional_root=scanner_root)
     result = scanner_module.main(image)
     warped = getattr(result, "warped", None)
@@ -447,7 +459,9 @@ def _camscan_document_detector(image: np.ndarray, *, scanner_root: Path | None =
     if warped is None and contour is not None:
         warped = warp_perspective_from_points(image, contour)
     if warped is None and contour is None:
-        return ScanOutput(warped=image, contour=None, backend=None, detected=False, raw_result=result)
+        return ScanOutput(
+            warped=image, contour=None, backend=None, detected=False, raw_result=result
+        )
     return ScanOutput(
         warped=warped,
         contour=contour,
@@ -488,11 +502,15 @@ def _uvdoc_document_detector(image: np.ndarray, *, cache_home: Path | None = Non
     raw_result = result_list[0]
     warped = raw_result.get("doctr_img")
     if warped is None:
-        return ScanOutput(warped=image, contour=None, backend=None, detected=False, raw_result=raw_result)
+        return ScanOutput(
+            warped=image, contour=None, backend=None, detected=False, raw_result=raw_result
+        )
 
     warped_arr = np.asarray(warped)
     if warped_arr.size == 0:
-        return ScanOutput(warped=image, contour=None, backend=None, detected=False, raw_result=raw_result)
+        return ScanOutput(
+            warped=image, contour=None, backend=None, detected=False, raw_result=raw_result
+        )
     if warped_arr.dtype != np.uint8:
         warped_arr = np.clip(warped_arr, 0, 255).astype(np.uint8)
     if warped_arr.ndim == 2:
@@ -509,7 +527,9 @@ def _uvdoc_document_detector(image: np.ndarray, *, cache_home: Path | None = Non
     )
 
 
-def _paddleocr_uvdoc_document_detector(image: np.ndarray, *, cache_home: Path | None = None) -> ScanOutput:
+def _paddleocr_uvdoc_document_detector(
+    image: np.ndarray, *, cache_home: Path | None = None
+) -> ScanOutput:
     result = _uvdoc_document_detector(image, cache_home=cache_home)
     if result.detected:
         result.backend = DETECTOR_BACKEND_PADDLEOCR_UVDOC

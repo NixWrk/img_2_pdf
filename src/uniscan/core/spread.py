@@ -165,7 +165,9 @@ def detect_spread_gutter(
     edge_continuity = float((edge_max_normalized > 0.35).mean())
     edge_score = float(np.clip(edge_continuity, 0.0, 1.0))
 
-    confidence = float(np.clip(0.5 * darkness_score + 0.3 * edge_score + 0.2 * balance_score, 0.0, 1.0))
+    confidence = float(
+        np.clip(0.5 * darkness_score + 0.3 * edge_score + 0.2 * balance_score, 0.0, 1.0)
+    )
 
     if confidence < min_confidence:
         return None

@@ -18,7 +18,9 @@ def _make_document_frame(width: int = 480, height: int = 360) -> np.ndarray:
     return frame
 
 
-def _wait_for_detection(detector: LiveContourDetector, timeout_sec: float = 2.0) -> tuple[np.ndarray | None, float]:
+def _wait_for_detection(
+    detector: LiveContourDetector, timeout_sec: float = 2.0
+) -> tuple[np.ndarray | None, float]:
     deadline = time.monotonic() + timeout_sec
     while time.monotonic() < deadline:
         contour, age_ms = detector.latest()

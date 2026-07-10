@@ -17,9 +17,7 @@ from uniscan.core.scanner_adapter import (
 from uniscan.export.exporters import export_image_paths_as_pdf
 from uniscan.io.loaders import imwrite_unicode, list_supported_in_folder, load_input_items
 
-DEFAULT_BENCHMARK_BACKENDS = (
-    DETECTOR_BACKEND_OFFICE_LENS_ONNX,
-)
+DEFAULT_BENCHMARK_BACKENDS = (DETECTOR_BACKEND_OFFICE_LENS_ONNX,)
 
 
 @dataclass(slots=True)

@@ -210,7 +210,9 @@ def detect_bright_document_quad(image_rgb: np.ndarray) -> np.ndarray | None:
 
     kernel = np.ones((13, 13), dtype=np.uint8)
     combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel, iterations=2)
-    combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, np.ones((5, 5), dtype=np.uint8), iterations=1)
+    combined = cv2.morphologyEx(
+        combined, cv2.MORPH_OPEN, np.ones((5, 5), dtype=np.uint8), iterations=1
+    )
 
     contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
@@ -243,7 +245,9 @@ def detect_edge_document_quad(image_rgb: np.ndarray, max_edge: int = 1200) -> np
     height, width = image_rgb.shape[:2]
     scale = min(max_edge / float(max(width, height)), 1.0)
     if scale < 1.0:
-        work = cv2.resize(image_rgb, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
+        work = cv2.resize(
+            image_rgb, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA
+        )
     else:
         work = image_rgb
 
@@ -327,7 +331,9 @@ def _candidate_score(quad_256: np.ndarray, mask: np.ndarray) -> float:
         return -1.0
 
     edge_mask = np.zeros(mask.shape, dtype=np.uint8)
-    cv2.polylines(edge_mask, [quad_256.astype(np.int32).reshape((-1, 1, 2))], True, 255, 3, cv2.LINE_AA)
+    cv2.polylines(
+        edge_mask, [quad_256.astype(np.int32).reshape((-1, 1, 2))], True, 255, 3, cv2.LINE_AA
+    )
     edge_strength = float(mask[edge_mask > 0].mean()) if np.any(edge_mask) else 0.0
     area_score = min(area / image_area, 0.65)
     return edge_strength * 2.0 + area_score
@@ -351,7 +357,9 @@ def _quad_candidates(binary: np.ndarray) -> list[np.ndarray]:
     return candidates
 
 
-def mask_to_quad(mask: np.ndarray, image_width: int, image_height: int) -> tuple[np.ndarray | None, float]:
+def mask_to_quad(
+    mask: np.ndarray, image_width: int, image_height: int
+) -> tuple[np.ndarray | None, float]:
     normalized = mask.astype(np.float32)
     if normalized.size == 0 or float(normalized.max()) <= 0:
         return None, 0.0
@@ -535,7 +543,9 @@ class OfficeLensOnnx:
     ) -> None:
         selected_providers = providers or ["CPUExecutionProvider"]
         self.quad_session = ort.InferenceSession(str(quad_model), providers=selected_providers)
-        self.classifier_session = ort.InferenceSession(str(classifier_model), providers=selected_providers)
+        self.classifier_session = ort.InferenceSession(
+            str(classifier_model), providers=selected_providers
+        )
         self.quad_input = self.quad_session.get_inputs()[0].name
         self.quad_output = self.quad_session.get_outputs()[0].name
         self.classifier_input = self.classifier_session.get_inputs()[0].name
@@ -543,7 +553,9 @@ class OfficeLensOnnx:
 
     def classify(self, image_rgb: np.ndarray) -> Classification:
         tensor = preprocess_classifier(image_rgb)
-        scores = self.classifier_session.run([self.classifier_output], {self.classifier_input: tensor})[0][0]
+        scores = self.classifier_session.run(
+            [self.classifier_output], {self.classifier_input: tensor}
+        )[0][0]
         score_map = {label: float(scores[index]) for index, label in enumerate(CLASSIFIER_LABELS)}
         return Classification(label=max(score_map, key=score_map.get), scores=score_map)
 
@@ -554,7 +566,9 @@ class OfficeLensOnnx:
         mask_quad, threshold = mask_to_quad(mask, image_rgb.shape[1], image_rgb.shape[0])
         image_quad = detect_image_document_quad(image_rgb)
         quad = choose_quad(mask_quad, image_quad, image_rgb.shape[1], image_rgb.shape[0])
-        return QuadMaskResult(mask=mask, quad=quad, threshold=threshold, mask_quad=mask_quad, image_quad=image_quad)
+        return QuadMaskResult(
+            mask=mask, quad=quad, threshold=threshold, mask_quad=mask_quad, image_quad=image_quad
+        )
 
     def process_image(
         self,
@@ -569,7 +583,9 @@ class OfficeLensOnnx:
         warped: np.ndarray | None = None
         enhancement: EnhancementResult | None = None
         if mask_result.quad is not None:
-            warped, _ = warp_document_rgb(image_rgb, mask_result.quad, padding_percent=padding_percent)
+            warped, _ = warp_document_rgb(
+                image_rgb, mask_result.quad, padding_percent=padding_percent
+            )
             enhancement = enhance_page(warped, resolved_mode)
 
         return PipelineResult(
@@ -614,8 +630,12 @@ def result_to_report(image_path: str | Path, result: PipelineResult) -> dict[str
             "mean": float(mask_result.mask.mean()),
             "threshold": float(mask_result.threshold),
             "quad": None if mask_result.quad is None else mask_result.quad.round(2).tolist(),
-            "maskQuad": None if mask_result.mask_quad is None else mask_result.mask_quad.round(2).tolist(),
-            "imageQuad": None if mask_result.image_quad is None else mask_result.image_quad.round(2).tolist(),
+            "maskQuad": None
+            if mask_result.mask_quad is None
+            else mask_result.mask_quad.round(2).tolist(),
+            "imageQuad": None
+            if mask_result.image_quad is None
+            else mask_result.image_quad.round(2).tolist(),
         },
     }
     if result.warped is not None:
@@ -645,7 +665,9 @@ def save_overlay(image_path: str | Path, quad: np.ndarray | None, output_path: s
         cv2.polylines(image, [pts], True, (0, 255, 0), 3, cv2.LINE_AA)
         for index, point in enumerate(quad.astype(np.int32)):
             cv2.circle(image, tuple(point), 6, (0, 0, 255), -1)
-            cv2.putText(image, str(index), tuple(point), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(
+                image, str(index), tuple(point), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
+            )
     cv2.imwrite(str(output_path), image)
 
 
@@ -685,7 +707,9 @@ def save_pipeline_outputs(
     return report
 
 
-def warp_document(image_path: str | Path, quad: np.ndarray, output_path: str | Path) -> tuple[int, int]:
+def warp_document(
+    image_path: str | Path, quad: np.ndarray, output_path: str | Path
+) -> tuple[int, int]:
     image_rgb = _read_rgb(image_path)
     warped, size = warp_document_rgb(image_rgb, quad)
     _write_image(output_path, warped)

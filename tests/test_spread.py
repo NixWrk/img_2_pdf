@@ -27,7 +27,7 @@ def _make_synthetic_spread(
             x = start_x
             while x < end_x:
                 seg = min(rng.integers(40, 120), end_x - x)
-                image[y:y + 4, x:x + seg] = 50
+                image[y : y + 4, x : x + seg] = 50
                 x += seg + rng.integers(15, 35)
     # Dark gutter band
     lo = max(0, gutter_x - gutter_width // 2)
@@ -43,7 +43,7 @@ def _make_single_page(*, width: int = 800, height: int = 500) -> np.ndarray:
         x = 40
         while x < width - 40:
             seg = min(rng.integers(60, 160), width - 40 - x)
-            image[y:y + 4, x:x + seg] = 50
+            image[y : y + 4, x : x + seg] = 50
             x += seg + rng.integers(20, 40)
     return image
 

@@ -25,4 +25,3 @@ def test_parse_page_numbers_text_rejects_invalid_values() -> None:
 def test_parse_page_numbers_text_empty_returns_none() -> None:
     assert parse_page_numbers_text("") is None
     assert parse_page_numbers_text("   ") is None
-

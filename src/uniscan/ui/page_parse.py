@@ -29,4 +29,3 @@ def parse_page_numbers_text(raw_text: str) -> tuple[int, ...] | None:
         seen.add(page)
         pages.append(page)
     return tuple(pages)
-

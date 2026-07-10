@@ -6,10 +6,10 @@ from uniscan.core.geometry import order_quad_points, warp_perspective_from_point
 def test_order_quad_points_returns_consistent_order() -> None:
     points = np.array(
         [
-            [90, 10],   # tr
+            [90, 10],  # tr
             [15, 120],  # bl
-            [100, 130], # br
-            [10, 20],   # tl
+            [100, 130],  # br
+            [10, 20],  # tl
         ],
         dtype=np.float32,
     )
