@@ -16,10 +16,13 @@ from uniscan.tools import (
     ORIENTATION_METHOD_CHOICES,
     run_batch_pipeline,
     run_crop_benchmark,
+    run_geometry_benchmark,
     run_quality_benchmark,
     summarize_benchmark_results,
+    summarize_geometry_report,
     summarize_quality_report,
     validate_quality_baseline,
+    validate_geometry_baseline,
 )
 
 
@@ -202,6 +205,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional cache directory for PaddleOCR UVDoc weights.",
     )
 
+    geometry_parser = subparsers.add_parser(
+        "benchmark-geometry",
+        help="Measure orientation, deskew, dewarp quality, and latency.",
+    )
+    geometry_parser.add_argument("--input", required=True, type=Path, help="Corpus folder.")
+    geometry_parser.add_argument("--output", required=True, type=Path, help="JSON report path.")
+    geometry_parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="Optional committed threshold file; regressions return exit code 2.",
+    )
+
     args = parser.parse_args(argv)
     if args.version:
         from uniscan import __version__
@@ -277,6 +293,21 @@ def main(argv: list[str] | None = None) -> int:
             print(f"uniscan: error: {exc}", file=sys.stderr)
             return 2
         return 0 if any(result.error is None for result in report.backends) else 1
+    if args.command == "benchmark-geometry":
+        try:
+            report = run_geometry_benchmark(corpus_dir=args.input, output_path=args.output)
+            print(summarize_geometry_report(report))
+            if args.baseline is not None:
+                failures = validate_geometry_baseline(report, args.baseline)
+                if failures:
+                    print("Geometry baseline regressions:", file=sys.stderr)
+                    for failure in failures:
+                        print(f"- {failure}", file=sys.stderr)
+                    return 2
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"uniscan: error: {exc}", file=sys.stderr)
+            return 2
+        return 0
     from uniscan.ui import run_app
 
     return run_app()

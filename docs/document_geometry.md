@@ -104,6 +104,11 @@ pages with few or no text lines behave differently. Difficult cases use automati
 selection and confidence-based fallback first, with persisted control points as the correction
 layer when the selected model is close but not exact.
 
+The generated `benchmarks/geometry_v1` corpus locks the automatic behavior for four right-angle
+orientations, small-angle skew, curved/straight lines, sparse graphics, a synthetic photo, and a
+blank page. `uniscan benchmark-geometry` compares accuracy and p95 latency with its committed
+baseline.
+
 OCR is explicitly out of scope. Future 90°/180° orientation may use a dedicated image classifier,
 but it must not introduce text recognition or searchable-document assembly into this pipeline.
 

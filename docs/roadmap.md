@@ -36,6 +36,16 @@ editable persisted dewarp points, enhancement presets, split-page support, sessi
 atomic PDF/image export, structured CLI reports, CI, a portable Windows build, and a deterministic
 crop benchmark.
 
+## Execution status
+
+- [x] Phase 1 — automatic geometry and its regression corpus.
+- [ ] Phase 2 — ScanTailor-style content boxes, page layout, and cleanup.
+- [ ] Phase 3 — one processing controller and stage cache.
+- [ ] Phase 4 — exception-focused review GUI.
+- [ ] Phase 5 — acquisition and performance.
+- [ ] Phase 6 — session lifecycle and reliability.
+- [ ] Phase 7 — real-document validation and personal release.
+
 ## Phase 1 — automatic geometry
 
 Goal: make the geometry path automatic and measurable before adding more cleanup controls.

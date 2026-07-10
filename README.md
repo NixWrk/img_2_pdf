@@ -129,6 +129,15 @@ Ground-truth quality regression (crop success, corner error, latency, and fallba
   --baseline benchmarks\corpus_v1\baseline.json
 ```
 
+Automatic geometry regression (orientation, deskew, validated dewarp, and latency):
+
+```powershell
+.\.venv\Scripts\python.exe -m uniscan benchmark-geometry `
+  --input benchmarks\geometry_v1 `
+  --output geometry-report.json `
+  --baseline benchmarks\geometry_v1\baseline.json
+```
+
 ## Portable Windows artifact
 
 ```powershell

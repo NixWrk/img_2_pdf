@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "corpusVersion": "1.0.0",
+  "thresholds": {
+    "minOrientationAccuracy": 1.0,
+    "minDeskewAccuracy": 1.0,
+    "minDewarpAccuracy": 1.0,
+    "maxP95LatencyMs": 1500.0
+  }
+}

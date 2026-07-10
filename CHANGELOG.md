@@ -10,6 +10,8 @@ All notable changes to UniScan are documented here. The project follows Semantic
   OCR dependency and confidence-based no-op diagnostics.
 - Validated automatic dewarp selection with curvature/artifact metrics and an explicitly enabled
   optional UVDoc fallback.
+- Versioned generated geometry corpus and CLI regression benchmark for orientation, deskew,
+  dewarp safety, and latency.
 
 - Independent boundary, deskew, and local-dewarp stages with per-page JSON diagnostics.
 - Offline text-line dewarp for curved or wavy pages, with confidence-based no-op fallback.

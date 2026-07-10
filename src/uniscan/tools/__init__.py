@@ -25,6 +25,12 @@ from .quality_benchmark import (
     summarize_quality_report,
     validate_quality_baseline,
 )
+from .geometry_benchmark import (
+    load_geometry_manifest,
+    run_geometry_benchmark,
+    summarize_geometry_report,
+    validate_geometry_baseline,
+)
 
 __all__ = [
     "DESKEW_METHOD_CHOICES",
@@ -46,4 +52,8 @@ __all__ = [
     "run_quality_benchmark",
     "summarize_quality_report",
     "validate_quality_baseline",
+    "load_geometry_manifest",
+    "run_geometry_benchmark",
+    "summarize_geometry_report",
+    "validate_geometry_baseline",
 ]
