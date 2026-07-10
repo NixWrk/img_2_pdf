@@ -3,7 +3,7 @@
 UniScan treats three geometrically different problems as independent stages:
 
 ```text
-source page → boundary detection / perspective → deskew → local dewarp → cleanup → export
+source page → boundary detection / perspective → orientation → deskew → local dewarp → cleanup → export
 ```
 
 This separation matters. A four-corner perspective transform can make the page rectangular but
@@ -22,6 +22,13 @@ The production CLI accepts these policies through `--backend`:
 
 Keeping the classical baselines selectable makes quality and latency comparisons reproducible.
 
+## Orientation
+
+`--orientation auto` performs conservative 0/90/180/270 correction without OCR. It compares
+horizontal line-layout evidence and glyph baseline asymmetry. Sparse, graphical, or ambiguous
+pages remain unchanged and the reason is recorded. EXIF orientation is still applied while loading,
+and manual 90-degree rotation remains available in Page tools.
+
 ## Deskew
 
 `--deskew` controls small-angle page rotation:
@@ -32,9 +39,8 @@ Keeping the classical baselines selectable makes quality and latency comparisons
 - `min_area`: previous whole-foreground implementation;
 - `none`: no rotation.
 
-The GUI exposes the same estimators in Page tools. Automatic orientation by 90° or 180° remains
-separate because it cannot be inferred reliably without text/layout semantics; manual 90° rotate
-actions remain available.
+The GUI exposes the same estimators in Page tools. Right-angle orientation remains an independent
+action because it uses layout evidence rather than a small-angle line estimate.
 
 ## Removing page waves
 

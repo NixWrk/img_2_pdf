@@ -50,6 +50,35 @@ def _write_curved_text_page(path: Path) -> None:
     buffer.tofile(str(path))
 
 
+def _write_sideways_text_page(path: Path) -> None:
+    image = np.full((720, 520, 3), 255, dtype=np.uint8)
+    for index, text in enumerate(
+        (
+            "Document page",
+            "quickly aligns",
+            "baseline glyphs",
+            "properly oriented",
+            "local processing",
+            "keeps text safe",
+            "without any OCR",
+        )
+    ):
+        cv2.putText(
+            image,
+            text,
+            (35, 100 + index * 75),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.85,
+            (0, 0, 0),
+            2,
+            cv2.LINE_AA,
+        )
+    sideways = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+    ok, buffer = cv2.imencode(".png", sideways)
+    assert ok
+    buffer.tofile(str(path))
+
+
 def test_resolve_input_paths_expands_folders_in_natural_order(tmp_path) -> None:
     input_dir = tmp_path / "input"
     input_dir.mkdir()
@@ -88,6 +117,7 @@ def test_run_batch_pipeline_writes_pdf_and_images(tmp_path) -> None:
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert report["totalPages"] == 2
     assert report["detectionEnabled"] is False
+    assert report["orientationMethod"] == "none"
     assert report["deskewMethod"] == "none"
     assert report["dewarpMethod"] == "none"
 
@@ -115,9 +145,42 @@ def test_run_batch_pipeline_applies_and_reports_textline_dewarp(tmp_path) -> Non
     assert report["pages"][0]["dewarpReason"] is None
 
 
+def test_run_batch_pipeline_applies_and_reports_orientation(tmp_path) -> None:
+    source = tmp_path / "sideways.png"
+    _write_sideways_text_page(source)
+
+    result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "oriented.pdf",
+        images_dir=tmp_path / "oriented-pages",
+        detect_document=False,
+        lens_mode="none",
+        orientation_method="auto",
+    )
+
+    page = result.pages[0]
+    assert page.orientation_applied is True
+    assert page.orientation_angle_degrees == 270
+    assert page.orientation_confidence > 0.2
+    assert page.orientation_reason is None
+    output = cv2.imread(str(result.image_outputs[0]))
+    assert output.shape[:2] == (720, 520)
+    report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    assert report["orientationMethod"] == "auto"
+    assert report["pages"][0]["orientationApplied"] is True
+    assert report["pages"][0]["orientationAngleDegrees"] == 270
+
+
 def test_run_batch_pipeline_rejects_unknown_geometry_methods(tmp_path) -> None:
     source = tmp_path / "source.png"
     _write_image(source, 90)
+
+    with pytest.raises(ValueError, match="Unsupported orientation method"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=tmp_path / "orientation.pdf",
+            orientation_method="missing",
+        )
 
     with pytest.raises(ValueError, match="Unsupported deskew method"):
         run_batch_pipeline(

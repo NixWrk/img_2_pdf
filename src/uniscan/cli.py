@@ -13,6 +13,7 @@ from uniscan.tools import (
     DEFAULT_QUALITY_BACKENDS,
     DETECTOR_POLICY_CHOICES,
     LENS_MODE_CHOICES,
+    ORIENTATION_METHOD_CHOICES,
     run_batch_pipeline,
     run_crop_benchmark,
     run_quality_benchmark,
@@ -108,6 +109,12 @@ def main(argv: list[str] | None = None) -> int:
         "--illumination-correction",
         action="store_true",
         help="Opt in to local shadow and glare correction.",
+    )
+    convert_parser.add_argument(
+        "--orientation",
+        choices=ORIENTATION_METHOD_CHOICES,
+        default="none",
+        help="Correct 0/90/180/270 page orientation without OCR.",
     )
     convert_parser.add_argument(
         "--deskew",
@@ -215,6 +222,7 @@ def main(argv: list[str] | None = None) -> int:
                 two_page_mode=args.two_page,
                 lens_mode=args.mode,
                 illumination_correction=args.illumination_correction,
+                orientation_method=args.orientation,
                 deskew_method=args.deskew,
                 dewarp_method=args.dewarp,
                 uvdoc_cache_home=args.uvdoc_cache,

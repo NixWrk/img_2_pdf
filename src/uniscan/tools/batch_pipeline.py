@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from uniscan.core.pipeline import PipelineOptions, process_loaded_items
+from uniscan.core.orientation import ORIENTATION_METHOD_CHOICES, orient_document
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.dewarp import (
     DEWARP_METHOD_CHOICES,
@@ -80,6 +81,11 @@ class PageRunReport:
     backend: str | None
     fallback_reason: str | None
     duration_ms: float
+    orientation_method: str = "none"
+    orientation_applied: bool = False
+    orientation_angle_degrees: int = 0
+    orientation_confidence: float = 0.0
+    orientation_reason: str | None = None
     deskew_method: str = "none"
     deskew_angle_degrees: float = 0.0
     dewarp_method: str = "none"
@@ -256,6 +262,7 @@ def _report_payload(
     detect_document: bool,
     detector_policy: str,
     illumination_correction: bool,
+    orientation_method: str,
     deskew_method: str,
     dewarp_method: str,
 ) -> dict[str, object]:
@@ -269,6 +276,7 @@ def _report_payload(
         "detectionEnabled": detect_document,
         "detectorPolicy": detector_policy,
         "illuminationCorrection": illumination_correction,
+        "orientationMethod": orientation_method,
         "deskewMethod": deskew_method,
         "dewarpMethod": dewarp_method,
         "totalPages": len(pages),
@@ -282,6 +290,11 @@ def _report_payload(
                 "backend": page.backend,
                 "fallbackReason": page.fallback_reason,
                 "durationMs": page.duration_ms,
+                "orientationMethod": page.orientation_method,
+                "orientationApplied": page.orientation_applied,
+                "orientationAngleDegrees": page.orientation_angle_degrees,
+                "orientationConfidence": page.orientation_confidence,
+                "orientationReason": page.orientation_reason,
                 "deskewMethod": page.deskew_method,
                 "deskewAngleDegrees": page.deskew_angle_degrees,
                 "dewarpMethod": page.dewarp_method,
@@ -356,6 +369,7 @@ def run_batch_pipeline(
     two_page_mode: bool = False,
     lens_mode: str = "document",
     illumination_correction: bool = False,
+    orientation_method: str = "none",
     deskew_method: str = "none",
     dewarp_method: str = "none",
     uvdoc_cache_home: Path | None = None,
@@ -367,8 +381,11 @@ def run_batch_pipeline(
         raise ValueError("PDF DPI must be >= 72.")
     if strict_detect and not detect_document:
         raise ValueError("strict_detect cannot be used when document detection is disabled.")
+    orientation_method = orientation_method.strip().lower()
     deskew_method = deskew_method.strip().lower()
     dewarp_method = dewarp_method.strip().lower()
+    if orientation_method not in ORIENTATION_METHOD_CHOICES:
+        raise ValueError(f"Unsupported orientation method: {orientation_method}")
     if deskew_method not in DESKEW_METHOD_CHOICES:
         raise ValueError(f"Unsupported deskew method: {deskew_method}")
     if dewarp_method not in DEWARP_METHOD_CHOICES:
@@ -424,7 +441,11 @@ def run_batch_pipeline(
                 cancel_cb=cancel_cb,
             )
             for page in page_results:
-                deskewed, deskew_angle = deskew_document(page.current, method=deskew_method)
+                oriented, orientation_diagnostics = orient_document(
+                    page.current,
+                    method=orientation_method,
+                )
+                deskewed, deskew_angle = deskew_document(oriented, method=deskew_method)
                 if (
                     dewarp_method == DEWARP_METHOD_PADDLEOCR_UVDOC
                     and page.backend == DETECTOR_BACKEND_PADDLEOCR_UVDOC
@@ -456,6 +477,11 @@ def run_batch_pipeline(
                         backend=page.backend,
                         fallback_reason=page.fallback_reason,
                         duration_ms=round((time.perf_counter() - started) * 1000.0, 3),
+                        orientation_method=orientation_method,
+                        orientation_applied=orientation_diagnostics.applied,
+                        orientation_angle_degrees=orientation_diagnostics.angle_degrees,
+                        orientation_confidence=orientation_diagnostics.confidence,
+                        orientation_reason=orientation_diagnostics.reason,
                         deskew_method=deskew_method,
                         deskew_angle_degrees=round(float(deskew_angle), 3),
                         dewarp_method=dewarp_method,
@@ -477,6 +503,7 @@ def run_batch_pipeline(
             detect_document=bool(detect_document),
             detector_policy="disabled" if not detect_document else detector_policy,
             illumination_correction=bool(illumination_correction),
+            orientation_method=orientation_method,
             deskew_method=deskew_method,
             dewarp_method=dewarp_method,
         )

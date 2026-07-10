@@ -30,6 +30,7 @@ from uniscan.core.dewarp import (
     estimate_textline_dewarp_model,
 )
 from uniscan.core.pipeline import PageResult, PipelineOptions, process_loaded_items
+from uniscan.core.orientation import ORIENTATION_METHOD_AUTO, orient_document
 from uniscan.core.preprocess import (
     DESKEW_METHOD_HOUGH,
     DESKEW_METHOD_HYBRID,
@@ -817,7 +818,7 @@ class UnifiedScanApp(ctk.CTk):
     def open_page_tools_dialog(self) -> None:
         window = ctk.CTkToplevel(self)
         window.title("Page tools")
-        window.geometry("440x460")
+        window.geometry("440x510")
         window.resizable(False, False)
         window.transient(self)
 
@@ -857,14 +858,15 @@ class UnifiedScanApp(ctk.CTk):
 
         add(1, 0, "Manual corners", self.open_manual_corners_editor)
         add(1, 1, "Auto crop", self.open_auto_crop_editor)
-        add(2, 0, "Replace from file", self.replace_selected_page_from_file)
+        add(2, 0, "Auto orient", self.auto_orient_selected)
         add(2, 1, "Auto deskew", self.auto_deskew_selected)
-        add(3, 0, "Retake with camera", self.retake_selected_page_from_camera)
-        add(3, 1, "Split book spread", self.split_selected_as_spread)
-        add(4, 0, "Auto remove waves", self.remove_waves_selected)
-        add(4, 1, "Adjust dewarp points", self.open_dewarp_points_editor)
-        add(5, 0, "Refresh pages", self.refresh_page_list)
-        add(5, 1, "Close", window.destroy)
+        add(3, 0, "Replace from file", self.replace_selected_page_from_file)
+        add(3, 1, "Retake with camera", self.retake_selected_page_from_camera)
+        add(4, 0, "Split book spread", self.split_selected_as_spread)
+        add(4, 1, "Auto remove waves", self.remove_waves_selected)
+        add(5, 0, "Adjust dewarp points", self.open_dewarp_points_editor)
+        add(5, 1, "Refresh pages", self.refresh_page_list)
+        add(6, 1, "Close", window.destroy)
 
         window.grab_set()
 
@@ -2492,6 +2494,32 @@ class UnifiedScanApp(ctk.CTk):
         self.refresh_page_list(keep_index=indices[-1])
         mean_angle = sum(angles) / max(1, len(angles))
         self._set_status(f"Deskewed {len(indices)} page(s), avg angle {mean_angle:.1f} deg.")
+
+    def auto_orient_selected(self) -> None:
+        indices = self._selected_entry_indices()
+        if not indices:
+            self._set_status("Select page(s) to orient.")
+            return
+
+        diagnostics = []
+        for idx in indices:
+            entry = self.session.entries[idx]
+            oriented, item = orient_document(
+                entry.original_image,
+                method=ORIENTATION_METHOD_AUTO,
+            )
+            if item.applied:
+                entry.original_image = oriented
+                self._reprocess_entry_from_original(entry)
+            diagnostics.append(item)
+
+        self.refresh_page_list(keep_index=indices[-1])
+        applied = sum(item.applied for item in diagnostics)
+        uncertain = sum(item.reason not in {None, "already_upright"} for item in diagnostics)
+        self._set_status(
+            f"Auto-oriented {applied}/{len(indices)} page(s); "
+            f"{uncertain} left unchanged as uncertain."
+        )
 
     def remove_waves_selected(self) -> None:
         indices = self._selected_entry_indices()
