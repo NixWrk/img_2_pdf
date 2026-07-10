@@ -15,6 +15,7 @@ All notable changes to UniScan are documented here. The project follows Semantic
 
 - GUI processing now exposes page-wave removal, and Page tools allows choosing the deskew
   estimator before applying automatic rotation correction.
+- Dewarp scope is explicitly automatic-only: no manual mesh or per-page curve editor is planned.
 
 ## [0.1.0] - 2026-07-10
 

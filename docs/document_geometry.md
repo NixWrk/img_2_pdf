@@ -58,6 +58,24 @@ by the offline method, but requires the large optional runtime and model cache.
 The GUI currently offers the offline method so preview remains local and predictable. Use
 Workspace → Processing → Remove page waves, or Page tools → Remove page waves.
 
+## Automation and source policy
+
+Page dewarping remains fully automatic. UniScan will not add a manual mesh, control points, or
+per-page curve editing. A new backend is accepted only when:
+
+- its implementation is available in a public repository;
+- the code and model weights have explicit, compatible terms;
+- inference works locally without a mandatory hosted service;
+- it can fail without damaging the page and fall back to another backend;
+- it can be compared on the same geometry corpus and timing report.
+
+The preferred model backend is [PaddleOCR UVDoc](https://github.com/PaddlePaddle/PaddleOCR)
+because its upstream project uses Apache-2.0 and already provides document unwarping and
+orientation modules. [DewarpNet](https://github.com/cvlab-stonybrook/DewarpNet) is an MIT-licensed
+automatic comparison candidate, but requires modernization and separate verification of the
+downloaded weights. [DocTr](https://github.com/fh2019ustc/DocTr) is not a merge candidate: its
+current custom license is non-commercial and share-alike despite the repository being public.
+
 ## Diagnostics and examples
 
 The JSON run report records the selected methods, deskew angle, whether dewarp was applied, the
@@ -65,8 +83,8 @@ number of supporting text lines, maximum displacement, and any no-op reason.
 
 Synthetic regression tests cover curved and straight pages. Real examples should be added before
 tuning thresholds: camera photos near a book spine, rippled loose paper, roller-scanner waves, and
-pages with few or no text lines behave differently. The next advanced step is a manual editable
-mesh for cases where neither text-line correction nor UVDoc produces an acceptable result.
+pages with few or no text lines behave differently. Difficult cases will be handled by automatic
+backend selection, model ensembles, and confidence-based fallback rather than manual geometry.
 
 No ScanTailor GPL source was copied. The implementation uses an independent OpenCV/NumPy design;
 ScanTailor served as a feature and workflow reference.
