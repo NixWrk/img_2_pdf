@@ -25,12 +25,17 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.status_var.get() == "Ready"
         assert len(app.session) == 0
         assert app.preprocess_preset_var.get() == "Document"
+        assert app.preview_mode_var.get() == "Processed"
+        assert app.page_preview_after_frame.winfo_manager() == "grid"
+        assert app.page_preview_before_frame.winfo_manager() == ""
         app.preprocess_illumination_var.set(True)
         assert app._current_preprocess_settings().correct_illumination is True
         assert app.import_files_entry.winfo_exists()
         assert app._drag_drop_error is None
         assert app.toolbar_export_button.cget("state") == "disabled"
         assert app.cancel_task_button.cget("state") == "disabled"
+        assert app.page_listbox.bind("<Delete>")
+        assert app.page_listbox.bind("<Control-Right>")
 
         source = tmp_path / "drop.png"
         source.write_bytes(b"placeholder")
@@ -54,6 +59,24 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.page_count_var.get() == "2 pages"
         assert app.toolbar_export_button.cget("state") == "normal"
         assert app._single_selected_entry()[1].name == "second.png"
+        preview_calls: list[str] = []
+        original_preview = app._review_after_image
+
+        def tracked_preview(entry, before):
+            preview_calls.append(entry.name)
+            return original_preview(entry, before)
+
+        monkeypatch.setattr(app, "_review_after_image", tracked_preview)
+        app.preview_mode_var.set("Original")
+        app._on_preview_mode_change()
+        assert preview_calls == []
+        assert app.page_preview_before_frame.winfo_manager() == "grid"
+        assert app.page_preview_after_frame.winfo_manager() == ""
+        app.preview_mode_var.set("Compare")
+        app._on_preview_mode_change()
+        assert preview_calls == ["second.png"]
+        assert app.page_preview_before_frame.winfo_manager() == "grid"
+        assert app.page_preview_after_frame.winfo_manager() == "grid"
         app.move_selected_up()
         assert app.session.entries[0].name == "second.png"
         app.move_selected_down()

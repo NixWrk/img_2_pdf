@@ -111,6 +111,7 @@ class UnifiedScanApp(ctk.CTk):
         self.camera_delay_var = tk.DoubleVar(value=1.0)
         self.apply_changes_to_all_var = tk.BooleanVar(value=False)
         self.lightweight_preview_var = tk.BooleanVar(value=True)
+        self.preview_mode_var = tk.StringVar(value="Processed")
         self.postprocess_var = tk.StringVar(value="None")
         self.lens_mode_var = tk.StringVar(value="Document")
         self.preprocess_preset_var = tk.StringVar(value="Document")
@@ -142,6 +143,7 @@ class UnifiedScanApp(ctk.CTk):
         self.tab_export_name = "Export options"
 
         self._build_ui()
+        self._bind_shortcuts()
         self._enable_drag_drop()
         self.on_lens_mode_change(self.lens_mode_var.get())
         self._update_camera_health()
@@ -475,32 +477,59 @@ class UnifiedScanApp(ctk.CTk):
             border_width=1,
             command=self.open_page_tools_dialog,
         ).pack(fill=ctk.X, padx=10, pady=(2, 10))
+        ctk.CTkLabel(
+            left,
+            text="Del delete  •  Ctrl+←/→ rotate\nAlt+↑/↓ move  •  Ctrl+A select all",
+            justify="left",
+            text_color=("#60646c", "#a0a4ab"),
+            font=ctk.CTkFont(size=11),
+        ).pack(fill=ctk.X, padx=10, pady=(0, 10))
 
         preview = ctk.CTkFrame(tab)
         preview.grid(row=0, column=1, sticky="nsew", padx=6, pady=10)
-        preview.grid_rowconfigure(0, weight=1)
+        preview.grid_rowconfigure(1, weight=1)
         preview.grid_columnconfigure(0, weight=1)
         preview.grid_columnconfigure(1, weight=1)
 
-        before_frame = ctk.CTkFrame(preview)
-        before_frame.grid(row=0, column=0, sticky="nsew", padx=(8, 4), pady=8)
-        before_frame.grid_rowconfigure(1, weight=1)
-        before_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(before_frame, text="Original").grid(
+        preview_toolbar = ctk.CTkFrame(preview, fg_color="transparent")
+        preview_toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 0))
+        ctk.CTkLabel(
+            preview_toolbar,
+            text="Preview",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).pack(side=ctk.LEFT)
+        self.preview_mode_selector = ctk.CTkSegmentedButton(
+            preview_toolbar,
+            values=["Processed", "Original", "Compare"],
+            variable=self.preview_mode_var,
+            command=self._on_preview_mode_change,
+        )
+        self.preview_mode_selector.pack(side=ctk.RIGHT)
+
+        self.page_preview_before_frame = ctk.CTkFrame(preview)
+        self.page_preview_before_frame.grid_rowconfigure(1, weight=1)
+        self.page_preview_before_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(self.page_preview_before_frame, text="Original").grid(
             row=0, column=0, sticky="w", padx=8, pady=(8, 4)
         )
-        self.page_preview_before_label = ctk.CTkLabel(before_frame, text="No page selected")
+        self.page_preview_before_label = ctk.CTkLabel(
+            self.page_preview_before_frame,
+            text="No page selected",
+        )
         self.page_preview_before_label.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
 
-        after_frame = ctk.CTkFrame(preview)
-        after_frame.grid(row=0, column=1, sticky="nsew", padx=(4, 8), pady=8)
-        after_frame.grid_rowconfigure(1, weight=1)
-        after_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(after_frame, text="Processed preview").grid(
+        self.page_preview_after_frame = ctk.CTkFrame(preview)
+        self.page_preview_after_frame.grid_rowconfigure(1, weight=1)
+        self.page_preview_after_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(self.page_preview_after_frame, text="Processed preview").grid(
             row=0, column=0, sticky="w", padx=8, pady=(8, 4)
         )
-        self.page_preview_after_label = ctk.CTkLabel(after_frame, text="No page selected")
+        self.page_preview_after_label = ctk.CTkLabel(
+            self.page_preview_after_frame,
+            text="No page selected",
+        )
         self.page_preview_after_label.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self._layout_page_previews()
 
         processing = ctk.CTkScrollableFrame(tab, width=270, label_text="Processing")
         processing.grid(row=0, column=2, sticky="nsew", padx=(6, 10), pady=10)
@@ -611,6 +640,44 @@ class UnifiedScanApp(ctk.CTk):
         )
         self.workspace_export_files_button.pack(fill=ctk.X, padx=6, pady=(0, 10))
         self.refresh_page_list()
+
+    def _bind_shortcuts(self) -> None:
+        """Bind the common document actions without stealing text-entry shortcuts."""
+        self.bind("<Control-o>", lambda _event: self._run_shortcut(self.quick_add_files))
+        self.bind("<Control-Shift-O>", lambda _event: self._run_shortcut(self.quick_add_folder))
+        self.bind("<Control-Shift-C>", lambda _event: self._run_shortcut(self.capture_one))
+        self.bind("<Control-e>", lambda _event: self._run_shortcut(self.export_to_pdf))
+        self.bind("<F5>", lambda _event: self._run_shortcut(self.update_page_preview))
+
+        self.page_listbox.bind(
+            "<Delete>",
+            lambda _event: self._run_shortcut(self.delete_selected_pages),
+        )
+        self.page_listbox.bind(
+            "<Control-Left>",
+            lambda _event: self._run_shortcut(self.rotate_selected_left),
+        )
+        self.page_listbox.bind(
+            "<Control-Right>",
+            lambda _event: self._run_shortcut(self.rotate_selected_right),
+        )
+        self.page_listbox.bind(
+            "<Alt-Up>",
+            lambda _event: self._run_shortcut(self.move_selected_up),
+        )
+        self.page_listbox.bind(
+            "<Alt-Down>",
+            lambda _event: self._run_shortcut(self.move_selected_down),
+        )
+        self.page_listbox.bind(
+            "<Control-a>",
+            lambda _event: self._run_shortcut(self.select_all_pages),
+        )
+
+    @staticmethod
+    def _run_shortcut(command) -> str:
+        command()
+        return "break"
 
     def _on_close(self) -> None:
         self.stop_preview()
@@ -1635,6 +1702,54 @@ class UnifiedScanApp(ctk.CTk):
         self._sync_page_selection_to_session()
         self.update_page_preview()
 
+    def _on_preview_mode_change(self, _value: str | None = None) -> None:
+        self._layout_page_previews()
+        self.update_idletasks()
+        self.update_page_preview()
+
+    def _layout_page_previews(self) -> None:
+        """Give a single preview the full center area and split it only for Compare."""
+        mode = self.preview_mode_var.get()
+        if mode not in {"Processed", "Original", "Compare"}:
+            mode = "Processed"
+            self.preview_mode_var.set(mode)
+
+        self.page_preview_before_frame.grid_forget()
+        self.page_preview_after_frame.grid_forget()
+        if mode == "Compare":
+            self.page_preview_before_frame.grid(
+                row=1,
+                column=0,
+                sticky="nsew",
+                padx=(8, 4),
+                pady=8,
+            )
+            self.page_preview_after_frame.grid(
+                row=1,
+                column=1,
+                sticky="nsew",
+                padx=(4, 8),
+                pady=8,
+            )
+        elif mode == "Original":
+            self.page_preview_before_frame.grid(
+                row=1,
+                column=0,
+                columnspan=2,
+                sticky="nsew",
+                padx=8,
+                pady=8,
+            )
+        else:
+            self.page_preview_after_frame.grid(
+                row=1,
+                column=0,
+                columnspan=2,
+                sticky="nsew",
+                padx=8,
+                pady=8,
+            )
+
     def update_page_preview(self) -> None:
         selected = self.page_listbox.curselection()
         if len(selected) != 1:
@@ -1654,22 +1769,29 @@ class UnifiedScanApp(ctk.CTk):
 
         entry = self.session.entries[index]
         before = self._review_before_image(entry)
-        try:
-            after = self._review_after_image(entry, before)
-        except Exception:
-            after = (
-                entry.preview_current_image
-                if self.lightweight_preview_var.get()
-                else entry.current_image
-            )
+        mode = self.preview_mode_var.get()
 
-        before_photo = self._to_ctk_photo_for_label(before, self.page_preview_before_label)
-        after_photo = self._to_ctk_photo_for_label(after, self.page_preview_after_label)
+        if mode in {"Original", "Compare"}:
+            before_photo = self._to_ctk_photo_for_label(before, self.page_preview_before_label)
+            self.page_preview_before_label.configure(image=before_photo, text="")
+            self.page_preview_before_photo = before_photo
+        else:
+            self.page_preview_before_photo = None
 
-        self.page_preview_before_label.configure(image=before_photo, text="")
-        self.page_preview_after_label.configure(image=after_photo, text="")
-        self.page_preview_before_photo = before_photo
-        self.page_preview_after_photo = after_photo
+        if mode in {"Processed", "Compare"}:
+            try:
+                after = self._review_after_image(entry, before)
+            except Exception:
+                after = (
+                    entry.preview_current_image
+                    if self.lightweight_preview_var.get()
+                    else entry.current_image
+                )
+            after_photo = self._to_ctk_photo_for_label(after, self.page_preview_after_label)
+            self.page_preview_after_label.configure(image=after_photo, text="")
+            self.page_preview_after_photo = after_photo
+        else:
+            self.page_preview_after_photo = None
 
     def _clear_preview_label(self, label: ctk.CTkLabel) -> None:
         # customtkinter 5.2 leaves the old Tcl image name behind for image=None.

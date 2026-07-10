@@ -51,11 +51,19 @@ behind progressive disclosure.
 - The page list now follows the dark theme and shows a live page count.
 - The status bar exposes Cancel task.
 
+## Second iteration implemented
+
+- The center workspace now defaults to a single large processed preview instead of permanently
+  squeezing original and processed pages side by side.
+- `Processed`, `Original`, and `Compare` modes are always visible above the preview. Original-only
+  mode skips the processing preview computation, which keeps inspection responsive.
+- Common keyboard actions are available: `Ctrl+O` add files, `Ctrl+Shift+O` add a folder,
+  `Ctrl+Shift+C` capture one frame, `Ctrl+E` export PDF, `F5` refresh preview, and page-list
+  shortcuts for delete, rotate, reorder, and select all.
+
 ## Next UX iterations
 
 1. Replace the text list with thumbnail cards while preserving multi-select and keyboard access.
-2. Add Original / Processed / Compare preview modes so one image can use the full center area.
-3. Add keyboard shortcuts for add, capture, rotate, delete, reorder, and export.
-4. Add an explicit New/Discard session action and a compact recent-session recovery surface.
-5. Add Russian/English interface localization after labels and workflows stabilize.
-6. Run the manual workflow with a real camera and record task time/click count for common jobs.
+2. Add an explicit New/Discard session action and a compact recent-session recovery surface.
+3. Add Russian/English interface localization after labels and workflows stabilize.
+4. Run the manual workflow with a real camera and record task time/click count for common jobs.

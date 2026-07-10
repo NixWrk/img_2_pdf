@@ -28,8 +28,11 @@ longer contains a separate legacy implementation.
 ![UniScan document workspace](docs/images/workspace-v1.png)
 
 The GUI follows a single-document workspace with persistent add, camera, processing, and export
-actions. Design rationale and the next UX iterations are in
-[`docs/gui_ux_research.md`](docs/gui_ux_research.md).
+actions. Its preview can show one large processed/original page or a side-by-side comparison.
+Design rationale and the next UX iterations are in
+[`docs/gui_ux_research.md`](docs/gui_ux_research.md). A source-level feature and performance
+comparison with ScanTailor Advanced is in
+[`docs/scantailor_advanced_comparison.md`](docs/scantailor_advanced_comparison.md).
 
 ## Headless image/PDF-to-PDF pipeline
 
