@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "corpusVersion": "1.0.0",
+  "backends": {
+    "office_lens_onnx": {
+      "minCropSuccessRate": 1.0,
+      "maxFallbackRate": 0.0,
+      "maxMeanCornerErrorRatio": 0.05,
+      "maxP95LatencyMs": 2000.0
+    }
+  }
+}

@@ -5,11 +5,12 @@ from __future__ import annotations
 import math
 import re
 import warnings
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
 import cv2
 import numpy as np
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 # PIL's default decompression-bomb guard is 178 956 970 px.
 # We cap renders slightly below that so downstream tools can open
@@ -24,7 +25,7 @@ def _safe_render_dpi(page_rect, requested_dpi: int, max_pixels: int = _MAX_RENDE
     This prevents PIL ``DecompressionBombError`` in downstream tools
     that open rendered PNG pages.
     """
-    w_pt: float = page_rect.width   # page width in PDF points (1 pt = 1/72 in)
+    w_pt: float = page_rect.width  # page width in PDF points (1 pt = 1/72 in)
     h_pt: float = page_rect.height
     if w_pt <= 0 or h_pt <= 0:
         return requested_dpi
@@ -43,6 +44,7 @@ def _safe_render_dpi(page_rect, requested_dpi: int, max_pixels: int = _MAX_RENDE
     )
     return safe_dpi
 
+
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp"}
 PDF_EXTS = {".pdf"}
 
@@ -60,15 +62,24 @@ def list_supported_in_folder(folder: Path) -> list[Path]:
     """List supported image and PDF files in a folder, naturally sorted."""
     if not folder.exists() or not folder.is_dir():
         raise ValueError(f"Invalid input folder: {folder}")
-    paths = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in (IMG_EXTS | PDF_EXTS)]
+    paths = [
+        p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in (IMG_EXTS | PDF_EXTS)
+    ]
     paths.sort(key=lambda p: natural_key(p.name))
     return paths
 
 
 def imread_unicode(path: Path) -> np.ndarray | None:
-    """Read image path using unicode-safe bytes decode path."""
-    data = np.fromfile(str(path), dtype=np.uint8)
-    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+    """Read an image as BGR and apply its EXIF orientation when present."""
+    try:
+        with Image.open(path) as source:
+            oriented = ImageOps.exif_transpose(source)
+            rgb = np.asarray(oriented.convert("RGB"))
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    except (OSError, UnidentifiedImageError, ValueError):
+        # OpenCV remains a useful fallback for formats/plugins Pillow cannot decode.
+        data = np.fromfile(str(path), dtype=np.uint8)
+        return cv2.imdecode(data, cv2.IMREAD_COLOR)
 
 
 def imwrite_unicode(path: Path, image: np.ndarray) -> bool:
@@ -81,37 +92,57 @@ def imwrite_unicode(path: Path, image: np.ndarray) -> bool:
     return True
 
 
-def render_pdf_pages(pdf_path: Path, dpi: int) -> list[LoadedItem]:
-    """Render PDF pages to BGR images."""
+def _render_pdf_page(page, *, pdf_path: Path, page_index: int, dpi: int) -> LoadedItem:
+    """Render one zero-based PyMuPDF page index to a named BGR image."""
+    safe_dpi = _safe_render_dpi(page.rect, dpi)
+    pix = page.get_pixmap(dpi=safe_dpi, alpha=False)
+    arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    if pix.n == 4:
+        arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+    else:
+        arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+    return f"{pdf_path.name} [p{page_index + 1:04d}]", arr
+
+
+def iter_pdf_pages(
+    pdf_path: Path,
+    dpi: int,
+    *,
+    cancel_cb: CancelCb | None = None,
+) -> Iterator[LoadedItem]:
+    """Yield PDF pages one at a time without materializing the full document."""
     try:
         import fitz  # type: ignore
     except Exception as exc:
-        raise RuntimeError("PDF import requires PyMuPDF. Install with: pip install pymupdf") from exc
+        raise RuntimeError(
+            "PDF import requires PyMuPDF. Install with: pip install pymupdf"
+        ) from exc
 
-    pages: list[LoadedItem] = []
     doc = fitz.open(str(pdf_path))
     try:
-        for page_index, page in enumerate(doc, start=1):
-            safe_dpi = _safe_render_dpi(page.rect, dpi)
-            pix = page.get_pixmap(dpi=safe_dpi, alpha=False)
-            arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-            if pix.n == 4:
-                arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
-            else:
-                arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-            pages.append((f"{pdf_path.name} [p{page_index:04d}]", arr))
+        for page_index, page in enumerate(doc):
+            if cancel_cb is not None and cancel_cb():
+                raise RuntimeError("Cancelled by user.")
+            yield _render_pdf_page(page, pdf_path=pdf_path, page_index=page_index, dpi=dpi)
     finally:
         doc.close()
 
-    return pages
+
+def render_pdf_pages(pdf_path: Path, dpi: int) -> list[LoadedItem]:
+    """Render all PDF pages to BGR images for backwards-compatible callers."""
+    return list(iter_pdf_pages(pdf_path, dpi))
 
 
-def render_pdf_page_indices(pdf_path: Path, page_indices: Iterable[int], dpi: int) -> list[LoadedItem]:
+def render_pdf_page_indices(
+    pdf_path: Path, page_indices: Iterable[int], dpi: int
+) -> list[LoadedItem]:
     """Render selected PDF pages to BGR images without materializing the full document."""
     try:
         import fitz  # type: ignore
     except Exception as exc:
-        raise RuntimeError("PDF import requires PyMuPDF. Install with: pip install pymupdf") from exc
+        raise RuntimeError(
+            "PDF import requires PyMuPDF. Install with: pip install pymupdf"
+        ) from exc
 
     pages: list[LoadedItem] = []
     doc = fitz.open(str(pdf_path))
@@ -119,37 +150,34 @@ def render_pdf_page_indices(pdf_path: Path, page_indices: Iterable[int], dpi: in
         for page_index in page_indices:
             if page_index < 0 or page_index >= doc.page_count:
                 raise IndexError(f"PDF page index out of range: {page_index}")
-            page = doc[page_index]
-            safe_dpi = _safe_render_dpi(page.rect, dpi)
-            pix = page.get_pixmap(dpi=safe_dpi, alpha=False)
-            arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-            if pix.n == 4:
-                arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
-            else:
-                arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-            pages.append((f"{pdf_path.name} [p{page_index + 1:04d}]", arr))
+            pages.append(
+                _render_pdf_page(
+                    doc[page_index],
+                    pdf_path=pdf_path,
+                    page_index=page_index,
+                    dpi=dpi,
+                )
+            )
     finally:
         doc.close()
 
     return pages
 
 
-def load_input_items(
+def iter_input_items(
     paths: Iterable[Path],
     *,
     pdf_dpi: int,
     on_progress: ProgressCb | None = None,
     cancel_cb: CancelCb | None = None,
-) -> list[LoadedItem]:
+) -> Iterator[LoadedItem]:
     """
-    Load a mixed list of image/PDF paths into in-memory BGR items.
+    Yield a mixed list of image/PDF paths as BGR items.
 
     Progress callback receives `(current_index, total_count, name)`.
     """
     input_paths = list(paths)
     total = len(input_paths)
-    items: list[LoadedItem] = []
-
     for index, path in enumerate(input_paths, start=1):
         if cancel_cb is not None and cancel_cb():
             raise RuntimeError("Cancelled by user.")
@@ -159,13 +187,29 @@ def load_input_items(
             image = imread_unicode(path)
             if image is None:
                 raise RuntimeError(f"Cannot read image: {path}")
-            items.append((path.name, image))
+            yield path.name, image
         elif ext in PDF_EXTS:
-            items.extend(render_pdf_pages(path, dpi=pdf_dpi))
+            yield from iter_pdf_pages(path, dpi=pdf_dpi, cancel_cb=cancel_cb)
         else:
             raise RuntimeError(f"Unsupported input: {path}")
 
         if on_progress is not None:
             on_progress(index, total, path.name)
 
-    return items
+
+def load_input_items(
+    paths: Iterable[Path],
+    *,
+    pdf_dpi: int,
+    on_progress: ProgressCb | None = None,
+    cancel_cb: CancelCb | None = None,
+) -> list[LoadedItem]:
+    """Load mixed inputs into memory; prefer ``iter_input_items`` for large batches."""
+    return list(
+        iter_input_items(
+            paths,
+            pdf_dpi=pdf_dpi,
+            on_progress=on_progress,
+            cancel_cb=cancel_cb,
+        )
+    )

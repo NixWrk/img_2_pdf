@@ -28,6 +28,8 @@ class PipelineOptions:
     detect_document: bool = True
     two_page_mode: bool = False
     postprocess_name: str = "None"
+    detector_backends: tuple[str, ...] | None = None
+    strict_detect: bool = False
 
 
 @dataclass(slots=True)
@@ -40,6 +42,17 @@ class PageResult:
     current: np.ndarray
     contour: np.ndarray | None
     backend: str | None
+    detected: bool
+    fallback_reason: str | None
+
+
+def _detection_fallback_reason(scan_output) -> str:
+    raw_result = scan_output.raw_result
+    if isinstance(raw_result, dict):
+        errors = raw_result.get("errors")
+        if isinstance(errors, list) and errors:
+            return "; ".join(str(error) for error in errors)
+    return "no document boundary detected"
 
 
 def split_spread(image: np.ndarray) -> list[np.ndarray]:
@@ -88,6 +101,7 @@ def process_loaded_items(
     *,
     options: PipelineOptions,
     scanner_root: Path | None = None,
+    uvdoc_cache_home: Path | None = None,
     on_progress: ProgressCb | None = None,
     cancel_cb: CancelCb | None = None,
 ) -> list[PageResult]:
@@ -106,9 +120,15 @@ def process_loaded_items(
         scan_output = scan_with_document_detector(
             image,
             enabled=options.detect_document,
-            backends=DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
+            backends=options.detector_backends or DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
             scanner_root=scanner_root,
+            uvdoc_cache_home=uvdoc_cache_home,
         )
+        fallback_reason = None
+        if options.detect_document and not scan_output.detected:
+            fallback_reason = _detection_fallback_reason(scan_output)
+            if options.strict_detect:
+                raise RuntimeError(f"Document detection failed for {name}: {fallback_reason}")
         warped = scan_output.warped if scan_output.warped is not None else image
         contour = _augment_overlay_contour(scan_output, image)
         backend = scan_output.backend
@@ -121,7 +141,9 @@ def process_loaded_items(
                 left_warped_width = warped_halves[0].shape[1]
                 ratio = left_warped_width / max(1, warped_width)
                 raw_halves = _safe_split_proportional(image, ratio=ratio)
-                for half_index, (raw_half, warped_half) in enumerate(zip(raw_halves, warped_halves)):
+                for half_index, (raw_half, warped_half) in enumerate(
+                    zip(raw_halves, warped_halves)
+                ):
                     current_half = postprocess_fn(warped_half)
                     suffix = "L" if half_index == 0 else "R"
                     pages.append(
@@ -132,6 +154,8 @@ def process_loaded_items(
                             current=current_half,
                             contour=None,
                             backend=backend,
+                            detected=scan_output.detected,
+                            fallback_reason=fallback_reason,
                         )
                     )
             else:
@@ -144,6 +168,8 @@ def process_loaded_items(
                         current=current,
                         contour=contour,
                         backend=backend,
+                        detected=scan_output.detected,
+                        fallback_reason=fallback_reason,
                     )
                 )
         else:
@@ -156,6 +182,8 @@ def process_loaded_items(
                     current=current,
                     contour=contour,
                     backend=backend,
+                    detected=scan_output.detected,
+                    fallback_reason=fallback_reason,
                 )
             )
 
@@ -187,12 +215,21 @@ def write_pages_to_dir(
 
 
 def build_pdf_from_images(image_paths: list[Path], out_pdf: Path, dpi: int) -> None:
-    """Build merged PDF from image path list."""
+    """Build a merged PDF directly into its output stream."""
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     with out_pdf.open("wb") as file:
         try:
-            payload = img2pdf.convert([str(p) for p in image_paths], dpi=dpi)
+            img2pdf.convert(
+                [str(p) for p in image_paths],
+                dpi=dpi,
+                outputstream=file,
+            )
         except TypeError:
+            file.seek(0)
+            file.truncate()
             layout = img2pdf.get_fixed_dpi_layout_fun((dpi, dpi))
-            payload = img2pdf.convert([str(p) for p in image_paths], layout_fun=layout)
-        file.write(payload)
+            img2pdf.convert(
+                [str(p) for p in image_paths],
+                layout_fun=layout,
+                outputstream=file,
+            )

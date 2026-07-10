@@ -15,6 +15,7 @@ class PreprocessSettings:
     denoise: int = 0
     threshold: int = 170
     apply_threshold: bool = False
+    correct_illumination: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -25,9 +26,15 @@ class LensModeProfile:
 
 PREPROCESS_PRESETS: dict[str, PreprocessSettings] = {
     "Custom": PreprocessSettings(),
-    "Document": PreprocessSettings(contrast=1.25, brightness=10, denoise=4, threshold=170, apply_threshold=False),
-    "Whiteboard": PreprocessSettings(contrast=1.35, brightness=20, denoise=5, threshold=185, apply_threshold=False),
-    "Photo": PreprocessSettings(contrast=1.05, brightness=0, denoise=2, threshold=170, apply_threshold=False),
+    "Document": PreprocessSettings(
+        contrast=1.25, brightness=10, denoise=4, threshold=170, apply_threshold=False
+    ),
+    "Whiteboard": PreprocessSettings(
+        contrast=1.35, brightness=20, denoise=5, threshold=185, apply_threshold=False
+    ),
+    "Photo": PreprocessSettings(
+        contrast=1.05, brightness=0, denoise=2, threshold=170, apply_threshold=False
+    ),
     "B/W High Contrast": PreprocessSettings(
         contrast=1.45,
         brightness=8,
@@ -62,9 +69,38 @@ def infer_lens_mode(preset_name: str, postprocess_name: str) -> str:
     return LENS_MODE_CUSTOM
 
 
+def correct_illumination(image: np.ndarray) -> np.ndarray:
+    """Reduce smooth shadows and compress highlights without OCR or content rotation."""
+    if image.size == 0:
+        return image.copy()
+
+    is_gray = image.ndim == 2
+    if is_gray:
+        lightness = image
+        color = None
+    else:
+        color = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        lightness = color[:, :, 0]
+
+    min_side = min(lightness.shape[:2])
+    if min_side < 5:
+        return image.copy()
+    sigma = max(5.0, min(45.0, min_side / 10.0))
+    background = cv2.GaussianBlur(lightness, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    background = np.maximum(background, 1)
+    corrected = cv2.divide(lightness, background, scale=245)
+    corrected = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8)).apply(corrected)
+
+    if is_gray:
+        return corrected
+    assert color is not None
+    color[:, :, 0] = corrected
+    return cv2.cvtColor(color, cv2.COLOR_LAB2BGR)
+
+
 def apply_enhancements(image: np.ndarray, settings: PreprocessSettings) -> np.ndarray:
     """Apply denoise, contrast/brightness, and optional binary threshold."""
-    out = image
+    out = correct_illumination(image) if settings.correct_illumination else image
     denoise = max(0, int(settings.denoise))
     if denoise > 0:
         if len(out.shape) == 2:

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
+import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
@@ -203,7 +207,10 @@ class CaptureSession:
         new_index = index + distance
         if new_index < 0 or new_index >= len(self._entries):
             return False
-        self._entries[index], self._entries[new_index] = self._entries[new_index], self._entries[index]
+        self._entries[index], self._entries[new_index] = (
+            self._entries[new_index],
+            self._entries[index],
+        )
         return True
 
     def select_all(self, selected: bool = True) -> None:
@@ -267,9 +274,106 @@ class CaptureSession:
     def selected_entries(self) -> list[CaptureEntry]:
         return [entry for entry in self._entries if entry.selected]
 
-    def close(self) -> None:
+    def save_manifest(self, manifest_path: Path) -> Path:
+        """Atomically save enough metadata to reopen this disk-backed session."""
+        manifest_path = Path(manifest_path)
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schemaVersion": 1,
+            "sessionDir": str(self.store.session_dir.resolve()),
+            "entries": [
+                {
+                    "entryId": entry.entry_id,
+                    "name": entry.name,
+                    "selected": entry.selected,
+                    "detectedBackend": entry.detected_backend,
+                    "detectedContour": (
+                        entry.detected_contour.tolist()
+                        if entry.detected_contour is not None
+                        else None
+                    ),
+                }
+                for entry in self._entries
+            ],
+        }
+        descriptor, raw_stage = tempfile.mkstemp(
+            prefix=f".{manifest_path.name}.stage-",
+            suffix=".json",
+            dir=manifest_path.parent,
+        )
+        os.close(descriptor)
+        stage = Path(raw_stage)
+        try:
+            stage.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(stage, manifest_path)
+        finally:
+            if stage.exists():
+                stage.unlink()
+        return manifest_path
+
+    @classmethod
+    def restore_manifest(
+        cls,
+        manifest_path: Path,
+        *,
+        allowed_sessions_root: Path | None = None,
+    ) -> "CaptureSession":
+        """Restore entry order and metadata from a persistent session manifest."""
+        manifest_path = Path(manifest_path)
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Cannot read session manifest: {manifest_path}") from exc
+        if payload.get("schemaVersion") != 1 or not isinstance(payload.get("entries"), list):
+            raise ValueError(f"Unsupported session manifest: {manifest_path}")
+
+        session_dir_raw = payload.get("sessionDir")
+        if not isinstance(session_dir_raw, str):
+            raise ValueError(f"Invalid session directory in manifest: {manifest_path}")
+        session_dir = Path(session_dir_raw).resolve()
+        if allowed_sessions_root is not None:
+            allowed_root = Path(allowed_sessions_root).resolve()
+            if session_dir.parent != allowed_root:
+                raise ValueError(f"Session directory escapes autosave storage: {session_dir}")
+
+        store = PageStore.from_session_dir(session_dir)
+        session = cls(store=store)
+        for item in payload["entries"]:
+            if not isinstance(item, dict):
+                raise ValueError("Invalid session entry in manifest.")
+            entry_id = str(item.get("entryId", ""))
+            if re.fullmatch(r"[0-9a-f]{32}", entry_id) is None:
+                raise ValueError(f"Invalid session entry id: {entry_id}")
+            paths = store.paths_for_entry(entry_id)
+            required = (paths.raw, paths.original, paths.current)
+            if not all(path.is_file() for path in required):
+                raise ValueError(f"Session page assets are incomplete: {entry_id}")
+            contour_raw = item.get("detectedContour")
+            contour = np.asarray(contour_raw, dtype=np.float32) if contour_raw is not None else None
+            if contour is not None and (contour.shape != (4, 2) or not np.isfinite(contour).all()):
+                raise ValueError(f"Invalid detected contour for session entry: {entry_id}")
+            session.add_entry(
+                CaptureEntry(
+                    name=str(item.get("name", entry_id)),
+                    store=store,
+                    paths=paths,
+                    detected_contour=contour,
+                    detected_backend=item.get("detectedBackend"),
+                    selected=bool(item.get("selected", False)),
+                    entry_id=entry_id,
+                )
+            )
+        return session
+
+    def close(self, *, preserve: bool = False) -> None:
+        if preserve:
+            self.store.close()
+            return
         self.clear()
-        self.store.close()
+        self.store.discard()
 
     def _find_index(self, entry_id: str) -> int | None:
         for idx, entry in enumerate(self._entries):

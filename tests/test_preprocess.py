@@ -7,6 +7,7 @@ from uniscan.core.preprocess import (
     PREPROCESS_PRESETS,
     PreprocessSettings,
     apply_enhancements,
+    correct_illumination,
     deskew_document,
     infer_lens_mode,
     resolve_lens_mode_profile,
@@ -56,18 +57,42 @@ def test_apply_enhancements_keeps_shape_for_color() -> None:
 def test_apply_enhancements_threshold_returns_binary() -> None:
     out = apply_enhancements(
         _color_img(),
-        PreprocessSettings(contrast=1.0, brightness=0, denoise=0, threshold=100, apply_threshold=True),
+        PreprocessSettings(
+            contrast=1.0, brightness=0, denoise=0, threshold=100, apply_threshold=True
+        ),
     )
     assert out.ndim == 2
     unique = set(np.unique(out).tolist())
     assert unique.issubset({0, 255})
 
 
+def test_correct_illumination_reduces_brightness_gradient() -> None:
+    gradient = np.tile(np.linspace(45, 220, 240, dtype=np.uint8), (160, 1))
+    image = cv2.cvtColor(gradient, cv2.COLOR_GRAY2BGR)
+
+    corrected = correct_illumination(image)
+
+    before_spread = abs(float(image[:, :40].mean()) - float(image[:, -40:].mean()))
+    after_spread = abs(float(corrected[:, :40].mean()) - float(corrected[:, -40:].mean()))
+    assert corrected.shape == image.shape
+    assert after_spread < before_spread * 0.5
+
+
+def test_apply_enhancements_can_correct_illumination() -> None:
+    gradient = np.tile(np.linspace(60, 200, 120, dtype=np.uint8), (80, 1))
+    image = cv2.cvtColor(gradient, cv2.COLOR_GRAY2BGR)
+    settings = PreprocessSettings(correct_illumination=True)
+
+    assert not np.array_equal(apply_enhancements(image, settings), image)
+
+
 def test_deskew_document_returns_angle_for_rotated_content() -> None:
     base = np.full((160, 220, 3), 255, dtype=np.uint8)
     cv2.rectangle(base, (40, 60), (180, 100), (0, 0, 0), -1)
     m = cv2.getRotationMatrix2D((110, 80), 17.0, 1.0)
-    rotated = cv2.warpAffine(base, m, (220, 160), flags=cv2.INTER_LINEAR, borderValue=(255, 255, 255))
+    rotated = cv2.warpAffine(
+        base, m, (220, 160), flags=cv2.INTER_LINEAR, borderValue=(255, 255, 255)
+    )
 
     fixed, angle = deskew_document(rotated)
     assert fixed.shape == rotated.shape

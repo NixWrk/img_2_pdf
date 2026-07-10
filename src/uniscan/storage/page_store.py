@@ -30,13 +30,35 @@ class PagePaths:
 class PageStore:
     """Manage per-session page files (raw/original/current/previews/thumbnail)."""
 
-    def __init__(self, root_dir: Path | None = None, *, keep_on_close: bool = False) -> None:
-        base = Path(root_dir) if root_dir is not None else Path(tempfile.gettempdir()) / "uniscan_cache"
-        self.session_id = uuid4().hex
+    def __init__(
+        self,
+        root_dir: Path | None = None,
+        *,
+        keep_on_close: bool = False,
+        session_id: str | None = None,
+    ) -> None:
+        base = (
+            Path(root_dir)
+            if root_dir is not None
+            else Path(tempfile.gettempdir()) / "uniscan_cache"
+        )
+        self.session_id = session_id or uuid4().hex
         self.session_dir = base / self.session_id
         self.pages_dir = self.session_dir / "pages"
         self.pages_dir.mkdir(parents=True, exist_ok=True)
         self.keep_on_close = keep_on_close
+
+    @classmethod
+    def from_session_dir(cls, session_dir: Path) -> "PageStore":
+        """Open an existing persistent session directory."""
+        session_dir = Path(session_dir)
+        if not session_dir.is_dir():
+            raise ValueError(f"Session directory does not exist: {session_dir}")
+        return cls(
+            root_dir=session_dir.parent,
+            keep_on_close=True,
+            session_id=session_dir.name,
+        )
 
     def paths_for_entry(self, entry_id: str) -> PagePaths:
         page_dir = self.pages_dir / entry_id
@@ -81,7 +103,9 @@ class PageStore:
         new_h = max(1, int(h * scale))
         return cv2.resize(preview, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-    def write_preview(self, path: Path, image: np.ndarray, *, max_width: int = 1920, max_height: int = 1080) -> None:
+    def write_preview(
+        self, path: Path, image: np.ndarray, *, max_width: int = 1920, max_height: int = 1080
+    ) -> None:
         preview = self._resize_for_display(image, max_width=max_width, max_height=max_height)
         if not imwrite_unicode(path, preview):
             raise RuntimeError(f"Cannot write page preview: {path}")
@@ -123,4 +147,8 @@ class PageStore:
     def close(self) -> None:
         if self.keep_on_close:
             return
+        shutil.rmtree(self.session_dir, ignore_errors=True)
+
+    def discard(self) -> None:
+        """Remove the session directory even for persistent stores."""
         shutil.rmtree(self.session_dir, ignore_errors=True)

@@ -1,0 +1,123 @@
+{
+  "schemaVersion": 1,
+  "version": "1.0.0",
+  "license": "MIT",
+  "generator": "scripts/generate_benchmark_corpus.py",
+  "cases": [
+    {
+      "id": "document",
+      "category": "document",
+      "image": "document.png",
+      "corners": [
+        [
+          110,
+          50
+        ],
+        [
+          505,
+          72
+        ],
+        [
+          540,
+          420
+        ],
+        [
+          82,
+          400
+        ]
+      ]
+    },
+    {
+      "id": "whiteboard",
+      "category": "whiteboard",
+      "image": "whiteboard.png",
+      "corners": [
+        [
+          50,
+          90
+        ],
+        [
+          590,
+          60
+        ],
+        [
+          610,
+          410
+        ],
+        [
+          35,
+          430
+        ]
+      ]
+    },
+    {
+      "id": "photograph",
+      "category": "photograph",
+      "image": "photograph.png",
+      "corners": [
+        [
+          100,
+          75
+        ],
+        [
+          550,
+          110
+        ],
+        [
+          520,
+          405
+        ],
+        [
+          75,
+          380
+        ]
+      ]
+    },
+    {
+      "id": "book",
+      "category": "book",
+      "image": "book.png",
+      "corners": [
+        [
+          55,
+          45
+        ],
+        [
+          575,
+          55
+        ],
+        [
+          610,
+          430
+        ],
+        [
+          28,
+          420
+        ]
+      ]
+    },
+    {
+      "id": "difficult-lighting",
+      "category": "difficult_lighting",
+      "image": "difficult-lighting.png",
+      "corners": [
+        [
+          130,
+          55
+        ],
+        [
+          520,
+          80
+        ],
+        [
+          570,
+          410
+        ],
+        [
+          85,
+          430
+        ]
+      ]
+    }
+  ]
+}

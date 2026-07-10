@@ -13,7 +13,7 @@ import customtkinter as ctk
 import cv2
 import numpy as np
 import tkinter as tk
-from PIL import Image, ImageTk
+from PIL import Image, ImageGrab, ImageTk
 from tkinter import filedialog, messagebox
 
 from uniscan.export import (
@@ -38,10 +38,22 @@ from uniscan.core.scanner_adapter import (
     scan_with_document_detector,
 )
 from uniscan.core.spread import split_spread_accurate
+from uniscan.diagnostics import run_diagnostics
 from uniscan.io import CameraService
-from uniscan.io.loaders import IMG_EXTS, PDF_EXTS, imread_unicode, list_supported_in_folder, load_input_items
-from uniscan.session import CaptureSession
+from uniscan.io.loaders import (
+    IMG_EXTS,
+    PDF_EXTS,
+    imread_unicode,
+    list_supported_in_folder,
+    load_input_items,
+)
+from uniscan.session import create_persistent_session, default_autosave_path, load_or_create_session
 from uniscan.ui.camera_health import camera_health_state
+from uniscan.ui.import_sources import (
+    clipboard_file_paths,
+    clipboard_image_to_bgr,
+    paths_from_tk_drop,
+)
 from uniscan.ui.live_detect import DEFAULT_LIVE_BACKEND, LIVE_BACKEND_CHOICES, LiveContourDetector
 from uniscan.ui.overlays import draw_quad_overlay
 
@@ -69,7 +81,14 @@ class UnifiedScanApp(ctk.CTk):
         self.geometry("1280x800")
         self.minsize(1024, 680)
 
-        self.session = CaptureSession()
+        self.autosave_path = default_autosave_path()
+        self._restore_error: str | None = None
+        try:
+            self.session, self._session_restored = load_or_create_session(self.autosave_path)
+        except ValueError as exc:
+            self._restore_error = str(exc)
+            self.session = create_persistent_session(self.autosave_path.parent)
+            self._session_restored = False
         self.camera: CameraService | None = None
         self.preview_job: str | None = None
         self.preview_photo: ctk.CTkImage | None = None
@@ -79,7 +98,12 @@ class UnifiedScanApp(ctk.CTk):
         self.corner_editor_window: ctk.CTkToplevel | None = None
         self.live_detector = LiveContourDetector(backend=DEFAULT_LIVE_BACKEND)
 
-        self.status_var = tk.StringVar(value="Ready")
+        initial_status = "Ready"
+        if self._session_restored:
+            initial_status = f"Restored {len(self.session)} autosaved page(s)."
+        elif self._restore_error:
+            initial_status = f"Autosave restore skipped: {self._restore_error}"
+        self.status_var = tk.StringVar(value=initial_status)
         self.camera_health_var = tk.StringVar(value="Camera: Closed")
         self.camera_index_var = tk.IntVar(value=0)
         self.camera_shots_var = tk.IntVar(value=1)
@@ -93,6 +117,7 @@ class UnifiedScanApp(ctk.CTk):
         self.preprocess_brightness_var = tk.IntVar(value=10)
         self.preprocess_denoise_var = tk.IntVar(value=4)
         self.preprocess_threshold_var = tk.IntVar(value=170)
+        self.preprocess_illumination_var = tk.BooleanVar(value=False)
         self.import_folder_var = tk.StringVar()
         self.import_files_var = tk.StringVar()
         self.import_pdf_dpi_var = tk.IntVar(value=300)
@@ -109,15 +134,20 @@ class UnifiedScanApp(ctk.CTk):
         self.job_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.job_cancel_event = threading.Event()
         self.job_thread: threading.Thread | None = None
+        self.autosave_job: str | None = None
         self.tab_import_name = "1. Import"
         self.tab_scan_name = "2. Scan"
         self.tab_review_name = "3. Review"
         self.tab_export_name = "4. Export"
 
         self._build_ui()
+        self._enable_drag_drop()
         self.on_lens_mode_change(self.lens_mode_var.get())
         self._update_camera_health()
+        self.status_var.set(initial_status)
         self.after(120, self._poll_job_queue)
+        self.after(500, self._start_startup_diagnostics)
+        self.autosave_job = self.after(2000, self._autosave_tick)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self) -> None:
@@ -166,13 +196,17 @@ class UnifiedScanApp(ctk.CTk):
         controls.grid(row=0, column=0, sticky="ns", padx=(10, 8), pady=10)
 
         ctk.CTkLabel(controls, text="Camera index").pack(anchor="w", padx=10, pady=(10, 4))
-        self.camera_index_entry = ctk.CTkEntry(controls, textvariable=self.camera_index_var, width=120)
+        self.camera_index_entry = ctk.CTkEntry(
+            controls, textvariable=self.camera_index_var, width=120
+        )
         self.camera_index_entry.pack(anchor="w", padx=10)
 
         row_open = ctk.CTkFrame(controls, fg_color="transparent")
         row_open.pack(fill=ctk.X, padx=10, pady=(8, 2))
         ctk.CTkButton(row_open, text="Open", width=90, command=self.open_camera).pack(side=ctk.LEFT)
-        ctk.CTkButton(row_open, text="Close", width=90, command=self.close_camera).pack(side=ctk.LEFT, padx=6)
+        ctk.CTkButton(row_open, text="Close", width=90, command=self.close_camera).pack(
+            side=ctk.LEFT, padx=6
+        )
         self.camera_health_label = ctk.CTkLabel(
             controls,
             textvariable=self.camera_health_var,
@@ -204,9 +238,9 @@ class UnifiedScanApp(ctk.CTk):
 
         row_preview = ctk.CTkFrame(controls, fg_color="transparent")
         row_preview.pack(fill=ctk.X, padx=10, pady=(6, 4))
-        ctk.CTkButton(row_preview, text="Start Preview", width=120, command=self.start_preview).pack(
-            side=ctk.LEFT
-        )
+        ctk.CTkButton(
+            row_preview, text="Start Preview", width=120, command=self.start_preview
+        ).pack(side=ctk.LEFT)
         ctk.CTkButton(row_preview, text="Stop", width=70, command=self.stop_preview).pack(
             side=ctk.LEFT,
             padx=6,
@@ -214,16 +248,24 @@ class UnifiedScanApp(ctk.CTk):
 
         row_capture = ctk.CTkFrame(controls, fg_color="transparent")
         row_capture.pack(fill=ctk.X, padx=10, pady=(4, 10))
-        ctk.CTkButton(row_capture, text="Capture One", width=120, command=self.capture_one).pack(side=ctk.LEFT)
-        ctk.CTkButton(row_capture, text="Capture Burst", width=120, command=self.capture_burst).pack(
+        ctk.CTkButton(row_capture, text="Capture One", width=120, command=self.capture_one).pack(
+            side=ctk.LEFT
+        )
+        ctk.CTkButton(
+            row_capture, text="Capture Burst", width=120, command=self.capture_burst
+        ).pack(
             side=ctk.LEFT,
             padx=6,
         )
-        ctk.CTkButton(row_capture, text="Review", width=80, command=self.go_to_review_tab).pack(side=ctk.LEFT)
+        ctk.CTkButton(row_capture, text="Review", width=80, command=self.go_to_review_tab).pack(
+            side=ctk.LEFT
+        )
 
         live_edge_box = ctk.CTkFrame(controls)
         live_edge_box.pack(fill=ctk.X, padx=10, pady=(8, 4))
-        ctk.CTkLabel(live_edge_box, text="Live edge detection").pack(anchor="w", padx=8, pady=(6, 2))
+        ctk.CTkLabel(live_edge_box, text="Live edge detection").pack(
+            anchor="w", padx=8, pady=(6, 2)
+        )
         ctk.CTkCheckBox(
             live_edge_box,
             text="Show document boundaries",
@@ -277,7 +319,9 @@ class UnifiedScanApp(ctk.CTk):
 
         row_a = ctk.CTkFrame(left, fg_color="transparent")
         row_a.pack(fill=ctk.X, padx=10, pady=(0, 4))
-        ctk.CTkButton(row_a, text="Move Up", width=110, command=self.move_selected_up).pack(side=ctk.LEFT)
+        ctk.CTkButton(row_a, text="Move Up", width=110, command=self.move_selected_up).pack(
+            side=ctk.LEFT
+        )
         ctk.CTkButton(row_a, text="Move Down", width=110, command=self.move_selected_down).pack(
             side=ctk.LEFT,
             padx=6,
@@ -285,7 +329,9 @@ class UnifiedScanApp(ctk.CTk):
 
         row_b = ctk.CTkFrame(left, fg_color="transparent")
         row_b.pack(fill=ctk.X, padx=10, pady=(0, 4))
-        ctk.CTkButton(row_b, text="Select All", width=110, command=self.select_all_pages).pack(side=ctk.LEFT)
+        ctk.CTkButton(row_b, text="Select All", width=110, command=self.select_all_pages).pack(
+            side=ctk.LEFT
+        )
         ctk.CTkButton(row_b, text="Clear Sel", width=110, command=self.clear_page_selection).pack(
             side=ctk.LEFT,
             padx=6,
@@ -293,8 +339,12 @@ class UnifiedScanApp(ctk.CTk):
 
         row_c = ctk.CTkFrame(left, fg_color="transparent")
         row_c.pack(fill=ctk.X, padx=10, pady=(0, 4))
-        ctk.CTkButton(row_c, text="Delete Sel", width=110, command=self.delete_selected_pages).pack(side=ctk.LEFT)
-        ctk.CTkButton(row_c, text="Refresh", width=110, command=self.refresh_page_list).pack(side=ctk.LEFT, padx=6)
+        ctk.CTkButton(row_c, text="Delete Sel", width=110, command=self.delete_selected_pages).pack(
+            side=ctk.LEFT
+        )
+        ctk.CTkButton(row_c, text="Refresh", width=110, command=self.refresh_page_list).pack(
+            side=ctk.LEFT, padx=6
+        )
 
         row_d = ctk.CTkFrame(left, fg_color="transparent")
         row_d.pack(fill=ctk.X, padx=10, pady=(0, 4))
@@ -304,34 +354,42 @@ class UnifiedScanApp(ctk.CTk):
             width=110,
             command=self.open_manual_corners_editor,
         ).pack(side=ctk.LEFT)
-        ctk.CTkButton(row_d, text="Auto Crop...", width=110, command=self.open_auto_crop_editor).pack(
+        ctk.CTkButton(
+            row_d, text="Auto Crop...", width=110, command=self.open_auto_crop_editor
+        ).pack(
             side=ctk.LEFT,
             padx=6,
         )
-        ctk.CTkButton(row_d, text="Replace Sel...", width=110, command=self.replace_selected_page_from_file).pack(
+        ctk.CTkButton(
+            row_d, text="Replace Sel...", width=110, command=self.replace_selected_page_from_file
+        ).pack(
             side=ctk.LEFT,
             padx=6,
         )
 
         row_e = ctk.CTkFrame(left, fg_color="transparent")
         row_e.pack(fill=ctk.X, padx=10, pady=(0, 4))
-        ctk.CTkButton(row_e, text="Rotate Left", width=110, command=self.rotate_selected_left).pack(side=ctk.LEFT)
-        ctk.CTkButton(row_e, text="Rotate Right", width=110, command=self.rotate_selected_right).pack(
+        ctk.CTkButton(row_e, text="Rotate Left", width=110, command=self.rotate_selected_left).pack(
+            side=ctk.LEFT
+        )
+        ctk.CTkButton(
+            row_e, text="Rotate Right", width=110, command=self.rotate_selected_right
+        ).pack(
             side=ctk.LEFT,
             padx=6,
         )
 
         row_f = ctk.CTkFrame(left, fg_color="transparent")
         row_f.pack(fill=ctk.X, padx=10, pady=(0, 4))
-        ctk.CTkButton(row_f, text="Auto Deskew Sel", width=226, command=self.auto_deskew_selected).pack(
-            side=ctk.LEFT
-        )
+        ctk.CTkButton(
+            row_f, text="Auto Deskew Sel", width=226, command=self.auto_deskew_selected
+        ).pack(side=ctk.LEFT)
 
         row_g = ctk.CTkFrame(left, fg_color="transparent")
         row_g.pack(fill=ctk.X, padx=10, pady=(0, 4))
-        ctk.CTkButton(row_g, text="Retake Cam", width=226, command=self.retake_selected_page_from_camera).pack(
-            side=ctk.LEFT
-        )
+        ctk.CTkButton(
+            row_g, text="Retake Cam", width=226, command=self.retake_selected_page_from_camera
+        ).pack(side=ctk.LEFT)
 
         row_h = ctk.CTkFrame(left, fg_color="transparent")
         row_h.pack(fill=ctk.X, padx=10, pady=(0, 4))
@@ -420,7 +478,9 @@ class UnifiedScanApp(ctk.CTk):
         before_frame.grid(row=0, column=0, sticky="nsew", padx=(8, 4), pady=8)
         before_frame.grid_rowconfigure(1, weight=1)
         before_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(before_frame, text="Before (Original)").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
+        ctk.CTkLabel(before_frame, text="Before (Original)").grid(
+            row=0, column=0, sticky="w", padx=8, pady=(8, 4)
+        )
         self.page_preview_before_label = ctk.CTkLabel(before_frame, text="No page selected")
         self.page_preview_before_label.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
 
@@ -438,16 +498,55 @@ class UnifiedScanApp(ctk.CTk):
     def _on_close(self) -> None:
         self.stop_preview()
         self.job_cancel_event.set()
-        if self.review_processing_window is not None and self.review_processing_window.winfo_exists():
+        if (
+            self.review_processing_window is not None
+            and self.review_processing_window.winfo_exists()
+        ):
             self.review_processing_window.destroy()
             self.review_processing_window = None
         if self.camera is not None:
             self.camera.release()
-        self.session.close()
+        if self.autosave_job is not None:
+            self.after_cancel(self.autosave_job)
+            self.autosave_job = None
+        try:
+            if len(self.session):
+                self.session.save_manifest(self.autosave_path)
+                self.session.close(preserve=True)
+            else:
+                self.autosave_path.unlink(missing_ok=True)
+                self.session.close(preserve=False)
+        except Exception:
+            self.session.store.close()
         self.destroy()
 
     def _set_status(self, text: str) -> None:
         self.status_var.set(text)
+
+    def _autosave_tick(self) -> None:
+        try:
+            if len(self.session):
+                self.session.save_manifest(self.autosave_path)
+            else:
+                self.autosave_path.unlink(missing_ok=True)
+        except Exception as exc:
+            self._set_status(f"Autosave failed: {exc}")
+        finally:
+            if self.winfo_exists():
+                self.autosave_job = self.after(2000, self._autosave_tick)
+
+    def _enable_drag_drop(self) -> None:
+        try:
+            from tkinterdnd2 import DND_FILES, TkinterDnD
+
+            TkinterDnD._require(self)
+            target = getattr(self.import_files_entry, "_entry", self.import_files_entry)
+            TkinterDnD.DnDWrapper.drop_target_register(target, DND_FILES)
+            TkinterDnD.DnDWrapper.dnd_bind(target, "<<Drop>>", self._on_drop_files)
+        except Exception as exc:
+            self._drag_drop_error = str(exc)
+        else:
+            self._drag_drop_error = None
 
     def _update_camera_health(self, error_text: str | None = None) -> None:
         state = camera_health_state(
@@ -505,7 +604,9 @@ class UnifiedScanApp(ctk.CTk):
         self._sync_lens_mode_from_controls()
         self.update_page_preview()
 
-    def _set_job_display(self, *, stage: str | None = None, current: str | None = None, progress: int | None = None) -> None:
+    def _set_job_display(
+        self, *, stage: str | None = None, current: str | None = None, progress: int | None = None
+    ) -> None:
         parts: list[str] = []
         if stage:
             parts.append(stage)
@@ -525,7 +626,9 @@ class UnifiedScanApp(ctk.CTk):
         self.job_cancel_event.clear()
         self._set_job_display(stage=name, current="Starting...", progress=0)
 
-        def emit(stage: str | None = None, current: str | None = None, progress: int | None = None) -> None:
+        def emit(
+            stage: str | None = None, current: str | None = None, progress: int | None = None
+        ) -> None:
             self.job_queue.put(("progress", (stage, current, progress)))
 
         def run() -> None:
@@ -555,7 +658,9 @@ class UnifiedScanApp(ctk.CTk):
                     try:
                         on_done(result)
                     finally:
-                        self._set_job_display(stage=f"{name}: done", current="Completed", progress=100)
+                        self._set_job_display(
+                            stage=f"{name}: done", current="Completed", progress=100
+                        )
                 elif kind == "error":
                     name, text = payload
                     if "Cancelled by user." in text:
@@ -567,10 +672,23 @@ class UnifiedScanApp(ctk.CTk):
                         self._set_job_display(stage=f"{name}: error", current=text, progress=0)
                         self._set_status(f"{name} failed")
                         messagebox.showerror(f"{name} Error", text)
+                elif kind == "diagnostics":
+                    report = payload
+                    if not report.ok:
+                        failed = ", ".join(check.name for check in report.checks if not check.ok)
+                        self._set_status(
+                            f"Startup diagnostics failed: {failed}. Run 'uniscan doctor'."
+                        )
         except queue.Empty:
             pass
         finally:
             self.after(40, self._poll_job_queue)
+
+    def _start_startup_diagnostics(self) -> None:
+        def run() -> None:
+            self.job_queue.put(("diagnostics", run_diagnostics()))
+
+        threading.Thread(target=run, daemon=True, name="uniscan-diagnostics").start()
 
     def cancel_current_job(self) -> None:
         if self.job_thread is None or not self.job_thread.is_alive():
@@ -679,13 +797,16 @@ class UnifiedScanApp(ctk.CTk):
     def _current_preprocess_settings(self) -> PreprocessSettings:
         preset_name = self.preprocess_preset_var.get()
         preset = PREPROCESS_PRESETS.get(preset_name, PREPROCESS_PRESETS["Custom"])
-        apply_threshold = bool(preset.apply_threshold or self.postprocess_var.get() == "Black and White")
+        apply_threshold = bool(
+            preset.apply_threshold or self.postprocess_var.get() == "Black and White"
+        )
         return PreprocessSettings(
             contrast=float(self.preprocess_contrast_var.get()),
             brightness=int(self.preprocess_brightness_var.get()),
             denoise=int(self.preprocess_denoise_var.get()),
             threshold=int(self.preprocess_threshold_var.get()),
             apply_threshold=apply_threshold,
+            correct_illumination=bool(self.preprocess_illumination_var.get()),
         )
 
     def _apply_postprocess(self, image: np.ndarray) -> np.ndarray:
@@ -709,6 +830,7 @@ class UnifiedScanApp(ctk.CTk):
         # The preview may have been resized — scale the contour accordingly.
         full_raw = entry.raw_image if self.lightweight_preview_var.get() else raw_image
         from uniscan.ui.overlays import scale_contour as _scale_contour
+
         scaled = _scale_contour(
             contour,
             src_shape=full_raw.shape[:2],
@@ -873,11 +995,15 @@ class UnifiedScanApp(ctk.CTk):
         def _set_resolution(res_string: str) -> None:
             match = re.match(r"^(\d+)x(\d+)$", res_string.strip())
             if match is None:
-                messagebox.showerror("Resolution Error", "Resolution must be on the form <width>x<height>.")
+                messagebox.showerror(
+                    "Resolution Error", "Resolution must be on the form <width>x<height>."
+                )
                 return
             resolution = (int(match.group(1)), int(match.group(2)))
             if self.camera is None:
-                self.camera = CameraService(index=int(self.camera_index_var.get()), resolution=resolution)
+                self.camera = CameraService(
+                    index=int(self.camera_index_var.get()), resolution=resolution
+                )
                 self.camera.open()
             else:
                 self.camera.set_resolution(resolution)
@@ -936,13 +1062,17 @@ class UnifiedScanApp(ctk.CTk):
         row_folder.grid_columnconfigure(0, weight=1)
         self.import_folder_entry = ctk.CTkEntry(row_folder, textvariable=self.import_folder_var)
         self.import_folder_entry.grid(row=0, column=0, sticky="ew", padx=(10, 8), pady=10)
-        ctk.CTkButton(row_folder, text="Folder...", width=100, command=self.choose_import_folder).grid(
+        ctk.CTkButton(
+            row_folder, text="Folder...", width=100, command=self.choose_import_folder
+        ).grid(
             row=0,
             column=1,
             padx=(0, 6),
             pady=10,
         )
-        ctk.CTkButton(row_folder, text="Import Folder", width=130, command=self.import_from_folder).grid(
+        ctk.CTkButton(
+            row_folder, text="Import Folder", width=130, command=self.import_from_folder
+        ).grid(
             row=0,
             column=2,
             padx=(0, 10),
@@ -954,13 +1084,17 @@ class UnifiedScanApp(ctk.CTk):
         row_files.grid_columnconfigure(0, weight=1)
         self.import_files_entry = ctk.CTkEntry(row_files, textvariable=self.import_files_var)
         self.import_files_entry.grid(row=0, column=0, sticky="ew", padx=(10, 8), pady=10)
-        ctk.CTkButton(row_files, text="Files... (multi)", width=110, command=self.choose_import_files).grid(
+        ctk.CTkButton(
+            row_files, text="Files... (multi)", width=110, command=self.choose_import_files
+        ).grid(
             row=0,
             column=1,
             padx=(0, 6),
             pady=10,
         )
-        ctk.CTkButton(row_files, text="Import Files", width=130, command=self.import_from_files).grid(
+        ctk.CTkButton(
+            row_files, text="Import Files", width=130, command=self.import_from_files
+        ).grid(
             row=0,
             column=2,
             padx=(0, 10),
@@ -988,12 +1122,21 @@ class UnifiedScanApp(ctk.CTk):
 
         row_actions = ctk.CTkFrame(tab)
         row_actions.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 10))
-        ctk.CTkButton(row_actions, text="Import from Listed Paths", command=self.import_from_files).pack(
+        ctk.CTkButton(
+            row_actions, text="Import from Listed Paths", command=self.import_from_files
+        ).pack(
             side=ctk.LEFT,
             padx=10,
             pady=10,
         )
-        ctk.CTkButton(row_actions, text="Review", command=self.go_to_review_tab).pack(side=ctk.LEFT, padx=0, pady=10)
+        ctk.CTkButton(row_actions, text="Review", command=self.go_to_review_tab).pack(
+            side=ctk.LEFT, padx=0, pady=10
+        )
+        ctk.CTkButton(
+            row_actions,
+            text="Paste Clipboard",
+            command=self.import_from_clipboard,
+        ).pack(side=ctk.LEFT, padx=8, pady=10)
 
     def _build_export_tab(self, tab: ctk.CTkFrame) -> None:
         tab.grid_columnconfigure(0, weight=1)
@@ -1024,7 +1167,9 @@ class UnifiedScanApp(ctk.CTk):
             padx=(10, 8),
             pady=10,
         )
-        ctk.CTkButton(row_pdf, text="Save PDF...", width=120, command=self.choose_export_pdf_path).grid(
+        ctk.CTkButton(
+            row_pdf, text="Save PDF...", width=120, command=self.choose_export_pdf_path
+        ).grid(
             row=0,
             column=1,
             padx=(0, 6),
@@ -1047,7 +1192,9 @@ class UnifiedScanApp(ctk.CTk):
             padx=(10, 8),
             pady=10,
         )
-        ctk.CTkButton(row_files, text="Dir...", width=80, command=self.choose_export_directory).grid(
+        ctk.CTkButton(
+            row_files, text="Dir...", width=80, command=self.choose_export_directory
+        ).grid(
             row=0,
             column=1,
             padx=(0, 6),
@@ -1075,7 +1222,9 @@ class UnifiedScanApp(ctk.CTk):
         ).pack(fill=ctk.X, padx=10, pady=8)
 
     def _parse_import_files_text(self, raw_text: str) -> list[str]:
-        parts = [part.strip().strip('"') for part in re.split(r"[;\n\r]+", raw_text) if part.strip()]
+        parts = [
+            part.strip().strip('"') for part in re.split(r"[;\n\r]+", raw_text) if part.strip()
+        ]
         return parts
 
     def _normalize_selected_files(self, files: Iterable[str]) -> list[str]:
@@ -1110,6 +1259,38 @@ class UnifiedScanApp(ctk.CTk):
             self.import_selected_files = self._normalize_selected_files(files)
             self.import_files_var.set("\n".join(self.import_selected_files))
 
+    def _on_drop_files(self, event) -> str:
+        paths = paths_from_tk_drop(str(event.data), self.tk.splitlist)
+        self.import_selected_files = self._normalize_selected_files(map(str, paths))
+        self.import_files_var.set("\n".join(self.import_selected_files))
+        self._set_status(f"Dropped {len(paths)} path(s). Click Import Files to process them.")
+        return "break"
+
+    def import_from_clipboard(self) -> None:
+        try:
+            payload = ImageGrab.grabclipboard()
+            image = clipboard_image_to_bgr(payload)
+            if image is not None:
+                results = self._process_capture_frame(image, base_name="clipboard")
+                self._ingest_page_results(results)
+                self.refresh_page_list(keep_index=len(self.session) - 1)
+                self.go_to_review_tab()
+                self._set_status(f"Imported {len(results)} page(s) from clipboard image.")
+                return
+
+            paths = clipboard_file_paths(payload)
+            supported = [
+                path
+                for path in paths
+                if path.is_file() and path.suffix.lower() in (IMG_EXTS | PDF_EXTS)
+            ]
+            if not supported:
+                raise RuntimeError("Clipboard does not contain an image or supported files.")
+            self._import_paths(paths=supported)
+        except Exception as exc:
+            messagebox.showerror("Clipboard Import Error", str(exc))
+            self._set_status("Clipboard import failed")
+
     def import_from_folder(self) -> None:
         try:
             folder = Path(self.import_folder_var.get().strip())
@@ -1130,8 +1311,12 @@ class UnifiedScanApp(ctk.CTk):
             paths = [Path(item) for item in raw]
             missing = [path for path in paths if not path.exists() or not path.is_file()]
             if missing:
-                raise RuntimeError("Some selected files do not exist:\n" + "\n".join(map(str, missing)))
-            unsupported = [path for path in paths if path.suffix.lower() not in (IMG_EXTS | PDF_EXTS)]
+                raise RuntimeError(
+                    "Some selected files do not exist:\n" + "\n".join(map(str, missing))
+                )
+            unsupported = [
+                path for path in paths if path.suffix.lower() not in (IMG_EXTS | PDF_EXTS)
+            ]
             if unsupported:
                 raise RuntimeError("Unsupported file type(s):\n" + "\n".join(map(str, unsupported)))
             self._import_paths(paths=paths)
@@ -1236,16 +1421,16 @@ class UnifiedScanApp(ctk.CTk):
     def update_page_preview(self) -> None:
         selected = self.page_listbox.curselection()
         if len(selected) != 1:
-            self.page_preview_before_label.configure(image=None, text="Select one page to preview")
-            self.page_preview_after_label.configure(image=None, text="Select one page to preview")
+            self._clear_preview_label(self.page_preview_before_label)
+            self._clear_preview_label(self.page_preview_after_label)
             self.page_preview_before_photo = None
             self.page_preview_after_photo = None
             return
 
         index = selected[0]
         if index < 0 or index >= len(self.session.entries):
-            self.page_preview_before_label.configure(image=None, text="Select one page to preview")
-            self.page_preview_after_label.configure(image=None, text="Select one page to preview")
+            self._clear_preview_label(self.page_preview_before_label)
+            self._clear_preview_label(self.page_preview_after_label)
             self.page_preview_before_photo = None
             self.page_preview_after_photo = None
             return
@@ -1255,7 +1440,11 @@ class UnifiedScanApp(ctk.CTk):
         try:
             after = self._review_after_image(entry, before)
         except Exception:
-            after = entry.preview_current_image if self.lightweight_preview_var.get() else entry.current_image
+            after = (
+                entry.preview_current_image
+                if self.lightweight_preview_var.get()
+                else entry.current_image
+            )
 
         before_photo = self._to_ctk_photo_for_label(before, self.page_preview_before_label)
         after_photo = self._to_ctk_photo_for_label(after, self.page_preview_after_label)
@@ -1264,6 +1453,12 @@ class UnifiedScanApp(ctk.CTk):
         self.page_preview_after_label.configure(image=after_photo, text="")
         self.page_preview_before_photo = before_photo
         self.page_preview_after_photo = after_photo
+
+    @staticmethod
+    def _clear_preview_label(label: ctk.CTkLabel) -> None:
+        # customtkinter 5.2 leaves the old Tcl image name behind for image=None.
+        label._label.configure(image="")
+        label.configure(image=None, text="Select one page to preview")
 
     def _single_selected_index(self) -> int | None:
         selected = self.page_listbox.curselection()
@@ -1434,7 +1629,9 @@ class UnifiedScanApp(ctk.CTk):
             self._set_status("Select page(s) for corner editing.")
             return
 
-        entries = [self.session.entries[idx] for idx in indices if 0 <= idx < len(self.session.entries)]
+        entries = [
+            self.session.entries[idx] for idx in indices if 0 <= idx < len(self.session.entries)
+        ]
         if not entries:
             self._set_status("No valid pages available for corner editing.")
             return
@@ -1475,11 +1672,15 @@ class UnifiedScanApp(ctk.CTk):
             "scale_x": 1.0,
             "scale_y": 1.0,
             "points": self._default_corner_points(
-                entries[0].preview_raw_image if self.lightweight_preview_var.get() else entries[0].raw_image
+                entries[0].preview_raw_image
+                if self.lightweight_preview_var.get()
+                else entries[0].raw_image
             ),
         }
 
-        def _map_display_points_to_source(points: np.ndarray, source_shape: tuple[int, int], display_shape: tuple[int, int]) -> np.ndarray:
+        def _map_display_points_to_source(
+            points: np.ndarray, source_shape: tuple[int, int], display_shape: tuple[int, int]
+        ) -> np.ndarray:
             source_h, source_w = source_shape
             display_h, display_w = display_shape
             mapped = np.array(points, dtype=np.float32).copy()
@@ -1492,7 +1693,9 @@ class UnifiedScanApp(ctk.CTk):
             return entry_index, self.session.entries[entry_index]
 
         def _display_image_for(entry) -> np.ndarray:
-            return entry.preview_raw_image if self.lightweight_preview_var.get() else entry.raw_image
+            return (
+                entry.preview_raw_image if self.lightweight_preview_var.get() else entry.raw_image
+            )
 
         def _init_points_for(entry) -> np.ndarray:
             cached = points_by_entry.get(entry.entry_id)
@@ -1525,21 +1728,40 @@ class UnifiedScanApp(ctk.CTk):
             points = view_state["points"]
             scale_x = float(view_state["scale_x"])
             scale_y = float(view_state["scale_y"])
-            display_w = int(view_state["display_shape"][1]) if view_state["display_shape"] is not None else 1
-            display_h = int(view_state["display_shape"][0]) if view_state["display_shape"] is not None else 1
+            display_w = (
+                int(view_state["display_shape"][1])
+                if view_state["display_shape"] is not None
+                else 1
+            )
+            display_h = (
+                int(view_state["display_shape"][0])
+                if view_state["display_shape"] is not None
+                else 1
+            )
             line_points = []
             for pt in points:
                 x = float(pt[0]) / max(scale_x, 1e-6)
                 y = float(pt[1]) / max(scale_y, 1e-6)
                 line_points.extend([x, y])
-            canvas.create_line(*line_points, line_points[0], line_points[1], fill="#00ff66", width=2, tags="overlay")
+            canvas.create_line(
+                *line_points,
+                line_points[0],
+                line_points[1],
+                fill="#00ff66",
+                width=2,
+                tags="overlay",
+            )
             for idx_p, pt in enumerate(points):
                 sx = float(pt[0]) / max(scale_x, 1e-6)
                 sy = float(pt[1]) / max(scale_y, 1e-6)
                 if 0 <= sx <= display_w and 0 <= sy <= display_h:
                     r = 7
-                    canvas.create_oval(sx - r, sy - r, sx + r, sy + r, fill="#ff3355", outline="", tags="overlay")
-                    canvas.create_text(sx + 14, sy - 10, text=labels[idx_p], fill="#ffffff", tags="overlay")
+                    canvas.create_oval(
+                        sx - r, sy - r, sx + r, sy + r, fill="#ff3355", outline="", tags="overlay"
+                    )
+                    canvas.create_text(
+                        sx + 14, sy - 10, text=labels[idx_p], fill="#ffffff", tags="overlay"
+                    )
 
         def _load_current_entry() -> None:
             entry_index, entry = _current_entry()
@@ -1552,8 +1774,10 @@ class UnifiedScanApp(ctk.CTk):
             source_h, source_w = source_image.shape[:2]
             view_h = max(1, int(display_h))
             view_w = max(1, int(display_w))
-            rgb = cv2.cvtColor(display_image, cv2.COLOR_GRAY2RGB) if len(display_image.shape) == 2 else cv2.cvtColor(
-                display_image, cv2.COLOR_BGR2RGB
+            rgb = (
+                cv2.cvtColor(display_image, cv2.COLOR_GRAY2RGB)
+                if len(display_image.shape) == 2
+                else cv2.cvtColor(display_image, cv2.COLOR_BGR2RGB)
             )
             tk_img = ImageTk.PhotoImage(Image.fromarray(rgb))
             canvas.configure(width=view_w, height=view_h)
@@ -1610,14 +1834,18 @@ class UnifiedScanApp(ctk.CTk):
         def _reset():
             source_h, source_w = view_state["source_shape"]
             points = view_state["points"]
-            points[:] = self._default_corner_points(np.zeros((source_h, source_w, 3), dtype=np.uint8))
+            points[:] = self._default_corner_points(
+                np.zeros((source_h, source_w, 3), dtype=np.uint8)
+            )
             _redraw()
 
         def _auto_detect_current():
             entry_index, entry = _current_entry()
             detected = self._detect_corner_points(entry.raw_image)
             if detected is None:
-                messagebox.showwarning("Auto Crop", f"Document boundaries were not detected for {entry.name}.")
+                messagebox.showwarning(
+                    "Auto Crop", f"Document boundaries were not detected for {entry.name}."
+                )
                 return
             points = np.asarray(detected, dtype=np.float32).reshape(-1, 2).copy()
             points_by_entry[entry.entry_id] = points
@@ -1655,7 +1883,11 @@ class UnifiedScanApp(ctk.CTk):
                         if detected is not None:
                             points = np.asarray(detected, dtype=np.float32).reshape(-1, 2).copy()
                         elif entry.detected_contour is not None:
-                            points = np.asarray(entry.detected_contour, dtype=np.float32).reshape(-1, 2).copy()
+                            points = (
+                                np.asarray(entry.detected_contour, dtype=np.float32)
+                                .reshape(-1, 2)
+                                .copy()
+                            )
                         else:
                             points = self._default_corner_points(entry.raw_image)
                     _apply_entry(indices[idx_offset], entry, points)
@@ -1681,7 +1913,9 @@ class UnifiedScanApp(ctk.CTk):
         controls = ctk.CTkFrame(win)
         controls.pack(fill=ctk.X, padx=12, pady=(0, 12))
         ctk.CTkButton(controls, text="Prev", width=90, command=_prev_page).pack(side=ctk.LEFT)
-        ctk.CTkButton(controls, text="Next", width=90, command=_next_page).pack(side=ctk.LEFT, padx=6)
+        ctk.CTkButton(controls, text="Next", width=90, command=_next_page).pack(
+            side=ctk.LEFT, padx=6
+        )
         ctk.CTkButton(controls, text="Auto Detect", width=110, command=_auto_detect_current).pack(
             side=ctk.LEFT,
             padx=6,
@@ -1691,7 +1925,9 @@ class UnifiedScanApp(ctk.CTk):
             side=ctk.LEFT,
             padx=6,
         )
-        ctk.CTkButton(controls, text="Apply All", width=100, command=_apply_all).pack(side=ctk.LEFT, padx=6)
+        ctk.CTkButton(controls, text="Apply All", width=100, command=_apply_all).pack(
+            side=ctk.LEFT, padx=6
+        )
         ctk.CTkButton(
             controls,
             text="Close",
@@ -1721,7 +1957,9 @@ class UnifiedScanApp(ctk.CTk):
         self._open_corner_editor_dialog(indices, auto_detect=True)
 
     def _reprocess_entry_from_original(self, entry) -> None:
-        postprocess_fn = POSTPROCESSING_OPTIONS.get(self.postprocess_var.get(), POSTPROCESSING_OPTIONS["None"])
+        postprocess_fn = POSTPROCESSING_OPTIONS.get(
+            self.postprocess_var.get(), POSTPROCESSING_OPTIONS["None"]
+        )
         settings = self._current_preprocess_settings()
         base = postprocess_fn(entry.original_image)
         entry.current_image = apply_enhancements(base, settings)
@@ -1815,7 +2053,9 @@ class UnifiedScanApp(ctk.CTk):
             self.refresh_page_list(keep_index=indices[0])
             msg = f"Split {split_count} page(s) at the detected gutter."
             if untouched_count:
-                msg += f" {untouched_count} page(s) had no confident gutter and were left untouched."
+                msg += (
+                    f" {untouched_count} page(s) had no confident gutter and were left untouched."
+                )
             self._set_status(msg)
         except Exception as exc:
             messagebox.showerror("Split Spread Error", str(exc))
@@ -1843,7 +2083,10 @@ class UnifiedScanApp(ctk.CTk):
         self.update_page_preview()
 
     def open_review_processing_dialog(self) -> None:
-        if self.review_processing_window is not None and self.review_processing_window.winfo_exists():
+        if (
+            self.review_processing_window is not None
+            and self.review_processing_window.winfo_exists()
+        ):
             self.review_processing_window.lift()
             self.review_processing_window.focus()
             return
@@ -1893,7 +2136,9 @@ class UnifiedScanApp(ctk.CTk):
             command=self._on_review_processing_slider_change,
         ).grid(row=2, column=1, sticky="ew", padx=8, pady=4)
 
-        ctk.CTkLabel(body, text="B/W Threshold").grid(row=3, column=0, sticky="w", padx=8, pady=(4, 8))
+        ctk.CTkLabel(body, text="B/W Threshold").grid(
+            row=3, column=0, sticky="w", padx=8, pady=(4, 8)
+        )
         ctk.CTkSlider(
             body,
             from_=80,
@@ -1902,6 +2147,13 @@ class UnifiedScanApp(ctk.CTk):
             variable=self.preprocess_threshold_var,
             command=self._on_review_processing_slider_change,
         ).grid(row=3, column=1, sticky="ew", padx=8, pady=(4, 8))
+
+        ctk.CTkCheckBox(
+            body,
+            text="Correct uneven lighting (experimental)",
+            variable=self.preprocess_illumination_var,
+            command=self.update_page_preview,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
 
         def _on_close() -> None:
             self.review_processing_window = None
@@ -1915,7 +2167,9 @@ class UnifiedScanApp(ctk.CTk):
             command=lambda: self.on_preprocess_preset_change(self.preprocess_preset_var.get()),
             width=140,
         ).pack(side=ctk.LEFT)
-        ctk.CTkButton(actions, text="Close", command=_on_close, width=100).pack(side=ctk.LEFT, padx=8)
+        ctk.CTkButton(actions, text="Close", command=_on_close, width=100).pack(
+            side=ctk.LEFT, padx=8
+        )
 
         window.protocol("WM_DELETE_WINDOW", _on_close)
         window.attributes("-topmost", True)
@@ -2018,7 +2272,9 @@ class UnifiedScanApp(ctk.CTk):
             image_paths = [entry.current_path for entry in entries]
 
             def worker(emit, _is_cancelled):
-                emit(stage="Export files", current=f"Writing {len(image_paths)} page(s)", progress=10)
+                emit(
+                    stage="Export files", current=f"Writing {len(image_paths)} page(s)", progress=10
+                )
                 out_paths = export_image_paths_as_files(
                     image_paths,
                     output_dir=Path(path_raw),
@@ -2041,4 +2297,3 @@ def run_app() -> int:
     app = UnifiedScanApp()
     app.mainloop()
     return 0
-

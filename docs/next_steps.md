@@ -3,6 +3,23 @@
 This roadmap keeps UniScan focused on the pre-OCR stage: acquire pages, correct document
 geometry, clean images, and export images or a plain merged PDF.
 
+## Implementation status (2026-07-10)
+
+- Milestone 1 is implemented: headless PDF streaming, atomic output sets, detector policy,
+  structured reports, licensing, formatting, and binary cleanup.
+- Milestone 2 is implemented: Windows/Linux CI, wheel/model verification, deterministic camera
+  tests, 65% total coverage, and 81% non-GUI coverage.
+- Milestone 3 software work is implemented: crash recovery, cancellation coverage,
+  drag-and-drop, clipboard import, and a manual smoke checklist. Real-camera sign-off remains an
+  external release gate.
+- Milestone 4 is implemented: EXIF orientation, opt-in illumination correction, a generated MIT
+  corpus, and enforced Office Lens crop/corner/latency/fallback thresholds.
+- Milestone 5 engineering is implemented: startup diagnostics, versioned portable Windows ZIP,
+  frozen-runtime smoke tests, release automation, changelog, install/uninstall docs, and a
+  signing decision. Clean-machine and public Authenticode sign-off remain release gates.
+
+The next engineering roadmap is maintained in [`follow_up_plan.md`](follow_up_plan.md).
+
 ## Milestone 1 — Pipeline hardening (P0)
 
 ### 1. Stream multi-page PDFs page by page

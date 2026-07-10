@@ -2,29 +2,62 @@
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
 import tempfile
-from dataclasses import dataclass
+import time
+import uuid
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Sequence
 
 from uniscan.core.pipeline import PipelineOptions, process_loaded_items
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.preprocess import (
     PREPROCESS_PRESETS,
     apply_enhancements,
+    PreprocessSettings,
     resolve_lens_mode_profile,
+)
+from uniscan.core.scanner_adapter import (
+    DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
+    DETECTOR_BACKEND_CV_HYBRID,
+    DETECTOR_BACKEND_OFFICE_LENS_ONNX,
+    DETECTOR_BACKEND_PADDLEOCR_UVDOC,
 )
 from uniscan.export import export_image_paths_as_files, export_image_paths_as_pdf
 from uniscan.io import (
     IMG_EXTS,
     PDF_EXTS,
     imwrite_unicode,
+    iter_input_items,
     list_supported_in_folder,
-    load_input_items,
 )
 
 
 LENS_MODE_CHOICES = ("none", "document", "whiteboard", "photo", "b/w")
+DETECTOR_POLICY_CHOICES = ("auto", "office_lens_onnx", "cv_hybrid", "paddleocr_uvdoc")
+CancelCb = Callable[[], bool]
+
+_DETECTOR_POLICIES: dict[str, tuple[str, ...]] = {
+    "auto": DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
+    "office_lens_onnx": (DETECTOR_BACKEND_OFFICE_LENS_ONNX,),
+    "cv_hybrid": (DETECTOR_BACKEND_CV_HYBRID,),
+    "paddleocr_uvdoc": (DETECTOR_BACKEND_PADDLEOCR_UVDOC,),
+}
+
+
+@dataclass(slots=True, frozen=True)
+class PageRunReport:
+    """Detection and timing details for one exported page."""
+
+    index: int
+    name: str
+    detected: bool
+    backend: str | None
+    fallback_reason: str | None
+    duration_ms: float
 
 
 @dataclass(slots=True, frozen=True)
@@ -32,10 +65,19 @@ class BatchPipelineResult:
     """Summary of one completed headless conversion."""
 
     output_pdf: Path
+    report_path: Path
     input_files: tuple[Path, ...]
     image_outputs: tuple[Path, ...]
     total_pages: int
     detected_pages: int
+    fallback_pages: int
+    pages: tuple[PageRunReport, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class _StagedTarget:
+    staged: Path
+    target: Path
 
 
 def resolve_input_paths(inputs: Sequence[Path], *, output_pdf: Path) -> tuple[Path, ...]:
@@ -93,75 +135,297 @@ def _resolve_processing(mode: str):
     return POSTPROCESSING_OPTIONS[profile.postprocess_name], PREPROCESS_PRESETS[profile.preset_name]
 
 
+def _resolve_detector_policy(policy: str) -> tuple[str, ...]:
+    try:
+        return _DETECTOR_POLICIES[policy.strip().lower()]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported detector policy: {policy}") from exc
+
+
+def _validate_output_targets(
+    *,
+    output_pdf: Path,
+    report_path: Path,
+    images_dir: Path | None,
+    input_files: Sequence[Path],
+) -> None:
+    output_resolved = output_pdf.resolve()
+    report_resolved = report_path.resolve()
+    if output_resolved == report_resolved:
+        raise ValueError("PDF output and JSON report must use different paths.")
+    if images_dir is None:
+        return
+
+    images_resolved = images_dir.resolve()
+    if images_dir.exists() and not images_dir.is_dir():
+        raise ValueError("Images output path exists and is not a directory.")
+    if output_resolved.is_relative_to(images_resolved):
+        raise ValueError("PDF output cannot be inside the replaceable images directory.")
+    if report_resolved.is_relative_to(images_resolved):
+        raise ValueError("JSON report cannot be inside the replaceable images directory.")
+    if any(path.resolve().is_relative_to(images_resolved) for path in input_files):
+        raise ValueError("Images output directory cannot contain input files.")
+
+
+def _new_stage_file(target: Path) -> Path:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_path = tempfile.mkstemp(
+        prefix=f".{target.name}.stage-",
+        suffix=target.suffix,
+        dir=target.parent,
+    )
+    os.close(descriptor)
+    return Path(raw_path)
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
+def _publish_staged_targets(targets: Sequence[_StagedTarget]) -> None:
+    """Publish files/directories with rollback if any replacement fails."""
+    published: list[tuple[Path, Path | None]] = []
+    try:
+        for item in targets:
+            item.target.parent.mkdir(parents=True, exist_ok=True)
+            backup: Path | None = None
+            if item.target.exists():
+                backup = item.target.with_name(f".{item.target.name}.backup-{uuid.uuid4().hex}")
+                os.replace(item.target, backup)
+            try:
+                os.replace(item.staged, item.target)
+            except Exception:
+                if backup is not None and backup.exists():
+                    os.replace(backup, item.target)
+                raise
+            published.append((item.target, backup))
+    except Exception:
+        for target, backup in reversed(published):
+            _remove_path(target)
+            if backup is not None and backup.exists():
+                os.replace(backup, target)
+        raise
+    else:
+        for _target, backup in published:
+            if backup is not None:
+                _remove_path(backup)
+    finally:
+        for item in targets:
+            if item.staged.exists():
+                _remove_path(item.staged)
+
+
+def _report_payload(
+    *,
+    output_pdf: Path,
+    image_outputs: Sequence[Path],
+    input_files: Sequence[Path],
+    pages: Sequence[PageRunReport],
+    detect_document: bool,
+    detector_policy: str,
+    illumination_correction: bool,
+) -> dict[str, object]:
+    detected_pages = sum(page.detected for page in pages)
+    fallback_pages = sum(page.fallback_reason is not None for page in pages)
+    return {
+        "schemaVersion": 1,
+        "outputPdf": str(output_pdf),
+        "imageOutputs": [str(path) for path in image_outputs],
+        "inputFiles": [str(path) for path in input_files],
+        "detectionEnabled": detect_document,
+        "detectorPolicy": detector_policy,
+        "illuminationCorrection": illumination_correction,
+        "totalPages": len(pages),
+        "detectedPages": detected_pages,
+        "fallbackPages": fallback_pages,
+        "pages": [
+            {
+                "index": page.index,
+                "name": page.name,
+                "detected": page.detected,
+                "backend": page.backend,
+                "fallbackReason": page.fallback_reason,
+                "durationMs": page.duration_ms,
+            }
+            for page in pages
+        ],
+    }
+
+
+def _stage_outputs(
+    *,
+    staged_page_paths: Sequence[Path],
+    output_pdf: Path,
+    images_dir: Path | None,
+    image_format: str,
+    report_path: Path,
+    report_payload: dict[str, object],
+    dpi: int,
+) -> tuple[list[_StagedTarget], tuple[Path, ...]]:
+    """Prepare every output beside its target and clean all stages on failure."""
+    targets: list[_StagedTarget] = []
+    final_image_paths: tuple[Path, ...] = ()
+    try:
+        staged_pdf = _new_stage_file(output_pdf)
+        targets.append(_StagedTarget(staged=staged_pdf, target=output_pdf))
+        export_image_paths_as_pdf(staged_page_paths, out_pdf=staged_pdf, dpi=dpi)
+
+        if images_dir is not None:
+            images_dir.parent.mkdir(parents=True, exist_ok=True)
+            staged_images_dir = Path(
+                tempfile.mkdtemp(prefix=f".{images_dir.name}.stage-", dir=images_dir.parent)
+            )
+            targets.append(_StagedTarget(staged=staged_images_dir, target=images_dir))
+            staged_images = export_image_paths_as_files(
+                staged_page_paths,
+                output_dir=staged_images_dir,
+                ext=image_format,
+                base_name="page",
+            )
+            final_image_paths = tuple(images_dir / path.name for path in staged_images)
+
+        report_payload["imageOutputs"] = [str(path) for path in final_image_paths]
+        staged_report = _new_stage_file(report_path)
+        targets.append(_StagedTarget(staged=staged_report, target=report_path))
+        staged_report.write_text(
+            json.dumps(report_payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return targets, final_image_paths
+    except Exception:
+        for item in targets:
+            if item.staged.exists():
+                _remove_path(item.staged)
+        raise
+
+
 def run_batch_pipeline(
     *,
     inputs: Sequence[Path],
     output_pdf: Path,
     images_dir: Path | None = None,
     image_format: str = "png",
+    report_path: Path | None = None,
     pdf_dpi: int = 300,
     detect_document: bool = True,
+    detector_policy: str = "auto",
+    strict_detect: bool = False,
     two_page_mode: bool = False,
     lens_mode: str = "document",
+    illumination_correction: bool = False,
+    uvdoc_cache_home: Path | None = None,
+    cancel_cb: CancelCb | None = None,
 ) -> BatchPipelineResult:
-    """Run the complete headless pre-OCR pipeline and write a merged PDF."""
+    """Run the complete streaming pre-OCR pipeline and atomically publish its outputs."""
     dpi = int(pdf_dpi)
     if dpi < 72:
         raise ValueError("PDF DPI must be >= 72.")
+    if strict_detect and not detect_document:
+        raise ValueError("strict_detect cannot be used when document detection is disabled.")
 
     output_pdf = Path(output_pdf).with_suffix(".pdf")
+    report_path = Path(report_path) if report_path else output_pdf.with_suffix(".pdf.report.json")
     input_files = resolve_input_paths(inputs, output_pdf=output_pdf)
-    if images_dir is not None:
-        images_resolved = Path(images_dir).resolve()
-        input_dirs = {path.parent.resolve() for path in input_files}
-        if images_resolved in input_dirs:
-            raise ValueError("Images output directory cannot be an input directory.")
+    images_dir = Path(images_dir) if images_dir is not None else None
+    _validate_output_targets(
+        output_pdf=output_pdf,
+        report_path=report_path,
+        images_dir=images_dir,
+        input_files=input_files,
+    )
 
     postprocess, preprocess_settings = _resolve_processing(lens_mode)
+    if preprocess_settings is not None:
+        preprocess_settings = replace(
+            preprocess_settings,
+            correct_illumination=bool(illumination_correction),
+        )
+    elif illumination_correction:
+        preprocess_settings = PreprocessSettings(correct_illumination=True)
+    detector_backends = _resolve_detector_policy(detector_policy)
     options = PipelineOptions(
         detect_document=bool(detect_document),
         two_page_mode=bool(two_page_mode),
         postprocess_name="None",
+        detector_backends=detector_backends,
+        strict_detect=bool(strict_detect),
     )
 
-    detected_pages = 0
-    with tempfile.TemporaryDirectory(prefix="uniscan_convert_") as tmp:
-        staging_dir = Path(tmp)
-        staged_paths: list[Path] = []
+    staged_targets: list[_StagedTarget] = []
+    page_reports: list[PageRunReport] = []
+    final_image_paths: tuple[Path, ...] = ()
+    with tempfile.TemporaryDirectory(prefix="uniscan_pages_") as tmp:
+        page_stage_dir = Path(tmp)
+        staged_page_paths: list[Path] = []
 
-        for source_path in input_files:
-            loaded_items = load_input_items([source_path], pdf_dpi=dpi)
-            page_results = process_loaded_items(loaded_items, options=options)
+        for loaded_item in iter_input_items(
+            input_files,
+            pdf_dpi=dpi,
+            cancel_cb=cancel_cb,
+        ):
+            if cancel_cb is not None and cancel_cb():
+                raise RuntimeError("Cancelled by user.")
+            started = time.perf_counter()
+            page_results = process_loaded_items(
+                [loaded_item],
+                options=options,
+                uvdoc_cache_home=uvdoc_cache_home,
+                cancel_cb=cancel_cb,
+            )
             for page in page_results:
                 current = postprocess(page.current)
                 if preprocess_settings is not None:
                     current = apply_enhancements(current, preprocess_settings)
-                page_path = staging_dir / f"{len(staged_paths) + 1:05d}.png"
+                page_path = page_stage_dir / f"{len(staged_page_paths) + 1:05d}.png"
                 if not imwrite_unicode(page_path, current):
                     raise RuntimeError(f"Failed to write processed page: {page_path}")
-                staged_paths.append(page_path)
-                if page.backend is not None:
-                    detected_pages += 1
+                staged_page_paths.append(page_path)
+                page_reports.append(
+                    PageRunReport(
+                        index=len(staged_page_paths),
+                        name=page.name,
+                        detected=page.detected,
+                        backend=page.backend,
+                        fallback_reason=page.fallback_reason,
+                        duration_ms=round((time.perf_counter() - started) * 1000.0, 3),
+                    )
+                )
 
-        if not staged_paths:
+        if not staged_page_paths:
             raise ValueError("The input did not produce any pages.")
 
-        written_pdf = export_image_paths_as_pdf(staged_paths, out_pdf=output_pdf, dpi=dpi)
-        image_outputs: tuple[Path, ...] = ()
-        if images_dir is not None:
-            image_outputs = tuple(
-                export_image_paths_as_files(
-                    staged_paths,
-                    output_dir=Path(images_dir),
-                    ext=image_format,
-                    base_name="page",
-                )
-            )
+        report_payload = _report_payload(
+            output_pdf=output_pdf,
+            image_outputs=(),
+            input_files=input_files,
+            pages=page_reports,
+            detect_document=bool(detect_document),
+            detector_policy="disabled" if not detect_document else detector_policy,
+            illumination_correction=bool(illumination_correction),
+        )
+        staged_targets, final_image_paths = _stage_outputs(
+            staged_page_paths=staged_page_paths,
+            output_pdf=output_pdf,
+            images_dir=images_dir,
+            image_format=image_format,
+            report_path=report_path,
+            report_payload=report_payload,
+            dpi=dpi,
+        )
+        _publish_staged_targets(staged_targets)
 
+    detected_pages = sum(page.detected for page in page_reports)
+    fallback_pages = sum(page.fallback_reason is not None for page in page_reports)
     return BatchPipelineResult(
-        output_pdf=written_pdf,
+        output_pdf=output_pdf,
+        report_path=report_path,
         input_files=input_files,
-        image_outputs=image_outputs,
-        total_pages=len(staged_paths),
+        image_outputs=final_image_paths,
+        total_pages=len(page_reports),
         detected_pages=detected_pages,
+        fallback_pages=fallback_pages,
+        pages=tuple(page_reports),
     )

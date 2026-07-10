@@ -48,13 +48,30 @@ launcher because it forwards CLI arguments:
 Useful options:
 
 - `--mode {none,document,whiteboard,photo,b/w}` selects the cleanup profile.
+- `--backend {auto,office_lens_onnx,cv_hybrid,paddleocr_uvdoc}` fixes detector policy.
+- `--strict-detect` fails atomically instead of keeping a page with no detected boundary.
+- `--report PATH` selects the per-page JSON run report path.
 - `--no-detect` disables boundary detection and perspective correction.
 - `--two-page` splits book spreads using gutter detection with midpoint fallback.
+- `--illumination-correction` opts into experimental shadow/highlight normalization.
 - `--pdf-dpi 300` controls PDF rendering and export DPI.
 - `--images-dir DIR --image-format png` also writes processed page images.
 
 The default detector cascade is bundled Office Lens ONNX, optional PaddleOCR UVDoc, then the
-OpenCV hybrid fallback. The pipeline continues with the original page when no boundary is found.
+OpenCV hybrid fallback. PDF input is streamed one page at a time. PDF, image-directory, and JSON
+report outputs are staged and published together, so cancellation/failure preserves prior output.
+
+## Runtime diagnostics
+
+Check Python/runtime modules, both ONNX models, temporary storage, and optionally a camera:
+
+```powershell
+.\.venv\Scripts\python.exe -m uniscan doctor
+.\.venv\Scripts\python.exe -m uniscan doctor --camera --camera-index 0 --json
+```
+
+The GUI restores unfinished sessions from `%LOCALAPPDATA%\UniScan`, supports file drag-and-drop
+and clipboard images/files, and runs non-camera diagnostics shortly after startup.
 
 ## Office Lens adapter
 
@@ -82,11 +99,33 @@ image -> ONNX classifier -> ONNX quad mask -> OpenCV quad refinement
 The benchmark defaults to `office_lens_onnx` and writes a PDF for each requested backend. It is
 a comparison tool, not the production conversion command.
 
+Ground-truth quality regression (crop success, corner error, latency, and fallback rate):
+
+```powershell
+.\.venv\Scripts\python.exe -m uniscan benchmark-quality `
+  --input benchmarks\corpus_v1 `
+  --output quality-report.json `
+  --baseline benchmarks\corpus_v1\baseline.json
+```
+
+## Portable Windows artifact
+
+```powershell
+.\scripts\build_windows.ps1
+```
+
+This produces a versioned x64 ZIP and SHA-256 file under `artifacts`. The frozen executable runs
+both the GUI and CLI without development Python. See
+[`docs/windows_release.md`](docs/windows_release.md) and the
+[`manual smoke checklist`](docs/manual_smoke_checklist.md).
+
 ## Verification
 
 ```powershell
 .\.venv\Scripts\python.exe -m ruff check .
-.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m ruff format --check .
+.\.venv\Scripts\python.exe -m pytest --cov=uniscan --cov-fail-under=60 -q
+.\.venv\Scripts\python.exe -m coverage report --omit=src/uniscan/ui/app.py --fail-under=80
 ```
 
 ## Main modules
@@ -98,6 +137,7 @@ a comparison tool, not the production conversion command.
 - `src/uniscan/export` — image and merged-PDF export.
 - `src/uniscan/tools/batch_pipeline.py` — supported headless production pipeline.
 - `src/uniscan/tools/crop_benchmark.py` — crop-backend comparison tool.
+- `src/uniscan/tools/quality_benchmark.py` — ground-truth quality regression tool.
 - `src/uniscan/ui` — desktop Import → Scan → Review → Export workflow.
 
 The prioritized development roadmap is in [`docs/next_steps.md`](docs/next_steps.md).

@@ -6,12 +6,20 @@ import argparse
 import sys
 from pathlib import Path
 
+from uniscan.diagnostics import diagnostics_json, format_diagnostics, run_diagnostics
 from uniscan.tools import (
+    DEFAULT_QUALITY_BACKENDS,
+    DETECTOR_POLICY_CHOICES,
     LENS_MODE_CHOICES,
     run_batch_pipeline,
     run_crop_benchmark,
+    run_quality_benchmark,
     summarize_benchmark_results,
+    summarize_quality_report,
+    validate_quality_baseline,
 )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run unified scanner application."""
     parser = argparse.ArgumentParser(prog="uniscan")
@@ -21,6 +29,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Print package version and exit.",
     )
     subparsers = parser.add_subparsers(dest="command")
+
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Check runtime dependencies, bundled models, storage, and optionally a camera.",
+    )
+    doctor_parser.add_argument("--camera", action="store_true", help="Open and read camera 0.")
+    doctor_parser.add_argument("--camera-index", type=int, default=0)
+    doctor_parser.add_argument("--json", action="store_true", help="Write machine-readable JSON.")
 
     convert_parser = subparsers.add_parser(
         "convert",
@@ -52,6 +68,29 @@ def main(argv: list[str] | None = None) -> int:
         default="document",
         help="Document cleanup profile.",
     )
+    convert_parser.add_argument(
+        "--backend",
+        choices=DETECTOR_POLICY_CHOICES,
+        default="auto",
+        help="Document detector policy.",
+    )
+    convert_parser.add_argument(
+        "--strict-detect",
+        action="store_true",
+        help="Fail when a page boundary cannot be detected.",
+    )
+    convert_parser.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help="JSON report path (default: <output>.report.json).",
+    )
+    convert_parser.add_argument(
+        "--uvdoc-cache",
+        type=Path,
+        default=None,
+        help="Optional cache directory for PaddleOCR UVDoc weights.",
+    )
     convert_parser.add_argument("--pdf-dpi", type=int, default=300, help="Input/output PDF DPI.")
     convert_parser.add_argument(
         "--no-detect",
@@ -62,6 +101,11 @@ def main(argv: list[str] | None = None) -> int:
         "--two-page",
         action="store_true",
         help="Split book spreads into left and right pages.",
+    )
+    convert_parser.add_argument(
+        "--illumination-correction",
+        action="store_true",
+        help="Opt in to local shadow and glare correction.",
     )
 
     benchmark_parser = subparsers.add_parser(
@@ -95,12 +139,53 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional cache directory for PaddleOCR UVDoc weights.",
     )
 
+    quality_parser = subparsers.add_parser(
+        "benchmark-quality",
+        help="Measure crop success, corner error, latency, and fallback rate.",
+    )
+    quality_parser.add_argument("--input", required=True, type=Path, help="Corpus folder.")
+    quality_parser.add_argument("--output", required=True, type=Path, help="JSON report path.")
+    quality_parser.add_argument(
+        "--backends",
+        nargs="+",
+        default=list(DEFAULT_QUALITY_BACKENDS),
+        help="Detector backends to measure.",
+    )
+    quality_parser.add_argument(
+        "--corner-tolerance",
+        type=float,
+        default=0.08,
+        help="Maximum mean corner error as an image-diagonal ratio.",
+    )
+    quality_parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="Optional committed threshold file; regressions return exit code 2.",
+    )
+    quality_parser.add_argument(
+        "--scanner-root",
+        type=Path,
+        default=None,
+        help="Optional root directory for a vendored camscan backend.",
+    )
+    quality_parser.add_argument(
+        "--uvdoc-cache",
+        type=Path,
+        default=None,
+        help="Optional cache directory for PaddleOCR UVDoc weights.",
+    )
+
     args = parser.parse_args(argv)
     if args.version:
         from uniscan import __version__
 
         print(__version__)
         return 0
+    if args.command == "doctor":
+        report = run_diagnostics(check_camera=args.camera, camera_index=args.camera_index)
+        print(diagnostics_json(report) if args.json else format_diagnostics(report))
+        return 0 if report.ok else 1
     if args.command == "convert":
         try:
             result = run_batch_pipeline(
@@ -108,10 +193,15 @@ def main(argv: list[str] | None = None) -> int:
                 output_pdf=args.output,
                 images_dir=args.images_dir,
                 image_format=args.image_format,
+                report_path=args.report,
                 pdf_dpi=args.pdf_dpi,
                 detect_document=not args.no_detect,
+                detector_policy=args.backend,
+                strict_detect=args.strict_detect,
                 two_page_mode=args.two_page,
                 lens_mode=args.mode,
+                illumination_correction=args.illumination_correction,
+                uvdoc_cache_home=args.uvdoc_cache,
             )
         except (OSError, RuntimeError, ValueError) as exc:
             print(f"uniscan: error: {exc}", file=sys.stderr)
@@ -122,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if result.image_outputs:
             print(f"Wrote {len(result.image_outputs)} image(s) to {args.images_dir}.")
+        print(f"Report: {result.report_path}")
         return 0
     if args.command == "benchmark-crop":
         results = run_crop_benchmark(
@@ -134,6 +225,28 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(summarize_benchmark_results(results))
         return 0 if any(result.output_pdf is not None for result in results) else 1
+    if args.command == "benchmark-quality":
+        try:
+            report = run_quality_benchmark(
+                corpus_dir=args.input,
+                output_path=args.output,
+                backends=tuple(args.backends),
+                corner_tolerance_ratio=args.corner_tolerance,
+                scanner_root=args.scanner_root,
+                uvdoc_cache_home=args.uvdoc_cache,
+            )
+            print(summarize_quality_report(report))
+            if args.baseline is not None:
+                failures = validate_quality_baseline(report, args.baseline)
+                if failures:
+                    print("Quality baseline regressions:", file=sys.stderr)
+                    for failure in failures:
+                        print(f"- {failure}", file=sys.stderr)
+                    return 2
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"uniscan: error: {exc}", file=sys.stderr)
+            return 2
+        return 0 if any(result.error is None for result in report.backends) else 1
     from uniscan.ui import run_app
 
     return run_app()

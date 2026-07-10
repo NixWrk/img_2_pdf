@@ -5,12 +5,34 @@ from __future__ import annotations
 import platform
 import time
 from collections.abc import Callable
+from typing import Protocol
 
 import cv2
 import numpy as np
 
 CancelCb = Callable[[], bool]
 ProgressCb = Callable[[int, int], None]
+
+
+class CaptureDevice(Protocol):
+    """Small cv2.VideoCapture-compatible surface used by CameraService."""
+
+    def isOpened(self) -> bool: ...
+
+    def read(self) -> tuple[bool, np.ndarray | None]: ...
+
+    def release(self) -> None: ...
+
+    def set(self, prop_id: int, value: float) -> bool: ...
+
+
+CaptureFactory = Callable[[int, int | None], CaptureDevice]
+
+
+def _opencv_capture_factory(index: int, api_preference: int | None) -> CaptureDevice:
+    if api_preference is None:
+        return cv2.VideoCapture(index)
+    return cv2.VideoCapture(index, api_preference)
 
 
 def default_api_preference() -> int | None:
@@ -30,20 +52,19 @@ class CameraService:
         resolution: tuple[int, int] | None = None,
         target_fps: int | None = None,
         api_preference: int | None = None,
+        capture_factory: CaptureFactory = _opencv_capture_factory,
     ) -> None:
         self.index = index
         self.resolution = resolution
         self.target_fps = target_fps
         self.api_preference = default_api_preference() if api_preference is None else api_preference
-        self._capture: cv2.VideoCapture | None = None
+        self.capture_factory = capture_factory
+        self._capture: CaptureDevice | None = None
 
     def open(self) -> None:
         """Open underlying VideoCapture."""
         self.release()
-        if self.api_preference is None:
-            self._capture = cv2.VideoCapture(self.index)
-        else:
-            self._capture = cv2.VideoCapture(self.index, self.api_preference)
+        self._capture = self.capture_factory(self.index, self.api_preference)
 
         if self.resolution is not None:
             self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
@@ -52,6 +73,8 @@ class CameraService:
             self._capture.set(cv2.CAP_PROP_FPS, self.target_fps)
 
         if not self._capture.isOpened():
+            self._capture.release()
+            self._capture = None
             raise RuntimeError(f"Cannot open camera index {self.index}.")
 
     def release(self) -> None:
@@ -74,7 +97,7 @@ class CameraService:
         """Read one frame."""
         if self._capture is None:
             self.open()
-        ok, frame = self._capture.read()  # type: ignore[union-attr]
+        ok, frame = self._capture.read()
         if not ok:
             return None
         return frame
@@ -103,8 +126,8 @@ class CameraService:
                 raise RuntimeError("Cancelled by user.")
 
             for _ in range(max(0, warmup_reads)):
-                self._capture.read()  # type: ignore[union-attr]
-            ok, frame = self._capture.read()  # type: ignore[union-attr]
+                self._capture.read()
+            ok, frame = self._capture.read()
             if not ok or frame is None:
                 raise RuntimeError(f"Failed to capture frame {i}/{shots}.")
 
@@ -127,15 +150,13 @@ class CameraService:
         *,
         max_indices: int = 10,
         api_preference: int | None = None,
+        capture_factory: CaptureFactory = _opencv_capture_factory,
     ) -> list[int]:
         """Probe camera indices and return opened ones."""
         pref = default_api_preference() if api_preference is None else api_preference
         found: list[int] = []
         for index in range(max_indices):
-            if pref is None:
-                cap = cv2.VideoCapture(index)
-            else:
-                cap = cv2.VideoCapture(index, pref)
+            cap = capture_factory(index, pref)
             if cap.isOpened():
                 found.append(index)
             cap.release()
