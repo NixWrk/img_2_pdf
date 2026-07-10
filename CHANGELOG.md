@@ -18,6 +18,8 @@ All notable changes to UniScan are documented here. The project follows Semantic
   punctuation; and separate shadow, glare, and clipped-pixel diagnostics.
 - Batch CLI and JSON reporting for binarization parameters, despeckle safety counts, and optional
   lighting evidence.
+- GUI controls and live preview for document binarization, despeckle, A4/Letter layout,
+  margins/alignment, plus on-demand lighting analysis for the selected page.
 
 - Independent boundary, deskew, and local-dewarp stages with per-page JSON diagnostics.
 - Offline text-line dewarp for curved or wavy pages, with confidence-based no-op fallback.

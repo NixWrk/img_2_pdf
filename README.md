@@ -66,7 +66,8 @@ Useful options:
 - `--deskew {none,hybrid,hough,min_area}` selects small-angle rotation correction.
 - `--dewarp {none,auto,textline,paddleocr_uvdoc}` removes local page waves after cropping; `auto`
   validates geometry improvement and selects the offline text-line backend by default. Add
-  `--auto-dewarp-uvdoc` to explicitly permit its optional UVDoc fallback. `textline`
+  `--auto-dewarp-uvdoc` to explicitly permit its optional UVDoc fallback. `textline` works fully
+  offline, while UVDoc requires its optional PaddleOCR runtime.
 - `--page-layout {none,a4,letter}` places the detected content box on a consistent page; margins
   and alignment are controlled by `--page-margin-mm`, `--align-x`, and `--align-y`.
 - `--binarization {none,fixed,otsu,sauvola,wolf}` selects document thresholding; adaptive methods
@@ -75,7 +76,6 @@ Useful options:
   reports how many nearby punctuation-like components were protected.
 - `--lighting-diagnostics` records shadow, possible-glare, clipped-pixel, and unevenness metrics
   without modifying the page.
-  works fully offline, while UVDoc requires its optional PaddleOCR runtime.
 - `--illumination-correction` opts into experimental shadow/highlight normalization.
 - `--pdf-dpi 300` controls PDF rendering and export DPI.
 - `--images-dir DIR --image-format png` also writes processed page images.
@@ -88,7 +88,9 @@ their selected methods and
 per-page results are recorded in the JSON report. See
 [`docs/document_geometry.md`](docs/document_geometry.md).
 The GUI can persist per-page dewarp control points when the automatic curve needs correction;
-changing the page geometry invalidates those points. OCR remains outside the project scope.
+changing the page geometry invalidates those points. The Workspace also exposes selectable
+binarization, safe despeckle, A4/Letter layout, margins/alignment, and an explicit lighting analysis
+for the selected page. OCR remains outside the project scope.
 
 ## Runtime diagnostics
 

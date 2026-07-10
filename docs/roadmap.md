@@ -94,8 +94,7 @@ Goal: improve the document itself after geometry is correct.
    - shadow normalization and glare-area detection as separate operations.
 
 Implementation note: Otsu/Sauvola/Wolf, conservative isolated-speck removal, and non-destructive
-shadow/glare/clipped-pixel diagnostics are implemented. Pipeline/report and GUI exposure follow in
-the next commits.
+shadow/glare/clipped-pixel diagnostics are implemented in core, batch report, CLI, and GUI.
 4. Add picture/fill protection masks only if real examples show that automatic cleanup damages
    photographs, stamps, diagrams, or handwriting. Do not add OCR-driven zones.
 5. Extend preview comparison so each cleanup method can be evaluated at 100% scale.

@@ -27,6 +27,9 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.preprocess_preset_var.get() == "Document"
         assert app.dewarp_method_var.get() == "None"
         assert app.deskew_method_var.get() == "Hybrid (recommended)"
+        assert app.binarization_method_var.get() == "None"
+        assert app.despeckle_strength_var.get() == "None"
+        assert app.page_layout_var.get() == "Keep source page"
         assert app.preview_mode_var.get() == "Processed"
         assert app.page_preview_after_frame.winfo_manager() == "grid"
         assert app.page_preview_before_frame.winfo_manager() == ""
@@ -61,6 +64,25 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.page_count_var.get() == "2 pages"
         assert app.toolbar_export_button.cget("state") == "normal"
         assert app._single_selected_entry()[1].name == "second.png"
+        app.binarization_method_var.set("Sauvola (uneven light)")
+        app.despeckle_strength_var.set("Conservative")
+        settings = app._current_preprocess_settings()
+        assert settings.binarization_method == "sauvola"
+        assert settings.despeckle_strength == "conservative"
+        app.page_layout_var.set("A4")
+        laid_out, layout_diagnostics = app._apply_page_layout(second, preview=True)
+        assert laid_out.shape[:2] == (1169, 827)
+        assert layout_diagnostics.applied is True
+        app.export_pdf_dpi_var.set(100)
+        selected_entry = app._single_selected_entry()[1]
+        app._reprocess_entry_from_original(selected_entry)
+        assert selected_entry.current_image.shape[:2] == (1169, 827)
+        app.analyze_selected_page_lighting()
+        assert app.lighting_summary_var.get().startswith("Shadow ")
+        app.binarization_method_var.set("None")
+        app.despeckle_strength_var.set("None")
+        app.page_layout_var.set("Keep source page")
+        app._reprocess_entry_from_original(selected_entry)
         app.open_dewarp_points_editor()
         app.update()
         dewarp_editors = [

@@ -32,6 +32,8 @@ from uniscan.core.dewarp import (
 )
 from uniscan.core.pipeline import PageResult, PipelineOptions, process_loaded_items
 from uniscan.core.orientation import ORIENTATION_METHOD_AUTO, orient_document
+from uniscan.core.layout import layout_document_page
+from uniscan.core.cleanup import analyze_lighting
 from uniscan.core.preprocess import (
     DESKEW_METHOD_HOUGH,
     DESKEW_METHOD_HYBRID,
@@ -94,6 +96,24 @@ DESKEW_UI_METHODS = {
     "Text lines / Hough": DESKEW_METHOD_HOUGH,
     "Foreground box": DESKEW_METHOD_MIN_AREA,
 }
+BINARIZATION_UI_METHODS = {
+    "None": "none",
+    "Otsu (global)": "otsu",
+    "Sauvola (uneven light)": "sauvola",
+    "Wolf (uneven light)": "wolf",
+    "Fixed threshold": "fixed",
+}
+DESPECKLE_UI_STRENGTHS = {
+    "None": "none",
+    "Conservative": "conservative",
+    "Normal": "normal",
+    "Strong": "strong",
+}
+PAGE_LAYOUT_UI_METHODS = {
+    "Keep source page": "none",
+    "A4": "a4",
+    "Letter": "letter",
+}
 
 
 class UnifiedScanApp(ctk.CTk):
@@ -144,6 +164,15 @@ class UnifiedScanApp(ctk.CTk):
         self.preprocess_denoise_var = tk.IntVar(value=4)
         self.preprocess_threshold_var = tk.IntVar(value=170)
         self.preprocess_illumination_var = tk.BooleanVar(value=False)
+        self.binarization_method_var = tk.StringVar(value="None")
+        self.binarization_window_var = tk.IntVar(value=31)
+        self.binarization_k_var = tk.DoubleVar(value=0.2)
+        self.despeckle_strength_var = tk.StringVar(value="None")
+        self.page_layout_var = tk.StringVar(value="Keep source page")
+        self.page_margin_mm_var = tk.DoubleVar(value=10.0)
+        self.page_align_x_var = tk.StringVar(value="center")
+        self.page_align_y_var = tk.StringVar(value="center")
+        self.lighting_summary_var = tk.StringVar(value="Lighting: not analyzed")
         self.dewarp_method_var = tk.StringVar(value="None")
         self.deskew_method_var = tk.StringVar(value="Hybrid (recommended)")
         self.import_folder_var = tk.StringVar()
@@ -616,6 +645,49 @@ class UnifiedScanApp(ctk.CTk):
             values=list(DEWARP_UI_METHODS),
             variable=self.dewarp_method_var,
             command=self._on_dewarp_method_change,
+        ).pack(fill=ctk.X, padx=6, pady=(0, 10))
+
+        ctk.CTkLabel(processing, text="Binarization", anchor="w").pack(
+            fill=ctk.X, padx=6, pady=(0, 2)
+        )
+        ctk.CTkOptionMenu(
+            processing,
+            values=list(BINARIZATION_UI_METHODS),
+            variable=self.binarization_method_var,
+            command=lambda _value: self.update_page_preview(),
+        ).pack(fill=ctk.X, padx=6, pady=(0, 8))
+
+        ctk.CTkLabel(processing, text="Despeckle", anchor="w").pack(fill=ctk.X, padx=6, pady=(0, 2))
+        ctk.CTkOptionMenu(
+            processing,
+            values=list(DESPECKLE_UI_STRENGTHS),
+            variable=self.despeckle_strength_var,
+            command=lambda _value: self.update_page_preview(),
+        ).pack(fill=ctk.X, padx=6, pady=(0, 8))
+
+        ctk.CTkLabel(processing, text="Standard page layout", anchor="w").pack(
+            fill=ctk.X, padx=6, pady=(0, 2)
+        )
+        ctk.CTkOptionMenu(
+            processing,
+            values=list(PAGE_LAYOUT_UI_METHODS),
+            variable=self.page_layout_var,
+            command=lambda _value: self.update_page_preview(),
+        ).pack(fill=ctk.X, padx=6, pady=(0, 8))
+        ctk.CTkButton(
+            processing,
+            text="Analyze lighting",
+            fg_color="transparent",
+            border_width=1,
+            command=self.analyze_selected_page_lighting,
+        ).pack(fill=ctk.X, padx=6, pady=(0, 4))
+        ctk.CTkLabel(
+            processing,
+            textvariable=self.lighting_summary_var,
+            anchor="w",
+            justify="left",
+            wraplength=230,
+            text_color=("#60646c", "#a0a4ab"),
         ).pack(fill=ctk.X, padx=6, pady=(0, 10))
 
         processing_actions = ctk.CTkFrame(processing, fg_color="transparent")
@@ -1121,6 +1193,21 @@ class UnifiedScanApp(ctk.CTk):
             threshold=int(self.preprocess_threshold_var.get()),
             apply_threshold=apply_threshold,
             correct_illumination=bool(self.preprocess_illumination_var.get()),
+            binarization_method=BINARIZATION_UI_METHODS.get(
+                self.binarization_method_var.get(),
+                "none",
+            ),
+            binarization_window=int(self.binarization_window_var.get()),
+            binarization_k=(
+                float(self.binarization_k_var.get())
+                if BINARIZATION_UI_METHODS.get(self.binarization_method_var.get())
+                in {"sauvola", "wolf"}
+                else None
+            ),
+            despeckle_strength=DESPECKLE_UI_STRENGTHS.get(
+                self.despeckle_strength_var.get(),
+                "none",
+            ),
         )
 
     def _apply_postprocess(self, image: np.ndarray) -> np.ndarray:
@@ -1128,6 +1215,17 @@ class UnifiedScanApp(ctk.CTk):
         fn = POSTPROCESSING_OPTIONS.get(mode, POSTPROCESSING_OPTIONS["None"])
         out = fn(image)
         return apply_enhancements(out, self._current_preprocess_settings())
+
+    def _apply_page_layout(self, image: np.ndarray, *, preview: bool):
+        dpi = 100 if preview else max(72, int(self.export_pdf_dpi_var.get()))
+        return layout_document_page(
+            image,
+            method=PAGE_LAYOUT_UI_METHODS.get(self.page_layout_var.get(), "none"),
+            dpi=dpi,
+            margin_mm=float(self.page_margin_mm_var.get()),
+            horizontal_alignment=self.page_align_x_var.get(),
+            vertical_alignment=self.page_align_y_var.get(),
+        )
 
     def _entry_dewarp_model(self, entry) -> DewarpModel | None:
         if entry is None or entry.dewarp_control_points is None:
@@ -1176,7 +1274,9 @@ class UnifiedScanApp(ctk.CTk):
         else:
             base = entry.original_image
         dewarped, _diagnostics = self._apply_dewarp(base, entry=entry)
-        return self._apply_postprocess(dewarped)
+        processed = self._apply_postprocess(dewarped)
+        laid_out, _layout_diagnostics = self._apply_page_layout(processed, preview=True)
+        return laid_out
 
     def _show_in_preview(self, image: np.ndarray) -> None:
         photo = self._to_ctk_photo_for_label(image, self.preview_label)
@@ -2375,8 +2475,26 @@ class UnifiedScanApp(ctk.CTk):
         settings = self._current_preprocess_settings()
         dewarped, diagnostics = self._apply_dewarp(entry.original_image, entry=entry)
         base = postprocess_fn(dewarped)
-        entry.current_image = apply_enhancements(base, settings)
+        processed = apply_enhancements(base, settings)
+        laid_out, _layout_diagnostics = self._apply_page_layout(processed, preview=False)
+        entry.current_image = laid_out
         return diagnostics
+
+    def analyze_selected_page_lighting(self) -> None:
+        _index, entry = self._single_selected_entry()
+        if entry is None:
+            self._set_status("Select exactly one page to analyze lighting.")
+            return
+        dewarped, _diagnostics = self._apply_dewarp(entry.original_image, entry=entry)
+        lighting = analyze_lighting(dewarped)
+        warnings = ", ".join(lighting.warnings) if lighting.warnings else "none"
+        self.lighting_summary_var.set(
+            f"Shadow {lighting.shadow_fraction:.1%} | glare {lighting.glare_fraction:.1%}\n"
+            f"Clipped {lighting.clipped_pixel_fraction:.1%} | warnings: {warnings}"
+        )
+        self._set_status(
+            f"Lighting analyzed: unevenness {lighting.unevenness:.2f}; warnings {warnings}."
+        )
 
     def _selected_entry_indices(self) -> list[int]:
         indexes = list(self.page_listbox.curselection())
@@ -2863,6 +2981,58 @@ class UnifiedScanApp(ctk.CTk):
             variable=self.preprocess_illumination_var,
             command=self.update_page_preview,
         ).grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
+
+        ctk.CTkLabel(body, text="Adaptive window").grid(row=5, column=0, sticky="w", padx=8, pady=4)
+        ctk.CTkSlider(
+            body,
+            from_=15,
+            to=81,
+            number_of_steps=33,
+            variable=self.binarization_window_var,
+            command=self._on_review_processing_slider_change,
+        ).grid(row=5, column=1, sticky="ew", padx=8, pady=4)
+
+        ctk.CTkLabel(body, text="Sauvola/Wolf k").grid(row=6, column=0, sticky="w", padx=8, pady=4)
+        ctk.CTkSlider(
+            body,
+            from_=0.05,
+            to=0.8,
+            number_of_steps=15,
+            variable=self.binarization_k_var,
+            command=self._on_review_processing_slider_change,
+        ).grid(row=6, column=1, sticky="ew", padx=8, pady=4)
+
+        ctk.CTkLabel(body, text="Page margin (mm)").grid(
+            row=7, column=0, sticky="w", padx=8, pady=4
+        )
+        ctk.CTkSlider(
+            body,
+            from_=0,
+            to=30,
+            number_of_steps=30,
+            variable=self.page_margin_mm_var,
+            command=self._on_review_processing_slider_change,
+        ).grid(row=7, column=1, sticky="ew", padx=8, pady=4)
+
+        ctk.CTkLabel(body, text="Horizontal alignment").grid(
+            row=8, column=0, sticky="w", padx=8, pady=4
+        )
+        ctk.CTkOptionMenu(
+            body,
+            values=["left", "center", "right"],
+            variable=self.page_align_x_var,
+            command=lambda _value: self.update_page_preview(),
+        ).grid(row=8, column=1, sticky="ew", padx=8, pady=4)
+
+        ctk.CTkLabel(body, text="Vertical alignment").grid(
+            row=9, column=0, sticky="w", padx=8, pady=(4, 8)
+        )
+        ctk.CTkOptionMenu(
+            body,
+            values=["top", "center", "bottom"],
+            variable=self.page_align_y_var,
+            command=lambda _value: self.update_page_preview(),
+        ).grid(row=9, column=1, sticky="ew", padx=8, pady=(4, 8))
 
         def _on_close() -> None:
             self.review_processing_window = None
