@@ -14,6 +14,7 @@ from uniscan.tools import (
     DETECTOR_POLICY_CHOICES,
     LENS_MODE_CHOICES,
     ORIENTATION_METHOD_CHOICES,
+    PAGE_LAYOUT_CHOICES,
     run_batch_pipeline,
     run_crop_benchmark,
     run_geometry_benchmark,
@@ -136,6 +137,30 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Allow --dewarp auto to use optional UVDoc (may initialize its model cache).",
     )
+    convert_parser.add_argument(
+        "--page-layout",
+        choices=PAGE_LAYOUT_CHOICES,
+        default="none",
+        help="Place detected content on a standard output page.",
+    )
+    convert_parser.add_argument(
+        "--page-margin-mm",
+        type=float,
+        default=10.0,
+        help="Uniform margin for standard page layout.",
+    )
+    convert_parser.add_argument(
+        "--align-x",
+        choices=("left", "center", "right"),
+        default="center",
+        help="Horizontal content alignment on a standard page.",
+    )
+    convert_parser.add_argument(
+        "--align-y",
+        choices=("top", "center", "bottom"),
+        default="center",
+        help="Vertical content alignment on a standard page.",
+    )
 
     benchmark_parser = subparsers.add_parser(
         "benchmark-crop",
@@ -247,6 +272,10 @@ def main(argv: list[str] | None = None) -> int:
                 deskew_method=args.deskew,
                 dewarp_method=args.dewarp,
                 auto_dewarp_uvdoc=args.auto_dewarp_uvdoc,
+                page_layout=args.page_layout,
+                page_margin_mm=args.page_margin_mm,
+                horizontal_alignment=args.align_x,
+                vertical_alignment=args.align_y,
                 uvdoc_cache_home=args.uvdoc_cache,
             )
         except (OSError, RuntimeError, ValueError) as exc:

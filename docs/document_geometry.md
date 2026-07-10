@@ -50,6 +50,13 @@ does not improve the measurable geometry or introduces artifacts. It tries the o
 model first. UVDoc fallback requires the explicit `--auto-dewarp-uvdoc` flag so preview or batch
 processing never downloads or initializes a heavyweight model unexpectedly.
 
+## Content box and page layout
+
+The physical page boundary and visible content are separate. `--page-layout a4|letter` detects the
+content box after cleanup, crops unused source margins, and fits it onto a standard output page.
+`--page-margin-mm`, `--align-x`, and `--align-y` provide document-wide reproducible margins and
+alignment. The default `none` path is a zero-cost identity operation.
+
 `--dewarp textline` is the dependency-free mode. It:
 
 1. builds a local foreground mask;

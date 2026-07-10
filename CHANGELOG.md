@@ -12,6 +12,8 @@ All notable changes to UniScan are documented here. The project follows Semantic
   optional UVDoc fallback.
 - Versioned generated geometry corpus and CLI regression benchmark for orientation, deskew,
   dewarp safety, and latency.
+- Independent content-box detection and optional A4/Letter page layout with consistent margins
+  and alignment.
 
 - Independent boundary, deskew, and local-dewarp stages with per-page JSON diagnostics.
 - Offline text-line dewarp for curved or wavy pages, with confidence-based no-op fallback.

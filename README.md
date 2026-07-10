@@ -67,6 +67,8 @@ Useful options:
 - `--dewarp {none,auto,textline,paddleocr_uvdoc}` removes local page waves after cropping; `auto`
   validates geometry improvement and selects the offline text-line backend by default. Add
   `--auto-dewarp-uvdoc` to explicitly permit its optional UVDoc fallback. `textline`
+- `--page-layout {none,a4,letter}` places the detected content box on a consistent page; margins
+  and alignment are controlled by `--page-margin-mm`, `--align-x`, and `--align-y`.
   works fully offline, while UVDoc requires its optional PaddleOCR runtime.
 - `--illumination-correction` opts into experimental shadow/highlight normalization.
 - `--pdf-dpi 300` controls PDF rendering and export DPI.

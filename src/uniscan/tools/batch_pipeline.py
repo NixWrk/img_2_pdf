@@ -14,6 +14,12 @@ from pathlib import Path
 
 from uniscan.core.pipeline import PipelineOptions, process_loaded_items
 from uniscan.core.orientation import ORIENTATION_METHOD_CHOICES, orient_document
+from uniscan.core.layout import (
+    HORIZONTAL_ALIGNMENTS,
+    PAGE_LAYOUT_CHOICES,
+    VERTICAL_ALIGNMENTS,
+    layout_document_page,
+)
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.dewarp import (
     DEWARP_METHOD_AUTO,
@@ -103,6 +109,12 @@ class PageRunReport:
     dewarp_aspect_change: float = 0.0
     dewarp_duration_ms: float = 0.0
     dewarp_reason: str | None = None
+    page_layout: str = "none"
+    layout_applied: bool = False
+    content_box: tuple[int, int, int, int] | None = None
+    content_confidence: float = 0.0
+    layout_scale: float = 1.0
+    layout_reason: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -276,6 +288,10 @@ def _report_payload(
     deskew_method: str,
     dewarp_method: str,
     auto_dewarp_uvdoc: bool,
+    page_layout: str,
+    page_margin_mm: float,
+    horizontal_alignment: str,
+    vertical_alignment: str,
 ) -> dict[str, object]:
     detected_pages = sum(page.detected for page in pages)
     fallback_pages = sum(page.fallback_reason is not None for page in pages)
@@ -291,6 +307,10 @@ def _report_payload(
         "deskewMethod": deskew_method,
         "dewarpMethod": dewarp_method,
         "autoDewarpUvdoc": auto_dewarp_uvdoc,
+        "pageLayout": page_layout,
+        "pageMarginMm": page_margin_mm,
+        "horizontalAlignment": horizontal_alignment,
+        "verticalAlignment": vertical_alignment,
         "totalPages": len(pages),
         "detectedPages": detected_pages,
         "fallbackPages": fallback_pages,
@@ -323,6 +343,12 @@ def _report_payload(
                 "dewarpAspectChange": page.dewarp_aspect_change,
                 "dewarpDurationMs": page.dewarp_duration_ms,
                 "dewarpReason": page.dewarp_reason,
+                "pageLayout": page.page_layout,
+                "layoutApplied": page.layout_applied,
+                "contentBox": list(page.content_box) if page.content_box is not None else None,
+                "contentConfidence": page.content_confidence,
+                "layoutScale": page.layout_scale,
+                "layoutReason": page.layout_reason,
             }
             for page in pages
         ],
@@ -394,6 +420,10 @@ def run_batch_pipeline(
     deskew_method: str = "none",
     dewarp_method: str = "none",
     auto_dewarp_uvdoc: bool = False,
+    page_layout: str = "none",
+    page_margin_mm: float = 10.0,
+    horizontal_alignment: str = "center",
+    vertical_alignment: str = "center",
     uvdoc_cache_home: Path | None = None,
     cancel_cb: CancelCb | None = None,
 ) -> BatchPipelineResult:
@@ -406,6 +436,7 @@ def run_batch_pipeline(
     orientation_method = orientation_method.strip().lower()
     deskew_method = deskew_method.strip().lower()
     dewarp_method = dewarp_method.strip().lower()
+    page_layout = page_layout.strip().lower()
     if orientation_method not in ORIENTATION_METHOD_CHOICES:
         raise ValueError(f"Unsupported orientation method: {orientation_method}")
     if deskew_method not in DESKEW_METHOD_CHOICES:
@@ -414,6 +445,12 @@ def run_batch_pipeline(
         raise ValueError(f"Unsupported dewarp method: {dewarp_method}")
     if auto_dewarp_uvdoc and dewarp_method != DEWARP_METHOD_AUTO:
         raise ValueError("auto_dewarp_uvdoc requires dewarp_method='auto'.")
+    if page_layout not in PAGE_LAYOUT_CHOICES:
+        raise ValueError(f"Unsupported page layout: {page_layout}")
+    if horizontal_alignment not in HORIZONTAL_ALIGNMENTS:
+        raise ValueError(f"Unsupported horizontal alignment: {horizontal_alignment}")
+    if vertical_alignment not in VERTICAL_ALIGNMENTS:
+        raise ValueError(f"Unsupported vertical alignment: {vertical_alignment}")
 
     output_pdf = Path(output_pdf).with_suffix(".pdf")
     report_path = Path(report_path) if report_path else output_pdf.with_suffix(".pdf.report.json")
@@ -491,6 +528,14 @@ def run_batch_pipeline(
                 current = postprocess(dewarped)
                 if preprocess_settings is not None:
                     current = apply_enhancements(current, preprocess_settings)
+                current, layout_diagnostics = layout_document_page(
+                    current,
+                    method=page_layout,
+                    dpi=dpi,
+                    margin_mm=page_margin_mm,
+                    horizontal_alignment=horizontal_alignment,
+                    vertical_alignment=vertical_alignment,
+                )
                 page_path = page_stage_dir / f"{len(staged_page_paths) + 1:05d}.png"
                 if not imwrite_unicode(page_path, current):
                     raise RuntimeError(f"Failed to write processed page: {page_path}")
@@ -524,6 +569,17 @@ def run_batch_pipeline(
                         dewarp_aspect_change=dewarp_diagnostics.aspect_change,
                         dewarp_duration_ms=dewarp_diagnostics.duration_ms,
                         dewarp_reason=dewarp_diagnostics.reason,
+                        page_layout=page_layout,
+                        layout_applied=layout_diagnostics.applied,
+                        content_box=(
+                            layout_diagnostics.content_box.x,
+                            layout_diagnostics.content_box.y,
+                            layout_diagnostics.content_box.width,
+                            layout_diagnostics.content_box.height,
+                        ),
+                        content_confidence=layout_diagnostics.content_confidence,
+                        layout_scale=layout_diagnostics.scale,
+                        layout_reason=layout_diagnostics.reason,
                     )
                 )
 
@@ -542,6 +598,10 @@ def run_batch_pipeline(
             deskew_method=deskew_method,
             dewarp_method=dewarp_method,
             auto_dewarp_uvdoc=bool(auto_dewarp_uvdoc),
+            page_layout=page_layout,
+            page_margin_mm=float(page_margin_mm),
+            horizontal_alignment=horizontal_alignment,
+            vertical_alignment=vertical_alignment,
         )
         staged_targets, final_image_paths = _stage_outputs(
             staged_page_paths=staged_page_paths,

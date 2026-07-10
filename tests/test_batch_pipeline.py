@@ -170,6 +170,45 @@ def test_run_batch_pipeline_auto_dewarp_reports_quality_metrics(tmp_path) -> Non
     assert report_page["dewarpCurvatureAfterPx"] < report_page["dewarpCurvatureBeforePx"]
 
 
+def test_run_batch_pipeline_places_content_on_standard_page(tmp_path) -> None:
+    source = tmp_path / "content.png"
+    image = np.full((300, 200, 3), 255, dtype=np.uint8)
+    cv2.putText(
+        image,
+        "content",
+        (35, 160),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 0, 0),
+        2,
+        cv2.LINE_AA,
+    )
+    ok, encoded = cv2.imencode(".png", image)
+    assert ok
+    encoded.tofile(str(source))
+
+    result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "a4.pdf",
+        images_dir=tmp_path / "a4-pages",
+        pdf_dpi=100,
+        detect_document=False,
+        lens_mode="none",
+        page_layout="a4",
+        page_margin_mm=10,
+        horizontal_alignment="left",
+        vertical_alignment="top",
+    )
+
+    output = cv2.imread(str(result.image_outputs[0]))
+    assert output.shape[:2] == (1169, 827)
+    assert result.pages[0].layout_applied is True
+    assert result.pages[0].content_box is not None
+    report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    assert report["pageLayout"] == "a4"
+    assert report["pages"][0]["layoutApplied"] is True
+
+
 def test_run_batch_pipeline_applies_and_reports_orientation(tmp_path) -> None:
     source = tmp_path / "sideways.png"
     _write_sideways_text_page(source)
