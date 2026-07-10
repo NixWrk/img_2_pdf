@@ -60,6 +60,8 @@ behind progressive disclosure.
 - Common keyboard actions are available: `Ctrl+O` add files, `Ctrl+Shift+O` add a folder,
   `Ctrl+Shift+C` capture one frame, `Ctrl+E` export PDF, `F5` refresh preview, and page-list
   shortcuts for delete, rotate, reorder, and select all.
+- Processing exposes offline page-wave removal with a live preview. Page tools exposes the
+  hybrid, Hough-line, and foreground-box deskew estimators instead of hiding one fixed algorithm.
 
 ## Next UX iterations
 

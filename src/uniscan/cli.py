@@ -8,6 +8,8 @@ from pathlib import Path
 
 from uniscan.diagnostics import diagnostics_json, format_diagnostics, run_diagnostics
 from uniscan.tools import (
+    DESKEW_METHOD_CHOICES,
+    DEWARP_METHOD_CHOICES,
     DEFAULT_QUALITY_BACKENDS,
     DETECTOR_POLICY_CHOICES,
     LENS_MODE_CHOICES,
@@ -107,6 +109,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Opt in to local shadow and glare correction.",
     )
+    convert_parser.add_argument(
+        "--deskew",
+        choices=DESKEW_METHOD_CHOICES,
+        default="none",
+        help="Correct small page rotation after boundary detection.",
+    )
+    convert_parser.add_argument(
+        "--dewarp",
+        choices=DEWARP_METHOD_CHOICES,
+        default="none",
+        help="Correct local page waves independently from boundary detection.",
+    )
 
     benchmark_parser = subparsers.add_parser(
         "benchmark-crop",
@@ -201,6 +215,8 @@ def main(argv: list[str] | None = None) -> int:
                 two_page_mode=args.two_page,
                 lens_mode=args.mode,
                 illumination_correction=args.illumination_correction,
+                deskew_method=args.deskew,
+                dewarp_method=args.dewarp,
                 uvdoc_cache_home=args.uvdoc_cache,
             )
         except (OSError, RuntimeError, ValueError) as exc:

@@ -14,9 +14,17 @@ from pathlib import Path
 
 from uniscan.core.pipeline import PipelineOptions, process_loaded_items
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
+from uniscan.core.dewarp import (
+    DEWARP_METHOD_CHOICES,
+    DEWARP_METHOD_PADDLEOCR_UVDOC,
+    DewarpDiagnostics,
+    dewarp_document,
+)
 from uniscan.core.preprocess import (
+    DESKEW_METHOD_CHOICES,
     PREPROCESS_PRESETS,
     apply_enhancements,
+    deskew_document,
     PreprocessSettings,
     resolve_lens_mode_profile,
 )
@@ -24,6 +32,9 @@ from uniscan.core.scanner_adapter import (
     DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
     DETECTOR_BACKEND_CV_HYBRID,
     DETECTOR_BACKEND_OFFICE_LENS_ONNX,
+    DETECTOR_BACKEND_OPENCV,
+    DETECTOR_BACKEND_OPENCV_HOUGH,
+    DETECTOR_BACKEND_OPENCV_MINRECT,
     DETECTOR_BACKEND_PADDLEOCR_UVDOC,
 )
 from uniscan.export import export_image_paths_as_files, export_image_paths_as_pdf
@@ -37,13 +48,24 @@ from uniscan.io import (
 
 
 LENS_MODE_CHOICES = ("none", "document", "whiteboard", "photo", "b/w")
-DETECTOR_POLICY_CHOICES = ("auto", "office_lens_onnx", "cv_hybrid", "paddleocr_uvdoc")
+DETECTOR_POLICY_CHOICES = (
+    "auto",
+    "office_lens_onnx",
+    "cv_hybrid",
+    "opencv_quad",
+    "opencv_hough",
+    "opencv_minrect",
+    "paddleocr_uvdoc",
+)
 CancelCb = Callable[[], bool]
 
 _DETECTOR_POLICIES: dict[str, tuple[str, ...]] = {
     "auto": DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
     "office_lens_onnx": (DETECTOR_BACKEND_OFFICE_LENS_ONNX,),
     "cv_hybrid": (DETECTOR_BACKEND_CV_HYBRID,),
+    "opencv_quad": (DETECTOR_BACKEND_OPENCV,),
+    "opencv_hough": (DETECTOR_BACKEND_OPENCV_HOUGH,),
+    "opencv_minrect": (DETECTOR_BACKEND_OPENCV_MINRECT,),
     "paddleocr_uvdoc": (DETECTOR_BACKEND_PADDLEOCR_UVDOC,),
 }
 
@@ -58,6 +80,13 @@ class PageRunReport:
     backend: str | None
     fallback_reason: str | None
     duration_ms: float
+    deskew_method: str = "none"
+    deskew_angle_degrees: float = 0.0
+    dewarp_method: str = "none"
+    dewarp_applied: bool = False
+    dewarp_line_count: int = 0
+    dewarp_max_displacement_px: float = 0.0
+    dewarp_reason: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -227,6 +256,8 @@ def _report_payload(
     detect_document: bool,
     detector_policy: str,
     illumination_correction: bool,
+    deskew_method: str,
+    dewarp_method: str,
 ) -> dict[str, object]:
     detected_pages = sum(page.detected for page in pages)
     fallback_pages = sum(page.fallback_reason is not None for page in pages)
@@ -238,6 +269,8 @@ def _report_payload(
         "detectionEnabled": detect_document,
         "detectorPolicy": detector_policy,
         "illuminationCorrection": illumination_correction,
+        "deskewMethod": deskew_method,
+        "dewarpMethod": dewarp_method,
         "totalPages": len(pages),
         "detectedPages": detected_pages,
         "fallbackPages": fallback_pages,
@@ -249,6 +282,13 @@ def _report_payload(
                 "backend": page.backend,
                 "fallbackReason": page.fallback_reason,
                 "durationMs": page.duration_ms,
+                "deskewMethod": page.deskew_method,
+                "deskewAngleDegrees": page.deskew_angle_degrees,
+                "dewarpMethod": page.dewarp_method,
+                "dewarpApplied": page.dewarp_applied,
+                "dewarpLineCount": page.dewarp_line_count,
+                "dewarpMaxDisplacementPx": page.dewarp_max_displacement_px,
+                "dewarpReason": page.dewarp_reason,
             }
             for page in pages
         ],
@@ -316,6 +356,8 @@ def run_batch_pipeline(
     two_page_mode: bool = False,
     lens_mode: str = "document",
     illumination_correction: bool = False,
+    deskew_method: str = "none",
+    dewarp_method: str = "none",
     uvdoc_cache_home: Path | None = None,
     cancel_cb: CancelCb | None = None,
 ) -> BatchPipelineResult:
@@ -325,6 +367,12 @@ def run_batch_pipeline(
         raise ValueError("PDF DPI must be >= 72.")
     if strict_detect and not detect_document:
         raise ValueError("strict_detect cannot be used when document detection is disabled.")
+    deskew_method = deskew_method.strip().lower()
+    dewarp_method = dewarp_method.strip().lower()
+    if deskew_method not in DESKEW_METHOD_CHOICES:
+        raise ValueError(f"Unsupported deskew method: {deskew_method}")
+    if dewarp_method not in DEWARP_METHOD_CHOICES:
+        raise ValueError(f"Unsupported dewarp method: {dewarp_method}")
 
     output_pdf = Path(output_pdf).with_suffix(".pdf")
     report_path = Path(report_path) if report_path else output_pdf.with_suffix(".pdf.report.json")
@@ -376,7 +424,24 @@ def run_batch_pipeline(
                 cancel_cb=cancel_cb,
             )
             for page in page_results:
-                current = postprocess(page.current)
+                deskewed, deskew_angle = deskew_document(page.current, method=deskew_method)
+                if (
+                    dewarp_method == DEWARP_METHOD_PADDLEOCR_UVDOC
+                    and page.backend == DETECTOR_BACKEND_PADDLEOCR_UVDOC
+                ):
+                    dewarped = deskewed
+                    dewarp_diagnostics = DewarpDiagnostics(
+                        method=dewarp_method,
+                        applied=True,
+                        reason="applied_by_detection_backend",
+                    )
+                else:
+                    dewarped, dewarp_diagnostics = dewarp_document(
+                        deskewed,
+                        method=dewarp_method,
+                        uvdoc_cache_home=uvdoc_cache_home,
+                    )
+                current = postprocess(dewarped)
                 if preprocess_settings is not None:
                     current = apply_enhancements(current, preprocess_settings)
                 page_path = page_stage_dir / f"{len(staged_page_paths) + 1:05d}.png"
@@ -391,6 +456,13 @@ def run_batch_pipeline(
                         backend=page.backend,
                         fallback_reason=page.fallback_reason,
                         duration_ms=round((time.perf_counter() - started) * 1000.0, 3),
+                        deskew_method=deskew_method,
+                        deskew_angle_degrees=round(float(deskew_angle), 3),
+                        dewarp_method=dewarp_method,
+                        dewarp_applied=dewarp_diagnostics.applied,
+                        dewarp_line_count=dewarp_diagnostics.line_count,
+                        dewarp_max_displacement_px=dewarp_diagnostics.max_displacement_px,
+                        dewarp_reason=dewarp_diagnostics.reason,
                     )
                 )
 
@@ -405,6 +477,8 @@ def run_batch_pipeline(
             detect_document=bool(detect_document),
             detector_policy="disabled" if not detect_document else detector_policy,
             illumination_correction=bool(illumination_correction),
+            deskew_method=deskew_method,
+            dewarp_method=dewarp_method,
         )
         staged_targets, final_image_paths = _stage_outputs(
             staged_page_paths=staged_page_paths,

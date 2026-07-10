@@ -1,7 +1,10 @@
 import cv2
 import numpy as np
+import pytest
 
 from uniscan.core.preprocess import (
+    DESKEW_METHOD_HOUGH,
+    DESKEW_METHOD_MIN_AREA,
     LENS_MODE_CUSTOM,
     LENS_MODE_PROFILES,
     PREPROCESS_PRESETS,
@@ -9,6 +12,7 @@ from uniscan.core.preprocess import (
     apply_enhancements,
     correct_illumination,
     deskew_document,
+    estimate_document_skew,
     infer_lens_mode,
     resolve_lens_mode_profile,
 )
@@ -97,3 +101,34 @@ def test_deskew_document_returns_angle_for_rotated_content() -> None:
     fixed, angle = deskew_document(rotated)
     assert fixed.shape == rotated.shape
     assert abs(angle) > 1.0
+
+
+def test_hough_deskew_estimates_rotated_text_lines() -> None:
+    base = np.full((420, 620, 3), 255, dtype=np.uint8)
+    for y in range(80, 350, 45):
+        cv2.line(base, (70, y), (550, y), (0, 0, 0), 5)
+    matrix = cv2.getRotationMatrix2D((310, 210), 8.0, 1.0)
+    rotated = cv2.warpAffine(
+        base,
+        matrix,
+        (620, 420),
+        flags=cv2.INTER_LINEAR,
+        borderValue=(255, 255, 255),
+    )
+
+    estimate = estimate_document_skew(rotated, method=DESKEW_METHOD_HOUGH)
+
+    assert estimate.line_count >= 3
+    assert estimate.confidence > 0.1
+    assert estimate.angle_degrees == pytest.approx(-8.0, abs=1.0)
+
+
+def test_min_area_deskew_and_invalid_method() -> None:
+    image = np.full((180, 240, 3), 255, dtype=np.uint8)
+    cv2.rectangle(image, (40, 70), (200, 110), (0, 0, 0), -1)
+
+    estimate = estimate_document_skew(image, method=DESKEW_METHOD_MIN_AREA)
+
+    assert abs(estimate.angle_degrees) < 0.1
+    with pytest.raises(ValueError, match="Unsupported deskew method"):
+        estimate_document_skew(image, method="missing")

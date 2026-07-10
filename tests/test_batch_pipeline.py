@@ -31,6 +31,25 @@ def _write_pdf(path: Path, page_count: int) -> None:
         document.close()
 
 
+def _write_curved_text_page(path: Path) -> None:
+    height, width = 700, 900
+    image = np.full((height, width, 3), 255, dtype=np.uint8)
+    for baseline in range(90, 620, 65):
+        for x in range(60, 840, 22):
+            normalized_x = (2.0 * x / (width - 1)) - 1.0
+            displacement = int(round(18.0 * ((normalized_x**2) - 0.35)))
+            cv2.rectangle(
+                image,
+                (x, baseline + displacement),
+                (x + 12, baseline + displacement + 11),
+                (0, 0, 0),
+                -1,
+            )
+    ok, buffer = cv2.imencode(".png", image)
+    assert ok
+    buffer.tofile(str(path))
+
+
 def test_resolve_input_paths_expands_folders_in_natural_order(tmp_path) -> None:
     input_dir = tmp_path / "input"
     input_dir.mkdir()
@@ -69,6 +88,49 @@ def test_run_batch_pipeline_writes_pdf_and_images(tmp_path) -> None:
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert report["totalPages"] == 2
     assert report["detectionEnabled"] is False
+    assert report["deskewMethod"] == "none"
+    assert report["dewarpMethod"] == "none"
+
+
+def test_run_batch_pipeline_applies_and_reports_textline_dewarp(tmp_path) -> None:
+    source = tmp_path / "curved.png"
+    _write_curved_text_page(source)
+
+    result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "dewarped.pdf",
+        images_dir=tmp_path / "dewarped-pages",
+        detect_document=False,
+        lens_mode="none",
+        deskew_method="none",
+        dewarp_method="textline",
+    )
+
+    assert result.pages[0].dewarp_applied is True
+    assert result.pages[0].dewarp_line_count >= 3
+    assert result.pages[0].dewarp_max_displacement_px > 2.0
+    report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    assert report["dewarpMethod"] == "textline"
+    assert report["pages"][0]["dewarpApplied"] is True
+    assert report["pages"][0]["dewarpReason"] is None
+
+
+def test_run_batch_pipeline_rejects_unknown_geometry_methods(tmp_path) -> None:
+    source = tmp_path / "source.png"
+    _write_image(source, 90)
+
+    with pytest.raises(ValueError, match="Unsupported deskew method"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=tmp_path / "deskew.pdf",
+            deskew_method="missing",
+        )
+    with pytest.raises(ValueError, match="Unsupported dewarp method"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=tmp_path / "dewarp.pdf",
+            dewarp_method="missing",
+        )
 
 
 def test_cli_convert_runs_end_to_end(tmp_path, capsys) -> None:

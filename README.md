@@ -62,6 +62,9 @@ Useful options:
 - `--report PATH` selects the per-page JSON run report path.
 - `--no-detect` disables boundary detection and perspective correction.
 - `--two-page` splits book spreads using gutter detection with midpoint fallback.
+- `--deskew {none,hybrid,hough,min_area}` selects small-angle rotation correction.
+- `--dewarp {none,textline,paddleocr_uvdoc}` removes local page waves after cropping; `textline`
+  works fully offline, while UVDoc requires its optional PaddleOCR runtime.
 - `--illumination-correction` opts into experimental shadow/highlight normalization.
 - `--pdf-dpi 300` controls PDF rendering and export DPI.
 - `--images-dir DIR --image-format png` also writes processed page images.
@@ -69,6 +72,9 @@ Useful options:
 The default detector cascade is bundled Office Lens ONNX, optional PaddleOCR UVDoc, then the
 OpenCV hybrid fallback. PDF input is streamed one page at a time. PDF, image-directory, and JSON
 report outputs are staged and published together, so cancellation/failure preserves prior output.
+Boundary detection, deskew, and local dewarp are independent stages; their selected methods and
+per-page results are recorded in the JSON report. See
+[`docs/document_geometry.md`](docs/document_geometry.md).
 
 ## Runtime diagnostics
 

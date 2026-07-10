@@ -2,6 +2,20 @@
 
 All notable changes to UniScan are documented here. The project follows Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- Independent boundary, deskew, and local-dewarp stages with per-page JSON diagnostics.
+- Offline text-line dewarp for curved or wavy pages, with confidence-based no-op fallback.
+- Selectable hybrid, Hough-line, and foreground-box deskew estimators.
+- Direct CLI access to the OpenCV quad, Hough, and minimum-rectangle boundary backends.
+
+### Changed
+
+- GUI processing now exposes page-wave removal, and Page tools allows choosing the deskew
+  estimator before applying automatic rotation correction.
+
 ## [0.1.0] - 2026-07-10
 
 ### Added

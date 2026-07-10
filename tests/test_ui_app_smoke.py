@@ -25,6 +25,8 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.status_var.get() == "Ready"
         assert len(app.session) == 0
         assert app.preprocess_preset_var.get() == "Document"
+        assert app.dewarp_method_var.get() == "None"
+        assert app.deskew_method_var.get() == "Hybrid (recommended)"
         assert app.preview_mode_var.get() == "Processed"
         assert app.page_preview_after_frame.winfo_manager() == "grid"
         assert app.page_preview_before_frame.winfo_manager() == ""

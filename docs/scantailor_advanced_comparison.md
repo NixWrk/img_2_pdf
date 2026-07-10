@@ -36,7 +36,7 @@ UniScan закрывает путь `камера/изображения/PDF →
 | Поиск документа | Не является camera document scanner | ONNX Office Lens, OpenCV fallback, optional UVDoc, ручные углы | UniScan функциональнее для фотографий |
 | Развороты | Auto/manual cutters, типы страниц, адаптация разреза к разным размерам, fill offcut | Автопоиск корешка с midpoint fallback и ручные инструменты | ScanTailor точнее и лучше управляется |
 | Наклон | Отдельная стадия, ручной/автоматический режим, deviation и сортировка проблемных страниц | Otsu + `minAreaRect`, без оценки доверия и статистики по документу | ScanTailor зрелее; алгоритм UniScan уязвим к рамкам и крупным изображениям |
-| Кривизна книги | Автоматическая и ручная цилиндрическая модель, редактируемые верхняя/нижняя линии и depth | Optional ML UVDoc без ручной сетки | Подходы дополняют друг друга; UniScan нужна ручная доводка |
+| Кривизна книги | Автоматическая и ручная цилиндрическая модель, редактируемые верхняя/нижняя линии и depth | Independent offline text-line dewarp и optional UVDoc, без ручной сетки | Автоматический пробел закрыт; UniScan всё ещё нужна ручная доводка сложных книг |
 | Содержимое и поля | Content box, page box, auto/manual/original margins, выравнивание, guides, физические единицы | Отсутствуют как отдельная стадия | Крупный функциональный пробел UniScan |
 | Ч/б обработка | Otsu, Sauvola, Wolf, illumination normalization, Savitzky-Golay и morphology smoothing | Fixed adaptive Gaussian, ручной global threshold в preset, optional illumination correction | ScanTailor дает существенно больше контроля |
 | Шум | Регулируемый despeckle и отдельная визуализация удаленных точек | NLMeans denoise без семантики размера компонента и preview удалений | ScanTailor удобнее для архивного текста |
@@ -98,7 +98,7 @@ UniScan закрывает путь `камера/изображения/PDF →
 
 ### P2 — книги и смешанный контент
 
-- Редактируемая модель dewarp поверх UVDoc результата.
+- Редактируемая модель dewarp поверх автоматического text-line/UVDoc результата.
 - Picture/fill zones и отдельная обработка текстовой маски.
 - Ограниченный worker pool с сохранением порядка, атомарностью output и лимитом памяти.
 
@@ -108,4 +108,6 @@ UniScan закрывает путь `камера/изображения/PDF →
   область, а original-only не считает processed preview.
 - Добавлены горячие клавиши для импорта, захвата, экспорта, обновления preview и операций над
   страницами.
+- Boundary detection, deskew и dewarp разделены. Добавлены offline text-line dewarp, selectable
+  Hough/hybrid/min-area deskew и отдельная диагностика геометрии в run report.
 - Следующий GUI-шаг — thumbnail cards, для которых уже существует `CaptureEntry.thumbnail_image`.

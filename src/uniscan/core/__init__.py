@@ -1,8 +1,21 @@
 """Core processing primitives for unified scanner."""
 
 from .geometry import order_quad_points, warp_perspective_from_points
+from .dewarp import (
+    DEWARP_METHOD_CHOICES,
+    DEWARP_METHOD_NONE,
+    DEWARP_METHOD_PADDLEOCR_UVDOC,
+    DEWARP_METHOD_TEXTLINE,
+    DewarpDiagnostics,
+    dewarp_document,
+)
 from .pipeline import PipelineOptions, build_pdf_from_images, process_loaded_items, split_spread
 from .preprocess import (
+    DESKEW_METHOD_CHOICES,
+    DESKEW_METHOD_HOUGH,
+    DESKEW_METHOD_HYBRID,
+    DESKEW_METHOD_MIN_AREA,
+    DESKEW_METHOD_NONE,
     LENS_MODE_CUSTOM,
     LENS_MODE_PROFILES,
     LENS_MODE_VALUES,
@@ -10,6 +23,7 @@ from .preprocess import (
     PreprocessSettings,
     apply_enhancements,
     deskew_document,
+    estimate_document_skew,
     infer_lens_mode,
     resolve_lens_mode_profile,
 )
@@ -29,6 +43,16 @@ from .scanner_adapter import (
 )
 
 __all__ = [
+    "DESKEW_METHOD_CHOICES",
+    "DESKEW_METHOD_HOUGH",
+    "DESKEW_METHOD_HYBRID",
+    "DESKEW_METHOD_MIN_AREA",
+    "DESKEW_METHOD_NONE",
+    "DEWARP_METHOD_CHOICES",
+    "DEWARP_METHOD_NONE",
+    "DEWARP_METHOD_PADDLEOCR_UVDOC",
+    "DEWARP_METHOD_TEXTLINE",
+    "DewarpDiagnostics",
     "LENS_MODE_CUSTOM",
     "LENS_MODE_PROFILES",
     "LENS_MODE_VALUES",
@@ -48,6 +72,8 @@ __all__ = [
     "apply_enhancements",
     "build_pdf_from_images",
     "deskew_document",
+    "dewarp_document",
+    "estimate_document_skew",
     "infer_lens_mode",
     "order_quad_points",
     "process_loaded_items",

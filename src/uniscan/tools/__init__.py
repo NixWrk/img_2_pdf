@@ -1,6 +1,8 @@
 """Utility tools for offline benchmarking and maintenance flows."""
 
 from .batch_pipeline import (
+    DESKEW_METHOD_CHOICES,
+    DEWARP_METHOD_CHOICES,
     DETECTOR_POLICY_CHOICES,
     LENS_MODE_CHOICES,
     BatchPipelineResult,
@@ -24,6 +26,8 @@ from .quality_benchmark import (
 )
 
 __all__ = [
+    "DESKEW_METHOD_CHOICES",
+    "DEWARP_METHOD_CHOICES",
     "LENS_MODE_CHOICES",
     "DETECTOR_POLICY_CHOICES",
     "BatchPipelineResult",

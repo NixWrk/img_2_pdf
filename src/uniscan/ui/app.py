@@ -21,8 +21,12 @@ from uniscan.export import (
     export_image_paths_as_pdf,
 )
 from uniscan.core.geometry import warp_perspective_from_points
+from uniscan.core.dewarp import DEWARP_METHOD_NONE, DEWARP_METHOD_TEXTLINE, dewarp_document
 from uniscan.core.pipeline import PageResult, PipelineOptions, process_loaded_items
 from uniscan.core.preprocess import (
+    DESKEW_METHOD_HOUGH,
+    DESKEW_METHOD_HYBRID,
+    DESKEW_METHOD_MIN_AREA,
     LENS_MODE_VALUES,
     PREPROCESS_PRESETS,
     PreprocessSettings,
@@ -70,6 +74,16 @@ RESOLUTIONS = [
     "800x600",
     "640x480",
 ]
+
+DEWARP_UI_METHODS = {
+    "None": DEWARP_METHOD_NONE,
+    "Text lines (offline)": DEWARP_METHOD_TEXTLINE,
+}
+DESKEW_UI_METHODS = {
+    "Hybrid (recommended)": DESKEW_METHOD_HYBRID,
+    "Text lines / Hough": DESKEW_METHOD_HOUGH,
+    "Foreground box": DESKEW_METHOD_MIN_AREA,
+}
 
 
 class UnifiedScanApp(ctk.CTk):
@@ -120,6 +134,8 @@ class UnifiedScanApp(ctk.CTk):
         self.preprocess_denoise_var = tk.IntVar(value=4)
         self.preprocess_threshold_var = tk.IntVar(value=170)
         self.preprocess_illumination_var = tk.BooleanVar(value=False)
+        self.dewarp_method_var = tk.StringVar(value="None")
+        self.deskew_method_var = tk.StringVar(value="Hybrid (recommended)")
         self.import_folder_var = tk.StringVar()
         self.import_files_var = tk.StringVar()
         self.import_pdf_dpi_var = tk.IntVar(value=300)
@@ -582,6 +598,16 @@ class UnifiedScanApp(ctk.CTk):
             command=self.update_page_preview,
         ).pack(anchor="w", padx=6, pady=(0, 10))
 
+        ctk.CTkLabel(processing, text="Remove page waves", anchor="w").pack(
+            fill=ctk.X, padx=6, pady=(0, 2)
+        )
+        ctk.CTkOptionMenu(
+            processing,
+            values=list(DEWARP_UI_METHODS),
+            variable=self.dewarp_method_var,
+            command=self._on_dewarp_method_change,
+        ).pack(fill=ctk.X, padx=6, pady=(0, 10))
+
         processing_actions = ctk.CTkFrame(processing, fg_color="transparent")
         processing_actions.pack(fill=ctk.X, padx=6, pady=(0, 6))
         ctk.CTkButton(
@@ -784,7 +810,7 @@ class UnifiedScanApp(ctk.CTk):
     def open_page_tools_dialog(self) -> None:
         window = ctk.CTkToplevel(self)
         window.title("Page tools")
-        window.geometry("420x330")
+        window.geometry("440x440")
         window.resizable(False, False)
         window.transient(self)
 
@@ -813,14 +839,31 @@ class UnifiedScanApp(ctk.CTk):
                 command=command,
             ).grid(row=row, column=column, sticky="ew", padx=6, pady=6)
 
-        add(0, 0, "Manual corners", self.open_manual_corners_editor)
-        add(0, 1, "Auto crop", self.open_auto_crop_editor)
-        add(1, 0, "Replace from file", self.replace_selected_page_from_file)
-        add(1, 1, "Auto deskew", self.auto_deskew_selected)
-        add(2, 0, "Retake with camera", self.retake_selected_page_from_camera)
-        add(2, 1, "Split book spread", self.split_selected_as_spread)
-        add(3, 0, "Refresh pages", self.refresh_page_list)
-        add(3, 1, "Close", window.destroy)
+        ctk.CTkLabel(body, text="Deskew estimator", anchor="w").grid(
+            row=0, column=0, sticky="w", padx=6, pady=6
+        )
+        ctk.CTkOptionMenu(
+            body,
+            values=list(DESKEW_UI_METHODS),
+            variable=self.deskew_method_var,
+        ).grid(row=0, column=1, sticky="ew", padx=6, pady=6)
+
+        add(1, 0, "Manual corners", self.open_manual_corners_editor)
+        add(1, 1, "Auto crop", self.open_auto_crop_editor)
+        add(2, 0, "Replace from file", self.replace_selected_page_from_file)
+        add(2, 1, "Auto deskew", self.auto_deskew_selected)
+        add(3, 0, "Retake with camera", self.retake_selected_page_from_camera)
+        add(3, 1, "Split book spread", self.split_selected_as_spread)
+        add(4, 0, "Remove page waves", self.remove_waves_selected)
+        add(4, 1, "Refresh pages", self.refresh_page_list)
+        ctk.CTkButton(body, text="Close", command=window.destroy).grid(
+            row=5,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=6,
+            pady=6,
+        )
 
         window.grab_set()
 
@@ -830,6 +873,9 @@ class UnifiedScanApp(ctk.CTk):
 
     def _on_postprocess_mode_change(self, _value: str) -> None:
         self._sync_lens_mode_from_controls()
+        self.update_page_preview()
+
+    def _on_dewarp_method_change(self, _value: str) -> None:
         self.update_page_preview()
 
     def on_lens_mode_change(self, mode_name: str) -> None:
@@ -1078,6 +1124,10 @@ class UnifiedScanApp(ctk.CTk):
         out = fn(image)
         return apply_enhancements(out, self._current_preprocess_settings())
 
+    def _apply_dewarp(self, image: np.ndarray):
+        method = DEWARP_UI_METHODS.get(self.dewarp_method_var.get(), DEWARP_METHOD_NONE)
+        return dewarp_document(image, method=method)
+
     def _review_before_image(self, entry) -> np.ndarray:
         """Raw source with the detected contour drawn over it."""
         if self.lightweight_preview_var.get():
@@ -1107,7 +1157,8 @@ class UnifiedScanApp(ctk.CTk):
             base = entry.preview_original_image
         else:
             base = entry.original_image
-        return self._apply_postprocess(base)
+        dewarped, _diagnostics = self._apply_dewarp(base)
+        return self._apply_postprocess(dewarped)
 
     def _show_in_preview(self, image: np.ndarray) -> None:
         photo = self._to_ctk_photo_for_label(image, self.preview_label)
@@ -2299,13 +2350,15 @@ class UnifiedScanApp(ctk.CTk):
             return
         self._open_corner_editor_dialog(indices, auto_detect=True)
 
-    def _reprocess_entry_from_original(self, entry) -> None:
+    def _reprocess_entry_from_original(self, entry):
         postprocess_fn = POSTPROCESSING_OPTIONS.get(
             self.postprocess_var.get(), POSTPROCESSING_OPTIONS["None"]
         )
         settings = self._current_preprocess_settings()
-        base = postprocess_fn(entry.original_image)
+        dewarped, diagnostics = self._apply_dewarp(entry.original_image)
+        base = postprocess_fn(dewarped)
         entry.current_image = apply_enhancements(base, settings)
+        return diagnostics
 
     def _selected_entry_indices(self) -> list[int]:
         indexes = list(self.page_listbox.curselection())
@@ -2411,9 +2464,13 @@ class UnifiedScanApp(ctk.CTk):
             return
 
         angles: list[float] = []
+        method = DESKEW_UI_METHODS.get(
+            self.deskew_method_var.get(),
+            DESKEW_METHOD_HYBRID,
+        )
         for idx in indices:
             entry = self.session.entries[idx]
-            deskewed, angle = deskew_document(entry.original_image)
+            deskewed, angle = deskew_document(entry.original_image, method=method)
             entry.original_image = deskewed
             self._reprocess_entry_from_original(entry)
             angles.append(angle)
@@ -2421,6 +2478,24 @@ class UnifiedScanApp(ctk.CTk):
         self.refresh_page_list(keep_index=indices[-1])
         mean_angle = sum(angles) / max(1, len(angles))
         self._set_status(f"Deskewed {len(indices)} page(s), avg angle {mean_angle:.1f} deg.")
+
+    def remove_waves_selected(self) -> None:
+        indices = self._selected_entry_indices()
+        if not indices:
+            self._set_status("Select page(s) to remove waves.")
+            return
+
+        self.dewarp_method_var.set("Text lines (offline)")
+        diagnostics = []
+        for idx in indices:
+            diagnostics.append(self._reprocess_entry_from_original(self.session.entries[idx]))
+        self.refresh_page_list(keep_index=indices[-1])
+        applied = sum(item.applied for item in diagnostics)
+        max_displacement = max((item.max_displacement_px for item in diagnostics), default=0.0)
+        self._set_status(
+            f"Removed page waves on {applied}/{len(indices)} page(s); "
+            f"max correction {max_displacement:.1f}px."
+        )
 
     def _on_review_processing_slider_change(self, _value: float) -> None:
         self.update_page_preview()
