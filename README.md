@@ -25,6 +25,12 @@ py -3.11 -m venv .venv
 `python camscan_hybrid_tool.py` remains as a compatibility alias for the package GUI. It no
 longer contains a separate legacy implementation.
 
+![UniScan document workspace](docs/images/workspace-v1.png)
+
+The GUI follows a single-document workspace with persistent add, camera, processing, and export
+actions. Design rationale and the next UX iterations are in
+[`docs/gui_ux_research.md`](docs/gui_ux_research.md).
+
 ## Headless image/PDF-to-PDF pipeline
 
 Process one or more files or folders into a merged PDF:

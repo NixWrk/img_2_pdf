@@ -104,6 +104,7 @@ class UnifiedScanApp(ctk.CTk):
         elif self._restore_error:
             initial_status = f"Autosave restore skipped: {self._restore_error}"
         self.status_var = tk.StringVar(value=initial_status)
+        self.page_count_var = tk.StringVar(value="0 pages")
         self.camera_health_var = tk.StringVar(value="Camera: Closed")
         self.camera_index_var = tk.IntVar(value=0)
         self.camera_shots_var = tk.IntVar(value=1)
@@ -135,10 +136,10 @@ class UnifiedScanApp(ctk.CTk):
         self.job_cancel_event = threading.Event()
         self.job_thread: threading.Thread | None = None
         self.autosave_job: str | None = None
-        self.tab_import_name = "1. Import"
-        self.tab_scan_name = "2. Scan"
-        self.tab_review_name = "3. Review"
-        self.tab_export_name = "4. Export"
+        self.tab_review_name = "Workspace"
+        self.tab_scan_name = "Camera"
+        self.tab_import_name = "Import options"
+        self.tab_export_name = "Export options"
 
         self._build_ui()
         self._enable_drag_drop()
@@ -154,45 +155,109 @@ class UnifiedScanApp(ctk.CTk):
         container = ctk.CTkFrame(self)
         container.pack(fill=ctk.BOTH, expand=True, padx=12, pady=12)
 
-        title = ctk.CTkLabel(
-            container,
-            text="UniScan - Unified Document Processing",
+        header = ctk.CTkFrame(container, fg_color=("#dbdbdb", "#2b2b2b"))
+        header.pack(fill=ctk.X, padx=12, pady=(10, 4))
+        brand = ctk.CTkFrame(header, fg_color="transparent")
+        brand.pack(side=ctk.LEFT)
+        ctk.CTkLabel(
+            brand,
+            text="UniScan",
             font=ctk.CTkFont(size=24, weight="bold"),
-        )
-        title.pack(anchor="w", padx=12, pady=(12, 8))
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            brand,
+            text="Capture, clean and export documents",
+            text_color=("#60646c", "#a0a4ab"),
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            header,
+            textvariable=self.camera_health_var,
+            text_color=("#60646c", "#a0a4ab"),
+        ).pack(side=ctk.RIGHT, padx=(8, 0))
+        ctk.CTkLabel(
+            header,
+            textvariable=self.page_count_var,
+            text_color=("#60646c", "#a0a4ab"),
+        ).pack(side=ctk.RIGHT, padx=8)
 
-        flow_tip = ctk.CTkLabel(
-            container,
-            text="Flow: 1) Import files (main) or scan camera  2) Review: all processing/editing  3) Export PDF or images",
-            anchor="w",
+        toolbar = ctk.CTkFrame(container)
+        toolbar.pack(fill=ctk.X, padx=12, pady=(6, 4))
+        ctk.CTkButton(
+            toolbar,
+            text="+ Add files",
+            width=110,
+            command=self.quick_add_files,
+        ).pack(side=ctk.LEFT, padx=(8, 4), pady=8)
+        ctk.CTkButton(
+            toolbar,
+            text="Add folder",
+            width=105,
+            fg_color="transparent",
+            border_width=1,
+            command=self.quick_add_folder,
+        ).pack(side=ctk.LEFT, padx=4, pady=8)
+        ctk.CTkButton(
+            toolbar,
+            text="Paste",
+            width=80,
+            fg_color="transparent",
+            border_width=1,
+            command=self.import_from_clipboard,
+        ).pack(side=ctk.LEFT, padx=4, pady=8)
+        ctk.CTkButton(
+            toolbar,
+            text="Camera",
+            width=90,
+            fg_color="transparent",
+            border_width=1,
+            command=lambda: self.tabs.set(self.tab_scan_name),
+        ).pack(side=ctk.LEFT, padx=4, pady=8)
+        self.toolbar_export_button = ctk.CTkButton(
+            toolbar,
+            text="Export PDF...",
+            width=120,
+            fg_color="#2f855a",
+            hover_color="#276749",
+            command=self.export_to_pdf,
         )
-        flow_tip.pack(fill=ctk.X, padx=12, pady=(0, 6))
+        self.toolbar_export_button.pack(side=ctk.RIGHT, padx=8, pady=8)
+
+        self.status_frame = ctk.CTkFrame(container)
+        self.status_frame.pack(side=ctk.BOTTOM, fill=ctk.X, padx=12, pady=(0, 12))
+        status_label = ctk.CTkLabel(self.status_frame, textvariable=self.status_var, anchor="w")
+        status_label.pack(side=ctk.LEFT, fill=ctk.X, expand=True, padx=10, pady=7)
+        self.cancel_task_button = ctk.CTkButton(
+            self.status_frame,
+            text="Cancel task",
+            width=90,
+            height=26,
+            fg_color="transparent",
+            border_width=1,
+            command=self.cancel_current_job,
+            state=tk.DISABLED,
+        )
+        self.cancel_task_button.pack(side=ctk.RIGHT, padx=8, pady=5)
 
         self.tabs = ctk.CTkTabview(container)
-        self.tabs.pack(fill=ctk.BOTH, expand=True, padx=12, pady=12)
+        self.tabs.pack(fill=ctk.BOTH, expand=True, padx=12, pady=(4, 8))
 
-        self.import_tab = self.tabs.add(self.tab_import_name)
-        self.capture_tab = self.tabs.add(self.tab_scan_name)
         self.pages_tab = self.tabs.add(self.tab_review_name)
+        self.capture_tab = self.tabs.add(self.tab_scan_name)
+        self.import_tab = self.tabs.add(self.tab_import_name)
         self.export_tab = self.tabs.add(self.tab_export_name)
 
-        self._build_import_tab(self.import_tab)
-        self._build_capture_tab(self.capture_tab)
         self._build_pages_tab(self.pages_tab)
+        self._build_capture_tab(self.capture_tab)
+        self._build_import_tab(self.import_tab)
         self._build_export_tab(self.export_tab)
-        self.tabs.set(self.tab_import_name)
-
-        status_frame = ctk.CTkFrame(container)
-        status_frame.pack(fill=ctk.X, padx=12, pady=(0, 12))
-        status_label = ctk.CTkLabel(status_frame, textvariable=self.status_var, anchor="w")
-        status_label.pack(fill=ctk.X, padx=10, pady=8)
+        self.tabs.set(self.tab_review_name)
 
     def _build_capture_tab(self, tab: ctk.CTkFrame) -> None:
         tab.grid_columnconfigure(0, weight=0)
         tab.grid_columnconfigure(1, weight=1)
         tab.grid_rowconfigure(0, weight=1)
 
-        controls = ctk.CTkFrame(tab)
+        controls = ctk.CTkScrollableFrame(tab, width=340)
         controls.grid(row=0, column=0, sticky="ns", padx=(10, 8), pady=10)
 
         ctk.CTkLabel(controls, text="Camera index").pack(anchor="w", padx=10, pady=(10, 4))
@@ -223,7 +288,7 @@ class UnifiedScanApp(ctk.CTk):
 
         ctk.CTkLabel(
             controls,
-            text="Scan only acquires raw images.\nAll processing is in Review tab.",
+            text="Capture adds pages to the workspace.\nProcessing stays non-destructive until applied.",
             justify="left",
             anchor="w",
         ).pack(fill=ctk.X, padx=10, pady=(0, 8))
@@ -257,7 +322,7 @@ class UnifiedScanApp(ctk.CTk):
             side=ctk.LEFT,
             padx=6,
         )
-        ctk.CTkButton(row_capture, text="Review", width=80, command=self.go_to_review_tab).pack(
+        ctk.CTkButton(row_capture, text="Workspace", width=90, command=self.go_to_review_tab).pack(
             side=ctk.LEFT
         )
 
@@ -287,7 +352,7 @@ class UnifiedScanApp(ctk.CTk):
 
         ctk.CTkLabel(
             controls,
-            text="Tip: capture first, then open Review to process pages.",
+            text="Captured pages are immediately available in Workspace.",
             justify="left",
             wraplength=250,
         ).pack(anchor="w", padx=10, pady=(0, 8))
@@ -305,194 +370,246 @@ class UnifiedScanApp(ctk.CTk):
         self.preview_label.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
 
     def _build_pages_tab(self, tab: ctk.CTkFrame) -> None:
-        tab.grid_columnconfigure(0, weight=0)
+        tab.grid_columnconfigure(0, weight=0, minsize=290)
         tab.grid_columnconfigure(1, weight=1)
+        tab.grid_columnconfigure(2, weight=0, minsize=280)
         tab.grid_rowconfigure(0, weight=1)
 
-        left = ctk.CTkFrame(tab)
-        left.grid(row=0, column=0, sticky="ns", padx=(12, 8), pady=12)
+        left = ctk.CTkFrame(tab, width=290)
+        left.grid(row=0, column=0, sticky="nsew", padx=(10, 6), pady=10)
+        left.grid_propagate(False)
 
-        ctk.CTkLabel(left, text="Session Pages").pack(anchor="w", padx=10, pady=(10, 6))
-        self.page_listbox = tk.Listbox(left, selectmode=tk.EXTENDED, width=46, height=24)
+        list_header = ctk.CTkFrame(left, fg_color="transparent")
+        list_header.pack(fill=ctk.X, padx=10, pady=(10, 6))
+        ctk.CTkLabel(
+            list_header,
+            text="Pages",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(side=ctk.LEFT)
+        ctk.CTkLabel(
+            list_header,
+            textvariable=self.page_count_var,
+            text_color=("#60646c", "#a0a4ab"),
+        ).pack(side=ctk.RIGHT)
+        ctk.CTkLabel(
+            left,
+            text="⚠  automatic crop not found",
+            anchor="w",
+            text_color=("#8a5a00", "#d6a84b"),
+            font=ctk.CTkFont(size=11),
+        ).pack(fill=ctk.X, padx=10, pady=(0, 5))
+        self.page_listbox = tk.Listbox(
+            left,
+            selectmode=tk.EXTENDED,
+            width=30,
+            height=8,
+            bg="#202225",
+            fg="#f2f2f2",
+            selectbackground="#1f6aa5",
+            selectforeground="#ffffff",
+            activestyle="none",
+            relief=tk.FLAT,
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground="#45484d",
+            highlightcolor="#1f6aa5",
+            font=("Segoe UI", 11),
+            exportselection=False,
+        )
         self.page_listbox.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
         self.page_listbox.bind("<<ListboxSelect>>", self.on_page_select)
 
-        row_a = ctk.CTkFrame(left, fg_color="transparent")
-        row_a.pack(fill=ctk.X, padx=10, pady=(0, 4))
-        ctk.CTkButton(row_a, text="Move Up", width=110, command=self.move_selected_up).pack(
-            side=ctk.LEFT
-        )
-        ctk.CTkButton(row_a, text="Move Down", width=110, command=self.move_selected_down).pack(
-            side=ctk.LEFT,
-            padx=6,
-        )
+        page_actions = ctk.CTkFrame(left, fg_color="transparent")
+        page_actions.pack(fill=ctk.X, padx=10, pady=(0, 4))
+        for text, command in (
+            ("Up", self.move_selected_up),
+            ("Down", self.move_selected_down),
+            ("Delete", self.delete_selected_pages),
+        ):
+            ctk.CTkButton(page_actions, text=text, width=78, command=command).pack(
+                side=ctk.LEFT, padx=(0, 4)
+            )
 
-        row_b = ctk.CTkFrame(left, fg_color="transparent")
-        row_b.pack(fill=ctk.X, padx=10, pady=(0, 4))
-        ctk.CTkButton(row_b, text="Select All", width=110, command=self.select_all_pages).pack(
-            side=ctk.LEFT
-        )
-        ctk.CTkButton(row_b, text="Clear Sel", width=110, command=self.clear_page_selection).pack(
-            side=ctk.LEFT,
-            padx=6,
-        )
-
-        row_c = ctk.CTkFrame(left, fg_color="transparent")
-        row_c.pack(fill=ctk.X, padx=10, pady=(0, 4))
-        ctk.CTkButton(row_c, text="Delete Sel", width=110, command=self.delete_selected_pages).pack(
-            side=ctk.LEFT
-        )
-        ctk.CTkButton(row_c, text="Refresh", width=110, command=self.refresh_page_list).pack(
-            side=ctk.LEFT, padx=6
-        )
-
-        row_d = ctk.CTkFrame(left, fg_color="transparent")
-        row_d.pack(fill=ctk.X, padx=10, pady=(0, 4))
+        edit_actions = ctk.CTkFrame(left, fg_color="transparent")
+        edit_actions.pack(fill=ctk.X, padx=10, pady=(0, 4))
         ctk.CTkButton(
-            row_d,
-            text="Manual Corners",
-            width=110,
-            command=self.open_manual_corners_editor,
-        ).pack(side=ctk.LEFT)
+            edit_actions,
+            text="Rotate left",
+            width=118,
+            fg_color="transparent",
+            border_width=1,
+            command=self.rotate_selected_left,
+        ).pack(side=ctk.LEFT, padx=(0, 4))
         ctk.CTkButton(
-            row_d, text="Auto Crop...", width=110, command=self.open_auto_crop_editor
-        ).pack(
-            side=ctk.LEFT,
-            padx=6,
-        )
-        ctk.CTkButton(
-            row_d, text="Replace Sel...", width=110, command=self.replace_selected_page_from_file
-        ).pack(
-            side=ctk.LEFT,
-            padx=6,
-        )
-
-        row_e = ctk.CTkFrame(left, fg_color="transparent")
-        row_e.pack(fill=ctk.X, padx=10, pady=(0, 4))
-        ctk.CTkButton(row_e, text="Rotate Left", width=110, command=self.rotate_selected_left).pack(
-            side=ctk.LEFT
-        )
-        ctk.CTkButton(
-            row_e, text="Rotate Right", width=110, command=self.rotate_selected_right
-        ).pack(
-            side=ctk.LEFT,
-            padx=6,
-        )
-
-        row_f = ctk.CTkFrame(left, fg_color="transparent")
-        row_f.pack(fill=ctk.X, padx=10, pady=(0, 4))
-        ctk.CTkButton(
-            row_f, text="Auto Deskew Sel", width=226, command=self.auto_deskew_selected
+            edit_actions,
+            text="Rotate right",
+            width=118,
+            fg_color="transparent",
+            border_width=1,
+            command=self.rotate_selected_right,
         ).pack(side=ctk.LEFT)
 
-        row_g = ctk.CTkFrame(left, fg_color="transparent")
-        row_g.pack(fill=ctk.X, padx=10, pady=(0, 4))
+        selection_actions = ctk.CTkFrame(left, fg_color="transparent")
+        selection_actions.pack(fill=ctk.X, padx=10, pady=(0, 4))
         ctk.CTkButton(
-            row_g, text="Retake Cam", width=226, command=self.retake_selected_page_from_camera
+            selection_actions,
+            text="Select all",
+            width=118,
+            fg_color="transparent",
+            border_width=1,
+            command=self.select_all_pages,
+        ).pack(side=ctk.LEFT, padx=(0, 4))
+        ctk.CTkButton(
+            selection_actions,
+            text="Clear",
+            width=118,
+            fg_color="transparent",
+            border_width=1,
+            command=self.clear_page_selection,
         ).pack(side=ctk.LEFT)
-
-        row_h = ctk.CTkFrame(left, fg_color="transparent")
-        row_h.pack(fill=ctk.X, padx=10, pady=(0, 4))
-        ctk.CTkButton(
-            row_h,
-            text="Split as Spread",
-            width=226,
-            command=self.split_selected_as_spread,
-        ).pack(side=ctk.LEFT)
-
-        processing = ctk.CTkFrame(left)
-        processing.pack(fill=ctk.X, padx=10, pady=(6, 8))
-        ctk.CTkLabel(processing, text="Review Processing").pack(anchor="w", padx=8, pady=(8, 6))
-
-        ctk.CTkCheckBox(
-            processing,
-            text="Apply all changes to all files",
-            variable=self.apply_changes_to_all_var,
-        ).pack(anchor="w", padx=8, pady=(0, 4))
-        ctk.CTkCheckBox(
-            processing,
-            text="Use lightweight previews (Full HD)",
-            variable=self.lightweight_preview_var,
-        ).pack(anchor="w", padx=8, pady=(0, 8))
-
-        row_modes = ctk.CTkFrame(processing, fg_color="transparent")
-        row_modes.pack(fill=ctk.X, padx=8, pady=(0, 6))
-        ctk.CTkLabel(row_modes, text="Lens").pack(side=ctk.LEFT, padx=(0, 4))
-        ctk.CTkOptionMenu(
-            row_modes,
-            values=list(LENS_MODE_VALUES),
-            variable=self.lens_mode_var,
-            command=self.on_lens_mode_change,
-            width=90,
-        ).pack(side=ctk.LEFT, padx=(0, 6))
-        ctk.CTkLabel(row_modes, text="Post").pack(side=ctk.LEFT, padx=(0, 4))
-        ctk.CTkOptionMenu(
-            row_modes,
-            values=list(POSTPROCESSING_OPTIONS.keys()),
-            variable=self.postprocess_var,
-            command=self._on_postprocess_mode_change,
-            width=105,
-        ).pack(side=ctk.LEFT, padx=(0, 6))
-        ctk.CTkLabel(row_modes, text="Preset").pack(side=ctk.LEFT, padx=(0, 4))
-        ctk.CTkOptionMenu(
-            row_modes,
-            values=list(PREPROCESS_PRESETS.keys()),
-            variable=self.preprocess_preset_var,
-            command=self.on_preprocess_preset_change,
-            width=105,
-        ).pack(side=ctk.LEFT)
-
-        row_process_a = ctk.CTkFrame(processing, fg_color="transparent")
-        row_process_a.pack(fill=ctk.X, padx=8, pady=(0, 6))
-        ctk.CTkButton(
-            row_process_a,
-            text="Preview Selected",
-            width=102,
-            command=self.update_page_preview,
-        ).pack(side=ctk.LEFT)
-        ctk.CTkButton(
-            row_process_a,
-            text="Advanced...",
-            width=102,
-            command=self.open_review_processing_dialog,
-        ).pack(side=ctk.LEFT, padx=6)
-        ctk.CTkButton(
-            processing,
-            text="Apply Changes",
-            command=self.apply_review_changes,
-        ).pack(fill=ctk.X, padx=8, pady=(0, 8))
 
         ctk.CTkButton(
             left,
-            text="Go to Export",
-            command=self.go_to_export_tab,
-        ).pack(fill=ctk.X, padx=10, pady=(0, 10))
+            text="More page tools...",
+            fg_color="transparent",
+            border_width=1,
+            command=self.open_page_tools_dialog,
+        ).pack(fill=ctk.X, padx=10, pady=(2, 10))
 
-        right = ctk.CTkFrame(tab)
-        right.grid(row=0, column=1, sticky="nsew", padx=(8, 12), pady=12)
-        right.grid_rowconfigure(0, weight=1)
-        right.grid_columnconfigure(0, weight=1)
-        right.grid_columnconfigure(1, weight=1)
+        preview = ctk.CTkFrame(tab)
+        preview.grid(row=0, column=1, sticky="nsew", padx=6, pady=10)
+        preview.grid_rowconfigure(0, weight=1)
+        preview.grid_columnconfigure(0, weight=1)
+        preview.grid_columnconfigure(1, weight=1)
 
-        before_frame = ctk.CTkFrame(right)
+        before_frame = ctk.CTkFrame(preview)
         before_frame.grid(row=0, column=0, sticky="nsew", padx=(8, 4), pady=8)
         before_frame.grid_rowconfigure(1, weight=1)
         before_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(before_frame, text="Before (Original)").grid(
+        ctk.CTkLabel(before_frame, text="Original").grid(
             row=0, column=0, sticky="w", padx=8, pady=(8, 4)
         )
         self.page_preview_before_label = ctk.CTkLabel(before_frame, text="No page selected")
         self.page_preview_before_label.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
 
-        after_frame = ctk.CTkFrame(right)
+        after_frame = ctk.CTkFrame(preview)
         after_frame.grid(row=0, column=1, sticky="nsew", padx=(4, 8), pady=8)
         after_frame.grid_rowconfigure(1, weight=1)
         after_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(after_frame, text="After (Review Settings Preview)").grid(
+        ctk.CTkLabel(after_frame, text="Processed preview").grid(
             row=0, column=0, sticky="w", padx=8, pady=(8, 4)
         )
         self.page_preview_after_label = ctk.CTkLabel(after_frame, text="No page selected")
         self.page_preview_after_label.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+
+        processing = ctk.CTkScrollableFrame(tab, width=270, label_text="Processing")
+        processing.grid(row=0, column=2, sticky="nsew", padx=(6, 10), pady=10)
+
+        ctk.CTkLabel(processing, text="Document type", anchor="w").pack(
+            fill=ctk.X, padx=6, pady=(4, 2)
+        )
+        ctk.CTkOptionMenu(
+            processing,
+            values=list(LENS_MODE_VALUES),
+            variable=self.lens_mode_var,
+            command=self.on_lens_mode_change,
+        ).pack(fill=ctk.X, padx=6, pady=(0, 8))
+
+        ctk.CTkLabel(processing, text="Output style", anchor="w").pack(
+            fill=ctk.X, padx=6, pady=(0, 2)
+        )
+        ctk.CTkOptionMenu(
+            processing,
+            values=list(POSTPROCESSING_OPTIONS.keys()),
+            variable=self.postprocess_var,
+            command=self._on_postprocess_mode_change,
+        ).pack(fill=ctk.X, padx=6, pady=(0, 8))
+
+        ctk.CTkLabel(processing, text="Cleanup preset", anchor="w").pack(
+            fill=ctk.X, padx=6, pady=(0, 2)
+        )
+        ctk.CTkOptionMenu(
+            processing,
+            values=list(PREPROCESS_PRESETS.keys()),
+            variable=self.preprocess_preset_var,
+            command=self.on_preprocess_preset_change,
+        ).pack(fill=ctk.X, padx=6, pady=(0, 10))
+
+        ctk.CTkCheckBox(
+            processing,
+            text="Apply to all pages",
+            variable=self.apply_changes_to_all_var,
+        ).pack(anchor="w", padx=6, pady=(0, 6))
+        ctk.CTkCheckBox(
+            processing,
+            text="Fast preview",
+            variable=self.lightweight_preview_var,
+            command=self.update_page_preview,
+        ).pack(anchor="w", padx=6, pady=(0, 6))
+        ctk.CTkCheckBox(
+            processing,
+            text="Correct uneven lighting",
+            variable=self.preprocess_illumination_var,
+            command=self.update_page_preview,
+        ).pack(anchor="w", padx=6, pady=(0, 10))
+
+        processing_actions = ctk.CTkFrame(processing, fg_color="transparent")
+        processing_actions.pack(fill=ctk.X, padx=6, pady=(0, 6))
+        ctk.CTkButton(
+            processing_actions,
+            text="Preview",
+            width=108,
+            fg_color="transparent",
+            border_width=1,
+            command=self.update_page_preview,
+        ).pack(side=ctk.LEFT, padx=(0, 4))
+        ctk.CTkButton(
+            processing_actions,
+            text="Advanced...",
+            width=108,
+            fg_color="transparent",
+            border_width=1,
+            command=self.open_review_processing_dialog,
+        ).pack(side=ctk.LEFT)
+        ctk.CTkButton(
+            processing,
+            text="Apply processing",
+            command=self.apply_review_changes,
+        ).pack(fill=ctk.X, padx=6, pady=(0, 14))
+
+        ctk.CTkLabel(
+            processing,
+            text="Export",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            anchor="w",
+        ).pack(fill=ctk.X, padx=6, pady=(2, 6))
+        ctk.CTkOptionMenu(
+            processing,
+            values=["All pages", "Selected pages"],
+            variable=self.export_scope_var,
+        ).pack(fill=ctk.X, padx=6, pady=(0, 8))
+        export_dpi = ctk.CTkFrame(processing, fg_color="transparent")
+        export_dpi.pack(fill=ctk.X, padx=6, pady=(0, 8))
+        ctk.CTkLabel(export_dpi, text="PDF DPI").pack(side=ctk.LEFT)
+        ctk.CTkEntry(export_dpi, textvariable=self.export_pdf_dpi_var, width=80).pack(
+            side=ctk.RIGHT
+        )
+        self.workspace_export_pdf_button = ctk.CTkButton(
+            processing,
+            text="Export PDF...",
+            fg_color="#2f855a",
+            hover_color="#276749",
+            command=self.export_to_pdf,
+        )
+        self.workspace_export_pdf_button.pack(fill=ctk.X, padx=6, pady=(0, 6))
+        self.workspace_export_files_button = ctk.CTkButton(
+            processing,
+            text="Export images...",
+            fg_color="transparent",
+            border_width=1,
+            command=self.export_to_files,
+        )
+        self.workspace_export_files_button.pack(fill=ctk.X, padx=6, pady=(0, 10))
         self.refresh_page_list()
 
     def _on_close(self) -> None:
@@ -540,9 +657,15 @@ class UnifiedScanApp(ctk.CTk):
             from tkinterdnd2 import DND_FILES, TkinterDnD
 
             TkinterDnD._require(self)
-            target = getattr(self.import_files_entry, "_entry", self.import_files_entry)
-            TkinterDnD.DnDWrapper.drop_target_register(target, DND_FILES)
-            TkinterDnD.DnDWrapper.dnd_bind(target, "<<Drop>>", self._on_drop_files)
+            targets = (
+                self.page_listbox,
+                getattr(self.import_files_entry, "_entry", self.import_files_entry),
+                getattr(self.page_preview_before_label, "_label", self.page_preview_before_label),
+                getattr(self.page_preview_after_label, "_label", self.page_preview_after_label),
+            )
+            for target in targets:
+                TkinterDnD.DnDWrapper.drop_target_register(target, DND_FILES)
+                TkinterDnD.DnDWrapper.dnd_bind(target, "<<Drop>>", self._on_drop_files)
         except Exception as exc:
             self._drag_drop_error = str(exc)
         else:
@@ -563,6 +686,76 @@ class UnifiedScanApp(ctk.CTk):
 
     def go_to_export_tab(self) -> None:
         self.tabs.set(self.tab_export_name)
+
+    def quick_add_files(self) -> None:
+        files = filedialog.askopenfilenames(
+            title="Add images or PDFs",
+            filetypes=[
+                ("Images and PDF", "*.jpg *.jpeg *.png *.tif *.tiff *.webp *.bmp *.pdf"),
+                ("All files", "*.*"),
+            ],
+            multiple=True,
+        )
+        if not files:
+            return
+        self.import_selected_files = self._normalize_selected_files(files)
+        self.import_files_var.set("\n".join(self.import_selected_files))
+        self._import_paths(paths=[Path(path) for path in self.import_selected_files])
+
+    def quick_add_folder(self) -> None:
+        folder_raw = filedialog.askdirectory(title="Add a folder of images or PDFs")
+        if not folder_raw:
+            return
+        folder = Path(folder_raw)
+        paths = list_supported_in_folder(folder)
+        if not paths:
+            messagebox.showinfo("Add Folder", "No supported images or PDFs were found.")
+            return
+        self.import_folder_var.set(str(folder))
+        self._import_paths(paths=paths)
+
+    def open_page_tools_dialog(self) -> None:
+        window = ctk.CTkToplevel(self)
+        window.title("Page tools")
+        window.geometry("420x330")
+        window.resizable(False, False)
+        window.transient(self)
+
+        ctk.CTkLabel(
+            window,
+            text="Page tools",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        ).pack(anchor="w", padx=16, pady=(16, 2))
+        ctk.CTkLabel(
+            window,
+            text="These actions use the selection in Workspace.",
+            text_color=("#60646c", "#a0a4ab"),
+        ).pack(anchor="w", padx=16, pady=(0, 12))
+
+        body = ctk.CTkFrame(window)
+        body.pack(fill=ctk.BOTH, expand=True, padx=16, pady=(0, 12))
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, weight=1)
+
+        def add(row: int, column: int, text: str, command) -> None:
+            ctk.CTkButton(
+                body,
+                text=text,
+                fg_color="transparent",
+                border_width=1,
+                command=command,
+            ).grid(row=row, column=column, sticky="ew", padx=6, pady=6)
+
+        add(0, 0, "Manual corners", self.open_manual_corners_editor)
+        add(0, 1, "Auto crop", self.open_auto_crop_editor)
+        add(1, 0, "Replace from file", self.replace_selected_page_from_file)
+        add(1, 1, "Auto deskew", self.auto_deskew_selected)
+        add(2, 0, "Retake with camera", self.retake_selected_page_from_camera)
+        add(2, 1, "Split book spread", self.split_selected_as_spread)
+        add(3, 0, "Refresh pages", self.refresh_page_list)
+        add(3, 1, "Close", window.destroy)
+
+        window.grab_set()
 
     def _sync_lens_mode_from_controls(self) -> None:
         inferred = infer_lens_mode(self.preprocess_preset_var.get(), self.postprocess_var.get())
@@ -624,6 +817,7 @@ class UnifiedScanApp(ctk.CTk):
             return False
 
         self.job_cancel_event.clear()
+        self.cancel_task_button.configure(state=tk.NORMAL)
         self._set_job_display(stage=name, current="Starting...", progress=0)
 
         def emit(
@@ -658,10 +852,12 @@ class UnifiedScanApp(ctk.CTk):
                     try:
                         on_done(result)
                     finally:
+                        self.cancel_task_button.configure(state=tk.DISABLED)
                         self._set_job_display(
                             stage=f"{name}: done", current="Completed", progress=100
                         )
                 elif kind == "error":
+                    self.cancel_task_button.configure(state=tk.DISABLED)
                     name, text = payload
                     if "Cancelled by user." in text:
                         self._set_job_display(stage=f"{name}: cancelled", current=text, progress=0)
@@ -1129,7 +1325,7 @@ class UnifiedScanApp(ctk.CTk):
             padx=10,
             pady=10,
         )
-        ctk.CTkButton(row_actions, text="Review", command=self.go_to_review_tab).pack(
+        ctk.CTkButton(row_actions, text="Workspace", command=self.go_to_review_tab).pack(
             side=ctk.LEFT, padx=0, pady=10
         )
         ctk.CTkButton(
@@ -1261,9 +1457,18 @@ class UnifiedScanApp(ctk.CTk):
 
     def _on_drop_files(self, event) -> str:
         paths = paths_from_tk_drop(str(event.data), self.tk.splitlist)
-        self.import_selected_files = self._normalize_selected_files(map(str, paths))
+        supported: list[Path] = []
+        for path in paths:
+            if path.is_dir():
+                supported.extend(list_supported_in_folder(path))
+            elif path.is_file() and path.suffix.lower() in (IMG_EXTS | PDF_EXTS):
+                supported.append(path)
+        if not supported:
+            self._set_status("Drop contained no supported images or PDFs.")
+            return "break"
+        self.import_selected_files = self._normalize_selected_files(map(str, supported))
         self.import_files_var.set("\n".join(self.import_selected_files))
-        self._set_status(f"Dropped {len(paths)} path(s). Click Import Files to process them.")
+        self._import_paths(paths=[Path(path) for path in self.import_selected_files])
         return "break"
 
     def import_from_clipboard(self) -> None:
@@ -1400,8 +1605,20 @@ class UnifiedScanApp(ctk.CTk):
     def refresh_page_list(self, keep_index: int | None = None) -> None:
         self.page_listbox.delete(0, tk.END)
         for idx, entry in enumerate(self.session.entries, start=1):
-            tag = "" if entry.detected_contour is not None else "  [no boundary]"
-            self.page_listbox.insert(tk.END, f"{idx:04d}  {entry.name}{tag}")
+            tag = "" if entry.detected_contour is not None else "  ⚠"
+            self.page_listbox.insert(tk.END, f"{idx:03d}  {entry.name}{tag}")
+
+        page_count = len(self.session.entries)
+        self.page_count_var.set(f"{page_count} page" if page_count == 1 else f"{page_count} pages")
+        export_state = tk.NORMAL if page_count else tk.DISABLED
+        for button_name in (
+            "toolbar_export_button",
+            "workspace_export_pdf_button",
+            "workspace_export_files_button",
+        ):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.configure(state=export_state)
 
         if keep_index is not None and len(self.session.entries) > 0:
             keep_index = max(0, min(keep_index, len(self.session.entries) - 1))
@@ -1454,11 +1671,15 @@ class UnifiedScanApp(ctk.CTk):
         self.page_preview_before_photo = before_photo
         self.page_preview_after_photo = after_photo
 
-    @staticmethod
-    def _clear_preview_label(label: ctk.CTkLabel) -> None:
+    def _clear_preview_label(self, label: ctk.CTkLabel) -> None:
         # customtkinter 5.2 leaves the old Tcl image name behind for image=None.
         label._label.configure(image="")
-        label.configure(image=None, text="Select one page to preview")
+        message = (
+            "Add files, paste, or drop pages here"
+            if len(self.session) == 0
+            else "Select one page to preview"
+        )
+        label.configure(image=None, text=message)
 
     def _single_selected_index(self) -> int | None:
         selected = self.page_listbox.curselection()

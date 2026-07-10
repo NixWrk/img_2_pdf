@@ -17,6 +17,8 @@ All notable changes to UniScan are documented here. The project follows Semantic
 
 - Raised total automated coverage above 60% and non-GUI coverage above 80%.
 - Normalized formatting and repository line-ending policy.
+- Replaced the numbered GUI wizard as the default flow with a persistent document workspace,
+  quick add/camera/export actions, reachable processing controls, and task cancellation.
 
 ### Removed
 

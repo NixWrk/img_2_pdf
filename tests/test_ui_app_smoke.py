@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -20,7 +21,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
     try:
         app.withdraw()
         app.update()
-        assert app.tabs.get() == app.tab_import_name
+        assert app.tabs.get() == app.tab_review_name
         assert app.status_var.get() == "Ready"
         assert len(app.session) == 0
         assert app.preprocess_preset_var.get() == "Document"
@@ -28,6 +29,21 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app._current_preprocess_settings().correct_illumination is True
         assert app.import_files_entry.winfo_exists()
         assert app._drag_drop_error is None
+        assert app.toolbar_export_button.cget("state") == "disabled"
+        assert app.cancel_task_button.cget("state") == "disabled"
+
+        source = tmp_path / "drop.png"
+        source.write_bytes(b"placeholder")
+        imports: list[list] = []
+        monkeypatch.setattr(app, "_import_paths", lambda *, paths: imports.append(paths))
+        assert app._on_drop_files(SimpleNamespace(data=f"{{{source.as_posix()}}}")) == "break"
+        assert imports[-1] == [source]
+        monkeypatch.setattr(
+            "uniscan.ui.app.filedialog.askopenfilenames",
+            lambda **_kwargs: (str(source),),
+        )
+        app.quick_add_files()
+        assert imports[-1] == [source]
 
         first = np.full((90, 120, 3), 220, dtype=np.uint8)
         second = np.full((90, 120, 3), 180, dtype=np.uint8)
@@ -35,6 +51,8 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         app.session.add_image(name="second.png", image=second)
         app.refresh_page_list(keep_index=1)
         app.update()
+        assert app.page_count_var.get() == "2 pages"
+        assert app.toolbar_export_button.cget("state") == "normal"
         assert app._single_selected_entry()[1].name == "second.png"
         app.move_selected_up()
         assert app.session.entries[0].name == "second.png"
@@ -47,6 +65,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         app.select_all_pages()
         app.delete_selected_pages()
         assert len(app.session) == 0
+        assert app.page_count_var.get() == "0 pages"
     finally:
         app._on_close()
 
