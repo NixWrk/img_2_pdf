@@ -31,6 +31,7 @@ from uniscan.core.dewarp import (
     estimate_textline_dewarp_model,
 )
 from uniscan.core.pipeline import PageResult, PipelineOptions, process_loaded_items
+from uniscan.core.processing import PageProcessingRequest, process_document_page
 from uniscan.core.orientation import ORIENTATION_METHOD_AUTO, orient_document
 from uniscan.core.layout import layout_document_page
 from uniscan.core.cleanup import analyze_lighting
@@ -1244,6 +1245,28 @@ class UnifiedScanApp(ctk.CTk):
             model=self._entry_dewarp_model(entry),
         )
 
+    def _processing_request(self, *, entry=None, preview: bool) -> PageProcessingRequest:
+        return PageProcessingRequest(
+            dewarp_method=DEWARP_UI_METHODS.get(
+                self.dewarp_method_var.get(),
+                DEWARP_METHOD_NONE,
+            ),
+            dewarp_model=self._entry_dewarp_model(entry),
+            postprocess_name=self.postprocess_var.get(),
+            preprocess_settings=self._current_preprocess_settings(),
+            page_layout=PAGE_LAYOUT_UI_METHODS.get(self.page_layout_var.get(), "none"),
+            page_dpi=100 if preview else max(72, int(self.export_pdf_dpi_var.get())),
+            page_margin_mm=float(self.page_margin_mm_var.get()),
+            horizontal_alignment=self.page_align_x_var.get(),
+            vertical_alignment=self.page_align_y_var.get(),
+        )
+
+    def _process_review_page(self, image: np.ndarray, *, entry=None, preview: bool):
+        return process_document_page(
+            image,
+            self._processing_request(entry=entry, preview=preview),
+        )
+
     def _review_before_image(self, entry) -> np.ndarray:
         """Raw source with the detected contour drawn over it."""
         if self.lightweight_preview_var.get():
@@ -1273,10 +1296,7 @@ class UnifiedScanApp(ctk.CTk):
             base = entry.preview_original_image
         else:
             base = entry.original_image
-        dewarped, _diagnostics = self._apply_dewarp(base, entry=entry)
-        processed = self._apply_postprocess(dewarped)
-        laid_out, _layout_diagnostics = self._apply_page_layout(processed, preview=True)
-        return laid_out
+        return self._process_review_page(base, entry=entry, preview=True).image
 
     def _show_in_preview(self, image: np.ndarray) -> None:
         photo = self._to_ctk_photo_for_label(image, self.preview_label)
@@ -2469,16 +2489,13 @@ class UnifiedScanApp(ctk.CTk):
         self._open_corner_editor_dialog(indices, auto_detect=True)
 
     def _reprocess_entry_from_original(self, entry):
-        postprocess_fn = POSTPROCESSING_OPTIONS.get(
-            self.postprocess_var.get(), POSTPROCESSING_OPTIONS["None"]
+        result = self._process_review_page(
+            entry.original_image,
+            entry=entry,
+            preview=False,
         )
-        settings = self._current_preprocess_settings()
-        dewarped, diagnostics = self._apply_dewarp(entry.original_image, entry=entry)
-        base = postprocess_fn(dewarped)
-        processed = apply_enhancements(base, settings)
-        laid_out, _layout_diagnostics = self._apply_page_layout(processed, preview=False)
-        entry.current_image = laid_out
-        return diagnostics
+        entry.current_image = result.image
+        return result.diagnostics.dewarp
 
     def analyze_selected_page_lighting(self) -> None:
         _index, entry = self._single_selected_entry()

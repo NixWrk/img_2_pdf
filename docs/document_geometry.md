@@ -10,6 +10,11 @@ This separation matters. A four-corner perspective transform can make the page r
 cannot straighten curved text lines. Deskew rotates the whole page but also cannot remove local
 paper waves.
 
+After boundary detection, GUI preview/apply and headless conversion call the same
+`PageProcessingRequest → process_document_page() → PageProcessingResult` controller. It owns stage
+order, cancellation checkpoints, typed diagnostics, and per-stage latency. Acquisition and page
+boundary detection remain outside it because they can produce zero, one, or two pages.
+
 ## Boundary detection
 
 The production CLI accepts these policies through `--backend`:

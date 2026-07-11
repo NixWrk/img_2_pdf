@@ -112,6 +112,10 @@ Planned commits:
 
 Goal: remove processing-policy duplication and make previews trustworthy.
 
+Implementation status: the shared request/result controller and canonical stage ordering are
+implemented for batch CLI and GUI preview/apply. Persistent per-page overrides and the bounded
+stage cache remain next.
+
 1. Introduce a GUI-independent page-processing request/result model.
 2. Route GUI preview, GUI export, and headless conversion through the same ordered stages and
    diagnostics schema.

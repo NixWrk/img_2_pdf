@@ -13,37 +13,30 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from uniscan.core.pipeline import PipelineOptions, process_loaded_items
-from uniscan.core.orientation import ORIENTATION_METHOD_CHOICES, orient_document
+from uniscan.core.orientation import ORIENTATION_METHOD_CHOICES
 from uniscan.core.layout import (
     HORIZONTAL_ALIGNMENTS,
     PAGE_LAYOUT_CHOICES,
     VERTICAL_ALIGNMENTS,
-    layout_document_page,
 )
 from uniscan.core.cleanup import (
     BINARIZATION_CHOICES,
     BINARIZATION_NONE,
     DESPECKLE_CHOICES,
     DESPECKLE_NONE,
-    DespeckleDiagnostics,
-    analyze_lighting,
 )
-from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.dewarp import (
     DEWARP_METHOD_AUTO,
     DEWARP_METHOD_CHOICES,
     DEWARP_METHOD_PADDLEOCR_UVDOC,
-    DewarpDiagnostics,
-    dewarp_document,
 )
 from uniscan.core.preprocess import (
     DESKEW_METHOD_CHOICES,
     PREPROCESS_PRESETS,
-    apply_enhancements_with_diagnostics,
-    deskew_document,
     PreprocessSettings,
     resolve_lens_mode_profile,
 )
+from uniscan.core.processing import PageProcessingRequest, process_document_page
 from uniscan.core.scanner_adapter import (
     DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
     DETECTOR_BACKEND_CV_HYBRID,
@@ -195,7 +188,7 @@ def resolve_input_paths(inputs: Sequence[Path], *, output_pdf: Path) -> tuple[Pa
 def _resolve_processing(mode: str):
     normalized = mode.strip().lower()
     if normalized == "none":
-        return POSTPROCESSING_OPTIONS["None"], None
+        return "None", None
 
     profiles_by_key = {
         name.lower(): profile
@@ -207,7 +200,7 @@ def _resolve_processing(mode: str):
     profile = profiles_by_key.get(normalized)
     if profile is None:
         raise ValueError(f"Unsupported lens mode: {mode}")
-    return POSTPROCESSING_OPTIONS[profile.postprocess_name], PREPROCESS_PRESETS[profile.preset_name]
+    return profile.postprocess_name, PREPROCESS_PRESETS[profile.preset_name]
 
 
 def _resolve_detector_policy(policy: str) -> tuple[str, ...]:
@@ -516,7 +509,7 @@ def run_batch_pipeline(
         input_files=input_files,
     )
 
-    postprocess, preprocess_settings = _resolve_processing(lens_mode)
+    postprocess_name, preprocess_settings = _resolve_processing(lens_mode)
     if preprocess_settings is not None:
         preprocess_settings = replace(
             preprocess_settings,
@@ -569,49 +562,37 @@ def run_batch_pipeline(
                 cancel_cb=cancel_cb,
             )
             for page in page_results:
-                oriented, orientation_diagnostics = orient_document(
+                processed = process_document_page(
                     page.current,
-                    method=orientation_method,
-                )
-                deskewed, deskew_angle = deskew_document(oriented, method=deskew_method)
-                if (
-                    dewarp_method == DEWARP_METHOD_PADDLEOCR_UVDOC
-                    and page.backend == DETECTOR_BACKEND_PADDLEOCR_UVDOC
-                ):
-                    dewarped = deskewed
-                    dewarp_diagnostics = DewarpDiagnostics(
-                        method=dewarp_method,
-                        applied=True,
-                        selected_method=DEWARP_METHOD_PADDLEOCR_UVDOC,
-                        reason="applied_by_detection_backend",
-                    )
-                else:
-                    dewarped, dewarp_diagnostics = dewarp_document(
-                        deskewed,
-                        method=dewarp_method,
+                    PageProcessingRequest(
+                        orientation_method=orientation_method,
+                        deskew_method=deskew_method,
+                        dewarp_method=dewarp_method,
+                        dewarp_already_applied=(
+                            dewarp_method == DEWARP_METHOD_PADDLEOCR_UVDOC
+                            and page.backend == DETECTOR_BACKEND_PADDLEOCR_UVDOC
+                        ),
                         uvdoc_cache_home=uvdoc_cache_home,
-                        auto_use_uvdoc=auto_dewarp_uvdoc,
-                    )
-                current = postprocess(dewarped)
-                lighting = analyze_lighting(dewarped) if lighting_diagnostics else None
-                despeckle_diagnostics = DespeckleDiagnostics(
-                    strength=DESPECKLE_NONE,
-                    applied=False,
-                    reason="disabled",
+                        auto_dewarp_uvdoc=auto_dewarp_uvdoc,
+                        postprocess_name=postprocess_name,
+                        preprocess_settings=preprocess_settings,
+                        page_layout=page_layout,
+                        page_dpi=dpi,
+                        page_margin_mm=page_margin_mm,
+                        horizontal_alignment=horizontal_alignment,
+                        vertical_alignment=vertical_alignment,
+                        lighting_diagnostics=lighting_diagnostics,
+                        cancel_cb=cancel_cb,
+                    ),
                 )
-                if preprocess_settings is not None:
-                    current, despeckle_diagnostics = apply_enhancements_with_diagnostics(
-                        current,
-                        preprocess_settings,
-                    )
-                current, layout_diagnostics = layout_document_page(
-                    current,
-                    method=page_layout,
-                    dpi=dpi,
-                    margin_mm=page_margin_mm,
-                    horizontal_alignment=horizontal_alignment,
-                    vertical_alignment=vertical_alignment,
-                )
+                current = processed.image
+                processing_diagnostics = processed.diagnostics
+                orientation_diagnostics = processing_diagnostics.orientation
+                deskew_angle = processing_diagnostics.deskew_angle_degrees
+                dewarp_diagnostics = processing_diagnostics.dewarp
+                despeckle_diagnostics = processing_diagnostics.despeckle
+                layout_diagnostics = processing_diagnostics.layout
+                lighting = processing_diagnostics.lighting
                 page_path = page_stage_dir / f"{len(staged_page_paths) + 1:05d}.png"
                 if not imwrite_unicode(page_path, current):
                     raise RuntimeError(f"Failed to write processed page: {page_path}")

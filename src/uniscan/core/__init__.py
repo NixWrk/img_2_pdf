@@ -74,6 +74,12 @@ from .preprocess import (
     resolve_lens_mode_profile,
 )
 from .postprocess import POSTPROCESSING_OPTIONS
+from .processing import (
+    PageProcessingDiagnostics,
+    PageProcessingRequest,
+    PageProcessingResult,
+    process_document_page,
+)
 from .scanner_adapter import (
     DETECTOR_BACKEND_CAMSCAN,
     DETECTOR_BACKEND_CV_HYBRID,
@@ -133,6 +139,9 @@ __all__ = [
     "PipelineOptions",
     "PREPROCESS_PRESETS",
     "POSTPROCESSING_OPTIONS",
+    "PageProcessingDiagnostics",
+    "PageProcessingRequest",
+    "PageProcessingResult",
     "PreprocessSettings",
     "DETECTOR_BACKEND_CAMSCAN",
     "DETECTOR_BACKEND_CV_HYBRID",
@@ -163,6 +172,7 @@ __all__ = [
     "normalize_control_points",
     "orient_document",
     "process_loaded_items",
+    "process_document_page",
     "probe_detector_backend",
     "resolve_lens_mode_profile",
     "scan_with_document_detector",

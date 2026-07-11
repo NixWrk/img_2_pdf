@@ -20,6 +20,9 @@ All notable changes to UniScan are documented here. The project follows Semantic
   lighting evidence.
 - GUI controls and live preview for document binarization, despeckle, A4/Letter layout,
   margins/alignment, plus on-demand lighting analysis for the selected page.
+- One GUI-independent page-processing controller now owns the canonical orientation, deskew,
+  dewarp, cleanup, lighting, and layout order for both batch conversion and GUI preview/apply.
+- Binary A4/Letter layout now preserves strict black/white pixels during resizing.
 
 - Independent boundary, deskew, and local-dewarp stages with per-page JSON diagnostics.
 - Offline text-line dewarp for curved or wavy pages, with confidence-based no-op fallback.

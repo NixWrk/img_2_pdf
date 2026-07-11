@@ -64,6 +64,15 @@ def test_layout_none_is_identity_and_blank_page_is_safe() -> None:
     assert laid_out.shape[:2] == (792, 612)
 
 
+def test_layout_preserves_binary_pixels() -> None:
+    binary = np.full((200, 150), 255, dtype=np.uint8)
+    cv2.rectangle(binary, (40, 60), (110, 140), 0, -1)
+
+    laid_out, _diagnostics = layout_document_page(binary, method="a4", dpi=72)
+
+    assert set(np.unique(laid_out).tolist()) == {0, 255}
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [

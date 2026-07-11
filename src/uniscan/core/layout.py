@@ -157,7 +157,11 @@ def layout_document_page(
     scale = min(available_width / crop.shape[1], available_height / crop.shape[0])
     resized_width = max(1, int(round(crop.shape[1] * scale)))
     resized_height = max(1, int(round(crop.shape[0] * scale)))
-    interpolation = cv2.INTER_CUBIC if scale > 1.0 else cv2.INTER_AREA
+    is_binary = image.ndim == 2 and np.unique(crop).size <= 2
+    if is_binary:
+        interpolation = cv2.INTER_NEAREST
+    else:
+        interpolation = cv2.INTER_CUBIC if scale > 1.0 else cv2.INTER_AREA
     resized = cv2.resize(crop, (resized_width, resized_height), interpolation=interpolation)
 
     if image.ndim == 2:
