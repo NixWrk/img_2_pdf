@@ -4,6 +4,7 @@ import pytest
 
 from uniscan.core.preprocess import PreprocessSettings
 from uniscan.core.processing import PageProcessingRequest, process_document_page
+from uniscan.storage.stage_cache import ProcessingStageCache
 
 
 def _sideways_page() -> np.ndarray:
@@ -93,3 +94,42 @@ def test_processing_controller_rejects_unknown_postprocess() -> None:
             np.full((100, 120, 3), 220, dtype=np.uint8),
             PageProcessingRequest(postprocess_name="missing"),
         )
+
+
+def test_processing_cache_reuses_upstream_and_invalidates_downstream(tmp_path) -> None:
+    cache = ProcessingStageCache(tmp_path / "stages", max_bytes=64 * 1024 * 1024)
+    image = _sideways_page()
+    request = PageProcessingRequest(
+        orientation_method="auto",
+        postprocess_name="Grayscale",
+        preprocess_settings=PreprocessSettings(binarization_method="otsu"),
+        page_layout="a4",
+        page_dpi=100,
+        stage_cache=cache,
+    )
+
+    first = process_document_page(image, request)
+    second = process_document_page(image, request)
+
+    assert first.diagnostics.cache_hits == ()
+    assert second.diagnostics.cache_hits == ("orientation", "cleanup", "layout")
+    np.testing.assert_array_equal(second.image, first.image)
+
+    request.preprocess_settings = PreprocessSettings(
+        contrast=1.2,
+        binarization_method="otsu",
+    )
+    cleanup_changed = process_document_page(image, request)
+    assert cleanup_changed.diagnostics.cache_hits == ("orientation",)
+
+    layout_only_request = PageProcessingRequest(
+        orientation_method="auto",
+        postprocess_name="Grayscale",
+        preprocess_settings=PreprocessSettings(binarization_method="otsu"),
+        page_layout="a4",
+        page_dpi=100,
+        page_margin_mm=15,
+        stage_cache=cache,
+    )
+    layout_changed = process_document_page(image, layout_only_request)
+    assert layout_changed.diagnostics.cache_hits == ("orientation", "cleanup")

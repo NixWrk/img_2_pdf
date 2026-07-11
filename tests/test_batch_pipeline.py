@@ -256,6 +256,41 @@ def test_run_batch_pipeline_reports_cleanup_and_lighting_diagnostics(tmp_path) -
     assert report["pages"][0]["despeckleRemovedComponents"] >= 1
 
 
+def test_run_batch_pipeline_reuses_persistent_stage_cache(tmp_path) -> None:
+    source = tmp_path / "cached.png"
+    _write_curved_text_page(source)
+    cache_dir = tmp_path / "stage-cache"
+
+    first = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "first.pdf",
+        detect_document=False,
+        lens_mode="none",
+        dewarp_method="textline",
+        binarization_method="otsu",
+        stage_cache_dir=cache_dir,
+        stage_cache_max_mb=16,
+    )
+    second = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "second.pdf",
+        detect_document=False,
+        lens_mode="none",
+        dewarp_method="textline",
+        binarization_method="otsu",
+        stage_cache_dir=cache_dir,
+        stage_cache_max_mb=16,
+    )
+
+    assert first.pages[0].processing_cache_hits == ()
+    assert second.pages[0].processing_cache_hits == ("dewarp", "cleanup")
+    report = json.loads(second.report_path.read_text(encoding="utf-8"))
+    assert report["stageCacheEnabled"] is True
+    assert report["stageCacheMaxMb"] == 16
+    assert report["stageCacheStats"]["hits"] >= 2
+    assert report["pages"][0]["processingCacheHits"] == ["dewarp", "cleanup"]
+
+
 def test_run_batch_pipeline_applies_and_reports_orientation(tmp_path) -> None:
     source = tmp_path / "sideways.png"
     _write_sideways_text_page(source)
@@ -323,6 +358,12 @@ def test_run_batch_pipeline_rejects_unknown_geometry_methods(tmp_path) -> None:
             inputs=[source],
             output_pdf=tmp_path / "despeckle.pdf",
             despeckle_strength="missing",
+        )
+    with pytest.raises(ValueError, match="Stage cache size"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=tmp_path / "cache.pdf",
+            stage_cache_max_mb=0,
         )
 
 

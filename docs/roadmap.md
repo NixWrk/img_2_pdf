@@ -112,16 +112,16 @@ Planned commits:
 
 Goal: remove processing-policy duplication and make previews trustworthy.
 
-Implementation status: the shared request/result controller and canonical stage ordering are
-implemented for batch CLI and GUI preview/apply. Persistent per-page overrides and the bounded
-stage cache remain next.
+Implementation status: the shared request/result controller, canonical stage ordering, and bounded
+dependency-aware disk cache are implemented for batch CLI and GUI preview/apply. Persistent
+per-page overrides remain next.
 
 1. Introduce a GUI-independent page-processing request/result model.
 2. Route GUI preview, GUI export, and headless conversion through the same ordered stages and
    diagnostics schema.
 3. Persist every per-page override: boundary, orientation, deskew, dewarp model, cleanup, content
    box, layout, and output mode.
-4. Add stage fingerprints and a bounded disk cache. Editing a late cleanup stage must not rerun
+4. [x] Add stage fingerprints and a bounded disk cache. Editing a late cleanup stage must not rerun
    page detection or dewarp; changing page geometry must invalidate downstream stages.
 5. Add bounded worker-pool processing with deterministic output order and cancellation.
 

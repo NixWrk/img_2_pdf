@@ -192,6 +192,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Measure shadows, possible glare, and clipped pixels in the JSON report.",
     )
+    convert_parser.add_argument(
+        "--stage-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional persistent cache for post-detection processing stages.",
+    )
+    convert_parser.add_argument(
+        "--stage-cache-max-mb",
+        type=int,
+        default=512,
+        help="Maximum persistent stage-cache size in MiB.",
+    )
 
     benchmark_parser = subparsers.add_parser(
         "benchmark-crop",
@@ -312,6 +324,8 @@ def main(argv: list[str] | None = None) -> int:
                 binarization_k=args.binarization_k,
                 despeckle_strength=args.despeckle,
                 lighting_diagnostics=args.lighting_diagnostics,
+                stage_cache_dir=args.stage_cache_dir,
+                stage_cache_max_mb=args.stage_cache_max_mb,
                 uvdoc_cache_home=args.uvdoc_cache,
             )
         except (OSError, RuntimeError, ValueError) as exc:

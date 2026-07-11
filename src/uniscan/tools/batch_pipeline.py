@@ -54,6 +54,7 @@ from uniscan.io import (
     iter_input_items,
     list_supported_in_folder,
 )
+from uniscan.storage import ProcessingStageCache
 
 
 LENS_MODE_CHOICES = ("none", "document", "whiteboard", "photo", "b/w")
@@ -126,6 +127,8 @@ class PageRunReport:
     clipped_pixel_fraction: float | None = None
     lighting_unevenness: float | None = None
     lighting_warnings: tuple[str, ...] = ()
+    processing_stage_durations_ms: dict[str, float] | None = None
+    processing_cache_hits: tuple[str, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -308,6 +311,9 @@ def _report_payload(
     binarization_k: float | None,
     despeckle_strength: str,
     lighting_diagnostics: bool,
+    stage_cache_enabled: bool,
+    stage_cache_max_mb: int,
+    stage_cache_stats: dict[str, int],
 ) -> dict[str, object]:
     detected_pages = sum(page.detected for page in pages)
     fallback_pages = sum(page.fallback_reason is not None for page in pages)
@@ -332,6 +338,9 @@ def _report_payload(
         "binarizationK": binarization_k,
         "despeckleStrength": despeckle_strength,
         "lightingDiagnostics": lighting_diagnostics,
+        "stageCacheEnabled": stage_cache_enabled,
+        "stageCacheMaxMb": stage_cache_max_mb,
+        "stageCacheStats": stage_cache_stats,
         "totalPages": len(pages),
         "detectedPages": detected_pages,
         "fallbackPages": fallback_pages,
@@ -380,6 +389,8 @@ def _report_payload(
                 "clippedPixelFraction": page.clipped_pixel_fraction,
                 "lightingUnevenness": page.lighting_unevenness,
                 "lightingWarnings": list(page.lighting_warnings),
+                "processingStageDurationsMs": page.processing_stage_durations_ms or {},
+                "processingCacheHits": list(page.processing_cache_hits),
             }
             for page in pages
         ],
@@ -460,6 +471,8 @@ def run_batch_pipeline(
     binarization_k: float | None = None,
     despeckle_strength: str = DESPECKLE_NONE,
     lighting_diagnostics: bool = False,
+    stage_cache_dir: Path | None = None,
+    stage_cache_max_mb: int = 512,
     uvdoc_cache_home: Path | None = None,
     cancel_cb: CancelCb | None = None,
 ) -> BatchPipelineResult:
@@ -497,6 +510,8 @@ def run_batch_pipeline(
         raise ValueError("Binarization k must be between 0 and 1.")
     if despeckle_strength not in DESPECKLE_CHOICES:
         raise ValueError(f"Unsupported despeckle strength: {despeckle_strength}")
+    if int(stage_cache_max_mb) < 1:
+        raise ValueError("Stage cache size must be at least 1 MiB.")
 
     output_pdf = Path(output_pdf).with_suffix(".pdf")
     report_path = Path(report_path) if report_path else output_pdf.with_suffix(".pdf.report.json")
@@ -532,6 +547,15 @@ def run_batch_pipeline(
             despeckle_strength=despeckle_strength,
         )
     detector_backends = _resolve_detector_policy(detector_policy)
+    stage_cache = (
+        ProcessingStageCache(
+            Path(stage_cache_dir),
+            max_bytes=int(stage_cache_max_mb) * 1024 * 1024,
+            max_entries=256,
+        )
+        if stage_cache_dir is not None
+        else None
+    )
     options = PipelineOptions(
         detect_document=bool(detect_document),
         two_page_mode=bool(two_page_mode),
@@ -582,6 +606,7 @@ def run_batch_pipeline(
                         horizontal_alignment=horizontal_alignment,
                         vertical_alignment=vertical_alignment,
                         lighting_diagnostics=lighting_diagnostics,
+                        stage_cache=stage_cache,
                         cancel_cb=cancel_cb,
                     ),
                 )
@@ -651,6 +676,8 @@ def run_batch_pipeline(
                         ),
                         lighting_unevenness=(lighting.unevenness if lighting is not None else None),
                         lighting_warnings=(lighting.warnings if lighting is not None else ()),
+                        processing_stage_durations_ms=processing_diagnostics.stage_durations_ms,
+                        processing_cache_hits=processing_diagnostics.cache_hits,
                     )
                 )
 
@@ -678,6 +705,18 @@ def run_batch_pipeline(
             binarization_k=(float(binarization_k) if binarization_k is not None else None),
             despeckle_strength=despeckle_strength,
             lighting_diagnostics=bool(lighting_diagnostics),
+            stage_cache_enabled=stage_cache is not None,
+            stage_cache_max_mb=int(stage_cache_max_mb),
+            stage_cache_stats=(
+                {
+                    "hits": stage_cache.stats.hits,
+                    "misses": stage_cache.stats.misses,
+                    "writes": stage_cache.stats.writes,
+                    "evictions": stage_cache.stats.evictions,
+                }
+                if stage_cache is not None
+                else {"hits": 0, "misses": 0, "writes": 0, "evictions": 0}
+            ),
         )
         staged_targets, final_image_paths = _stage_outputs(
             staged_page_paths=staged_page_paths,

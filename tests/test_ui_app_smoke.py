@@ -77,12 +77,15 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         selected_entry = app._single_selected_entry()[1]
         app._reprocess_entry_from_original(selected_entry)
         assert selected_entry.current_image.shape[:2] == (1169, 827)
+        assert app.processing_cache.stats.writes >= 1
         app.analyze_selected_page_lighting()
         assert app.lighting_summary_var.get().startswith("Shadow ")
         app.binarization_method_var.set("None")
         app.despeckle_strength_var.set("None")
         app.page_layout_var.set("Keep source page")
         app._reprocess_entry_from_original(selected_entry)
+        app.clear_processing_cache()
+        assert not list(app.processing_cache.root_dir.glob("*.png"))
         app.open_dewarp_points_editor()
         app.update()
         dewarp_editors = [

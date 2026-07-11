@@ -64,6 +64,7 @@ from uniscan.io.loaders import (
     load_input_items,
 )
 from uniscan.session import create_persistent_session, default_autosave_path, load_or_create_session
+from uniscan.storage import ProcessingStageCache
 from uniscan.ui.camera_health import camera_health_state
 from uniscan.ui.import_sources import (
     clipboard_file_paths,
@@ -135,6 +136,11 @@ class UnifiedScanApp(ctk.CTk):
             self.session = create_persistent_session(self.autosave_path.parent)
             self._session_restored = False
         self.camera: CameraService | None = None
+        self.processing_cache = ProcessingStageCache(
+            self.autosave_path.parent / "stage_cache",
+            max_bytes=512 * 1024 * 1024,
+            max_entries=256,
+        )
         self.preview_job: str | None = None
         self.preview_photo: ctk.CTkImage | None = None
         self.page_preview_before_photo: ctk.CTkImage | None = None
@@ -1259,13 +1265,22 @@ class UnifiedScanApp(ctk.CTk):
             page_margin_mm=float(self.page_margin_mm_var.get()),
             horizontal_alignment=self.page_align_x_var.get(),
             vertical_alignment=self.page_align_y_var.get(),
+            stage_cache=self.processing_cache,
         )
+        self._last_processing_cache_hits: tuple[str, ...] = ()
 
     def _process_review_page(self, image: np.ndarray, *, entry=None, preview: bool):
-        return process_document_page(
+        result = process_document_page(
             image,
             self._processing_request(entry=entry, preview=preview),
         )
+        self._last_processing_cache_hits = result.diagnostics.cache_hits
+        return result
+
+    def clear_processing_cache(self) -> None:
+        self.processing_cache.clear()
+        self._last_processing_cache_hits = ()
+        self._set_status("Processing stage cache cleared.")
 
     def _review_before_image(self, entry) -> np.ndarray:
         """Raw source with the detected contour drawn over it."""
@@ -3063,6 +3078,14 @@ class UnifiedScanApp(ctk.CTk):
             command=lambda: self.on_preprocess_preset_change(self.preprocess_preset_var.get()),
             width=140,
         ).pack(side=ctk.LEFT)
+        ctk.CTkButton(
+            actions,
+            text="Clear cache",
+            command=self.clear_processing_cache,
+            fg_color="transparent",
+            border_width=1,
+            width=100,
+        ).pack(side=ctk.LEFT, padx=(8, 0))
         ctk.CTkButton(actions, text="Close", command=_on_close, width=100).pack(
             side=ctk.LEFT, padx=8
         )
@@ -3086,11 +3109,14 @@ class UnifiedScanApp(ctk.CTk):
             target_entries = [(idx, self.session.entries[idx]) for idx in indices]
 
         try:
+            cache_hit_count = 0
             for _idx, entry in target_entries:
                 self._reprocess_entry_from_original(entry)
+                cache_hit_count += len(self._last_processing_cache_hits)
             self.refresh_page_list(keep_index=target_entries[-1][0])
             scope = "all pages" if self.apply_changes_to_all_var.get() else "selected pages"
-            self._set_status(f"Reprocessed {len(target_entries)} {scope}.")
+            cache_note = f" Stage cache hits: {cache_hit_count}." if cache_hit_count else ""
+            self._set_status(f"Reprocessed {len(target_entries)} {scope}.{cache_note}")
         except Exception as exc:
             messagebox.showerror("Postprocess Error", str(exc))
 

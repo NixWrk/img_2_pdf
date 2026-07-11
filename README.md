@@ -76,6 +76,8 @@ Useful options:
   reports how many nearby punctuation-like components were protected.
 - `--lighting-diagnostics` records shadow, possible-glare, clipped-pixel, and unevenness metrics
   without modifying the page.
+- `--stage-cache-dir DIR` enables the bounded lossless processing-stage cache for repeated runs;
+  `--stage-cache-max-mb` sets its maximum size.
 - `--illumination-correction` opts into experimental shadow/highlight normalization.
 - `--pdf-dpi 300` controls PDF rendering and export DPI.
 - `--images-dir DIR --image-format png` also writes processed page images.
@@ -90,7 +92,9 @@ per-page results are recorded in the JSON report. See
 The GUI can persist per-page dewarp control points when the automatic curve needs correction;
 changing the page geometry invalidates those points. The Workspace also exposes selectable
 binarization, safe despeckle, A4/Letter layout, margins/alignment, and an explicit lighting analysis
-for the selected page. OCR remains outside the project scope.
+for the selected page. GUI preview/apply share a bounded persistent stage cache; Advanced includes
+its clear action. See [`docs/stage_cache.md`](docs/stage_cache.md). OCR remains outside the project
+scope.
 
 ## Runtime diagnostics
 

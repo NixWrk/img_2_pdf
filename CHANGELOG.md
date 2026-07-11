@@ -23,6 +23,9 @@ All notable changes to UniScan are documented here. The project follows Semantic
 - One GUI-independent page-processing controller now owns the canonical orientation, deskew,
   dewarp, cleanup, lighting, and layout order for both batch conversion and GUI preview/apply.
 - Binary A4/Letter layout now preserves strict black/white pixels during resizing.
+- Atomic bounded lossless stage cache with pixel/options/upstream fingerprints, dependency-aware
+  invalidation, corrupt-entry fallback, GUI persistence/clear action, optional CLI persistence, and
+  hit/miss/write/eviction diagnostics.
 
 - Independent boundary, deskew, and local-dewarp stages with per-page JSON diagnostics.
 - Offline text-line dewarp for curved or wavy pages, with confidence-based no-op fallback.

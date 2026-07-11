@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import time
 
@@ -22,6 +22,7 @@ from .dewarp import (
     dewarp_document,
 )
 from .layout import PAGE_LAYOUT_NONE, PageLayoutDiagnostics, layout_document_page
+from .layout import ContentBox
 from .orientation import (
     ORIENTATION_METHOD_NONE,
     OrientationDiagnostics,
@@ -34,6 +35,7 @@ from .preprocess import (
     apply_enhancements_with_diagnostics,
     deskew_document,
 )
+from uniscan.storage.stage_cache import ProcessingStageCache
 
 CancelCb = Callable[[], bool]
 
@@ -57,6 +59,8 @@ class PageProcessingRequest:
     horizontal_alignment: str = "center"
     vertical_alignment: str = "center"
     lighting_diagnostics: bool = False
+    stage_cache: ProcessingStageCache | None = field(default=None, repr=False)
+    source_fingerprint: str | None = None
     cancel_cb: CancelCb | None = field(default=None, repr=False)
 
 
@@ -91,6 +95,54 @@ def _timed(stage: str, durations: dict[str, float], operation):
     return result
 
 
+def _run_stage(
+    *,
+    stage: str,
+    image: np.ndarray,
+    upstream_key: str,
+    options: dict[str, object],
+    operation,
+    encode_diagnostics,
+    decode_diagnostics,
+    cacheable: bool,
+    request: PageProcessingRequest,
+    durations: dict[str, float],
+    cache_hits: list[str],
+):
+    cache = request.stage_cache
+    key = (
+        cache.stage_key(upstream_key, stage, {"version": 1, **options})
+        if cache is not None
+        else upstream_key
+    )
+    started = time.perf_counter()
+    if cache is not None and cacheable:
+        cached = cache.get(key)
+        if cached is not None:
+            cached_image, metadata = cached
+            diagnostics = decode_diagnostics(metadata)
+            durations[stage] = round((time.perf_counter() - started) * 1000.0, 3)
+            cache_hits.append(stage)
+            return cached_image, diagnostics, key
+
+    output, diagnostics = operation()
+    durations[stage] = round((time.perf_counter() - started) * 1000.0, 3)
+    if cache is not None and cacheable:
+        cache.put(key, output, encode_diagnostics(diagnostics))
+    return output, diagnostics, key
+
+
+def _layout_from_dict(payload: dict[str, object]) -> PageLayoutDiagnostics:
+    values = dict(payload)
+    content_box = values.pop("content_box")
+    if not isinstance(content_box, dict):
+        raise ValueError("Invalid cached content box.")
+    return PageLayoutDiagnostics(
+        content_box=ContentBox(**content_box),
+        **values,
+    )
+
+
 def process_document_page(
     image: np.ndarray,
     request: PageProcessingRequest,
@@ -99,19 +151,43 @@ def process_document_page(
     if image.size == 0:
         raise ValueError("Cannot process an empty page image.")
     durations: dict[str, float] = {}
+    cache_hits: list[str] = []
+    cache = request.stage_cache
+    upstream_key = ""
+    if cache is not None:
+        upstream_key = request.source_fingerprint or cache.fingerprint_image(image)
 
     _cancelled(request)
-    oriented, orientation = _timed(
-        "orientation",
-        durations,
-        lambda: orient_document(image, method=request.orientation_method),
+    oriented, orientation, upstream_key = _run_stage(
+        stage="orientation",
+        image=image,
+        upstream_key=upstream_key,
+        options={"method": request.orientation_method},
+        operation=lambda: orient_document(image, method=request.orientation_method),
+        encode_diagnostics=asdict,
+        decode_diagnostics=lambda payload: OrientationDiagnostics(**payload),
+        cacheable=request.orientation_method != ORIENTATION_METHOD_NONE,
+        request=request,
+        durations=durations,
+        cache_hits=cache_hits,
     )
     _cancelled(request)
-    deskewed, deskew_angle = _timed(
-        "deskew",
-        durations,
-        lambda: deskew_document(oriented, method=request.deskew_method),
+    deskewed, deskew_payload, upstream_key = _run_stage(
+        stage="deskew",
+        image=oriented,
+        upstream_key=upstream_key,
+        options={"method": request.deskew_method},
+        operation=lambda: (lambda result: (result[0], {"angle": float(result[1])}))(
+            deskew_document(oriented, method=request.deskew_method)
+        ),
+        encode_diagnostics=lambda payload: payload,
+        decode_diagnostics=lambda payload: payload,
+        cacheable=request.deskew_method != DESKEW_METHOD_NONE,
+        request=request,
+        durations=durations,
+        cache_hits=cache_hits,
     )
+    deskew_angle = float(deskew_payload["angle"])
     _cancelled(request)
     if request.dewarp_already_applied:
         dewarped = deskewed
@@ -122,17 +198,38 @@ def process_document_page(
             reason="applied_by_detection_backend",
         )
         durations["dewarp"] = 0.0
+        if cache is not None:
+            upstream_key = cache.stage_key(
+                upstream_key,
+                "dewarp",
+                {"version": 1, "already_applied": True, "method": request.dewarp_method},
+            )
     else:
-        dewarped, dewarp = _timed(
-            "dewarp",
-            durations,
-            lambda: dewarp_document(
+        dewarped, dewarp, upstream_key = _run_stage(
+            stage="dewarp",
+            image=deskewed,
+            upstream_key=upstream_key,
+            options={
+                "method": request.dewarp_method,
+                "model": asdict(request.dewarp_model) if request.dewarp_model is not None else None,
+                "auto_uvdoc": request.auto_dewarp_uvdoc,
+                "uvdoc_cache": (
+                    str(request.uvdoc_cache_home) if request.uvdoc_cache_home is not None else None
+                ),
+            },
+            operation=lambda: dewarp_document(
                 deskewed,
                 method=request.dewarp_method,
                 uvdoc_cache_home=request.uvdoc_cache_home,
                 auto_use_uvdoc=request.auto_dewarp_uvdoc,
                 model=request.dewarp_model,
             ),
+            encode_diagnostics=asdict,
+            decode_diagnostics=lambda payload: DewarpDiagnostics(**payload),
+            cacheable=request.dewarp_method != DEWARP_METHOD_NONE,
+            request=request,
+            durations=durations,
+            cache_hits=cache_hits,
         )
 
     _cancelled(request)
@@ -150,12 +247,39 @@ def process_document_page(
             )
         return apply_enhancements_with_diagnostics(postprocessed, request.preprocess_settings)
 
-    cleaned, despeckle = _timed("cleanup", durations, cleanup_stage)
+    cleaned, despeckle, upstream_key = _run_stage(
+        stage="cleanup",
+        image=dewarped,
+        upstream_key=upstream_key,
+        options={
+            "postprocess": request.postprocess_name,
+            "preprocess": (
+                asdict(request.preprocess_settings)
+                if request.preprocess_settings is not None
+                else None
+            ),
+        },
+        operation=cleanup_stage,
+        encode_diagnostics=asdict,
+        decode_diagnostics=lambda payload: DespeckleDiagnostics(**payload),
+        cacheable=request.postprocess_name != "None" or request.preprocess_settings is not None,
+        request=request,
+        durations=durations,
+        cache_hits=cache_hits,
+    )
     _cancelled(request)
-    laid_out, layout = _timed(
-        "layout",
-        durations,
-        lambda: layout_document_page(
+    laid_out, layout, _upstream_key = _run_stage(
+        stage="layout",
+        image=cleaned,
+        upstream_key=upstream_key,
+        options={
+            "method": request.page_layout,
+            "dpi": request.page_dpi,
+            "margin_mm": request.page_margin_mm,
+            "align_x": request.horizontal_alignment,
+            "align_y": request.vertical_alignment,
+        },
+        operation=lambda: layout_document_page(
             cleaned,
             method=request.page_layout,
             dpi=request.page_dpi,
@@ -163,6 +287,12 @@ def process_document_page(
             horizontal_alignment=request.horizontal_alignment,
             vertical_alignment=request.vertical_alignment,
         ),
+        encode_diagnostics=asdict,
+        decode_diagnostics=_layout_from_dict,
+        cacheable=request.page_layout != PAGE_LAYOUT_NONE,
+        request=request,
+        durations=durations,
+        cache_hits=cache_hits,
     )
     lighting = None
     if request.lighting_diagnostics:
@@ -178,5 +308,6 @@ def process_document_page(
             layout=layout,
             lighting=lighting,
             stage_durations_ms=durations,
+            cache_hits=tuple(cache_hits),
         ),
     )
