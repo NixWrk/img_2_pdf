@@ -25,6 +25,11 @@ ProgressCb = Callable[[int, int, str], None]
 CancelCb = Callable[[], bool]
 
 
+def _check_cancelled(cancel_cb: CancelCb | None) -> None:
+    if cancel_cb is not None and cancel_cb():
+        raise RuntimeError("Cancelled by user.")
+
+
 @dataclass(slots=True)
 class PipelineOptions:
     detect_document: bool = True
@@ -116,8 +121,7 @@ def process_loaded_items(
 
     total = len(loaded_items)
     for index, (name, image) in enumerate(loaded_items, start=1):
-        if cancel_cb is not None and cancel_cb():
-            raise RuntimeError("Cancelled by user.")
+        _check_cancelled(cancel_cb)
 
         scan_output = scan_with_document_detector(
             image,
@@ -126,6 +130,7 @@ def process_loaded_items(
             scanner_root=scanner_root,
             uvdoc_cache_home=uvdoc_cache_home,
         )
+        _check_cancelled(cancel_cb)
         fallback_reason = None
         if options.detect_document and not scan_output.detected:
             fallback_reason = _detection_fallback_reason(scan_output)
@@ -133,10 +138,12 @@ def process_loaded_items(
                 raise RuntimeError(f"Document detection failed for {name}: {fallback_reason}")
         warped = scan_output.warped if scan_output.warped is not None else image
         contour = _augment_overlay_contour(scan_output, image)
+        _check_cancelled(cancel_cb)
         backend = scan_output.backend
 
         if options.two_page_mode:
             warped_halves = split_spread_accurate(warped, fallback="midpoint")
+            _check_cancelled(cancel_cb)
             if len(warped_halves) == 2:
                 # Estimate split ratio from the warped result and replay it on raw
                 warped_width = warped.shape[1]
@@ -147,6 +154,7 @@ def process_loaded_items(
                     zip(raw_halves, warped_halves)
                 ):
                     current_half = postprocess_fn(warped_half)
+                    _check_cancelled(cancel_cb)
                     suffix = "L" if half_index == 0 else "R"
                     pages.append(
                         PageResult(
@@ -162,6 +170,7 @@ def process_loaded_items(
                     )
             else:
                 current = postprocess_fn(warped)
+                _check_cancelled(cancel_cb)
                 pages.append(
                     PageResult(
                         name=name,
@@ -176,6 +185,7 @@ def process_loaded_items(
                 )
         else:
             current = postprocess_fn(warped)
+            _check_cancelled(cancel_cb)
             pages.append(
                 PageResult(
                     name=name,

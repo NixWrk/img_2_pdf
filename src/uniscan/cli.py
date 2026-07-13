@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from uniscan.diagnostics import diagnostics_json, format_diagnostics, run_diagnostics
+from uniscan.io import DEFAULT_MAX_INPUT_PIXELS
 from uniscan.tools import (
     DESKEW_METHOD_CHOICES,
     DEWARP_METHOD_CHOICES,
@@ -105,7 +106,30 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Optional cache directory for PaddleOCR UVDoc weights.",
     )
-    convert_parser.add_argument("--pdf-dpi", type=int, default=300, help="Input/output PDF DPI.")
+    convert_parser.add_argument(
+        "--pdf-dpi",
+        type=int,
+        default=300,
+        help="Compatibility default for both PDF DPI roles (300).",
+    )
+    convert_parser.add_argument(
+        "--input-pdf-dpi",
+        type=int,
+        default=None,
+        help="DPI used to rasterize input PDF pages; overrides --pdf-dpi.",
+    )
+    convert_parser.add_argument(
+        "--output-pdf-dpi",
+        type=int,
+        default=None,
+        help="Physical DPI used for layout and PDF export; overrides --pdf-dpi.",
+    )
+    convert_parser.add_argument(
+        "--max-input-pixels",
+        type=int,
+        default=DEFAULT_MAX_INPUT_PIXELS,
+        help="Fail-closed pixel limit for every raster, TIFF, or rendered PDF page.",
+    )
     convert_parser.add_argument(
         "--no-detect",
         action="store_true",
@@ -314,6 +338,9 @@ def main(argv: list[str] | None = None) -> int:
                 image_format=args.image_format,
                 report_path=args.report,
                 pdf_dpi=args.pdf_dpi,
+                input_pdf_dpi=args.input_pdf_dpi,
+                output_pdf_dpi=args.output_pdf_dpi,
+                max_input_pixels=args.max_input_pixels,
                 detect_document=not args.no_detect,
                 detector_policy=args.backend,
                 strict_detect=args.strict_detect,

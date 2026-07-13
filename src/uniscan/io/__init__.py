@@ -2,6 +2,7 @@
 
 from .camera_service import CameraService
 from .loaders import (
+    DEFAULT_MAX_INPUT_PIXELS,
     IMG_EXTS,
     PDF_EXTS,
     imread_unicode,
@@ -17,6 +18,7 @@ from .loaders import (
 
 __all__ = [
     "CameraService",
+    "DEFAULT_MAX_INPUT_PIXELS",
     "IMG_EXTS",
     "PDF_EXTS",
     "natural_key",

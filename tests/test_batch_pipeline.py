@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import time
 
 import cv2
 import numpy as np
@@ -150,6 +151,65 @@ def test_run_batch_pipeline_writes_pdf_and_images(tmp_path) -> None:
     assert report["orientationMethod"] == "none"
     assert report["deskewMethod"] == "none"
     assert report["dewarpMethod"] == "none"
+    assert not list(tmp_path.glob(".*.stage-*.uniscan-output.lock"))
+
+
+def test_batch_holds_final_images_lock_while_cloning_and_staging(tmp_path, monkeypatch) -> None:
+    from uniscan.tools import batch_pipeline
+
+    source = tmp_path / "source.png"
+    _write_image(source, 90)
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    (images_dir / "notes.txt").write_text("personal", encoding="utf-8")
+    real_stage_outputs = batch_pipeline._stage_outputs
+    lock_was_held = False
+
+    def stage_while_checking_lock(**kwargs):
+        nonlocal lock_was_held
+        with pytest.raises(RuntimeError, match="Another UniScan process"):
+            with batch_pipeline._directory_export_lock(images_dir):
+                pass
+        lock_was_held = True
+        return real_stage_outputs(**kwargs)
+
+    monkeypatch.setattr(batch_pipeline, "_stage_outputs", stage_while_checking_lock)
+    run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "result.pdf",
+        images_dir=images_dir,
+        detect_document=False,
+        lens_mode="none",
+    )
+
+    assert lock_was_held
+    assert (images_dir / "notes.txt").read_text(encoding="utf-8") == "personal"
+
+
+def test_batch_canonicalizes_parent_symlink_before_staging_and_publication(tmp_path) -> None:
+    source = tmp_path / "source.png"
+    _write_image(source, 90)
+    real_output = tmp_path / "real-output"
+    real_output.mkdir()
+    alias = tmp_path / "output-alias"
+    try:
+        alias.symlink_to(real_output, target_is_directory=True)
+    except OSError as exc:  # Windows may require Developer Mode for symlinks.
+        pytest.skip(f"Cannot create a test symlink: {exc}")
+
+    result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=alias / "result.pdf",
+        images_dir=alias / "images",
+        report_path=alias / "report.json",
+        detect_document=False,
+        lens_mode="none",
+    )
+
+    assert result.output_pdf == real_output / "result.pdf"
+    assert result.report_path == real_output / "report.json"
+    assert result.image_outputs == (real_output / "images" / "page_00001.png",)
+    assert not list(real_output.glob("*.uniscan-transaction.json"))
 
 
 def test_batch_images_export_preserves_unrelated_neighbours(tmp_path) -> None:
@@ -189,8 +249,11 @@ def test_report_records_complete_effective_processing_configuration(tmp_path) ->
     )
 
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
-    assert report["schemaVersion"] == 2
+    assert report["schemaVersion"] == 3
     assert report["pdfDpi"] == 200
+    assert report["inputPdfDpi"] == 200
+    assert report["outputPdfDpi"] == 200
+    assert report["maxInputPixels"] == 150_000_000
     assert report["imageFormat"] == "jpg"
     assert report["imagesDirectory"] == str(tmp_path / "configured-pages")
     assert report["strictDetect"] is False
@@ -223,6 +286,69 @@ def test_pdf_input_roundtrip_preserves_physical_page_size(tmp_path, dpi: int) ->
     width, height = _pdf_page_size(result.output_pdf)
     assert width == pytest.approx(144.0, abs=0.25)
     assert height == pytest.approx(288.0, abs=0.25)
+
+
+def test_input_and_output_pdf_dpi_are_independent_and_reported(tmp_path) -> None:
+    source = tmp_path / "source.pdf"
+    _write_sized_pdf(source, width=144.0, height=288.0)
+
+    result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "resampled.pdf",
+        input_pdf_dpi=144,
+        output_pdf_dpi=72,
+        detect_document=False,
+        lens_mode="none",
+    )
+
+    width, height = _pdf_page_size(result.output_pdf)
+    assert width == pytest.approx(288.0, abs=0.25)
+    assert height == pytest.approx(576.0, abs=0.25)
+    report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    assert report["pdfDpi"] == 72
+    assert report["inputPdfDpi"] == 144
+    assert report["outputPdfDpi"] == 72
+
+
+def test_configured_input_pixel_cap_applies_to_rendered_pdf_pages(tmp_path) -> None:
+    source = tmp_path / "oversized-at-requested-dpi.pdf"
+    _write_sized_pdf(source, width=144.0, height=288.0)
+
+    with pytest.raises(RuntimeError, match=r"safe pixel limit.*--input-pdf-dpi"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=tmp_path / "must-not-exist.pdf",
+            input_pdf_dpi=144,
+            max_input_pixels=10_000,
+            detect_document=False,
+            lens_mode="none",
+        )
+
+
+def test_split_page_report_durations_are_per_page_not_cumulative(tmp_path, monkeypatch) -> None:
+    from uniscan.tools import batch_pipeline
+
+    source = tmp_path / "spread.png"
+    _write_image(source, 90)
+    real_process = batch_pipeline.process_document_page
+
+    def delayed_process(*args, **kwargs):
+        time.sleep(0.03)
+        return real_process(*args, **kwargs)
+
+    monkeypatch.setattr(batch_pipeline, "process_document_page", delayed_process)
+    result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "spread.pdf",
+        detect_document=False,
+        two_page_mode=True,
+        lens_mode="none",
+    )
+
+    assert result.total_pages == 2
+    durations = [page.duration_ms for page in result.pages]
+    assert min(durations) >= 25.0
+    assert max(durations) / min(durations) < 1.6
 
 
 @pytest.mark.parametrize(
@@ -529,6 +655,18 @@ def test_run_batch_pipeline_rejects_unknown_geometry_methods(tmp_path) -> None:
             output_pdf=tmp_path / "cache.pdf",
             stage_cache_max_mb=0,
         )
+    with pytest.raises(ValueError, match="Maximum input pixel count"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=tmp_path / "pixels.pdf",
+            max_input_pixels=0,
+        )
+    with pytest.raises(RuntimeError, match="safe input limit: 4,000 pixels"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=tmp_path / "oversized-raster.pdf",
+            max_input_pixels=4_000,
+        )
 
     with pytest.raises(ValueError, match="UVDoc is a dewarp method"):
         run_batch_pipeline(
@@ -554,6 +692,12 @@ def test_cli_convert_runs_end_to_end(tmp_path, capsys) -> None:
             "--no-detect",
             "--mode",
             "none",
+            "--input-pdf-dpi",
+            "144",
+            "--output-pdf-dpi",
+            "96",
+            "--max-input-pixels",
+            "1000000",
             "--illumination-correction",
         ]
     )
@@ -562,6 +706,9 @@ def test_cli_convert_runs_end_to_end(tmp_path, capsys) -> None:
     assert output_pdf.exists()
     report = json.loads(output_pdf.with_suffix(".pdf.report.json").read_text(encoding="utf-8"))
     assert report["illuminationCorrection"] is True
+    assert report["inputPdfDpi"] == 144
+    assert report["outputPdfDpi"] == 96
+    assert report["maxInputPixels"] == 1_000_000
     assert "Wrote 1 page(s)" in capsys.readouterr().out
 
 

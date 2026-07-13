@@ -6,6 +6,7 @@ import math
 import os
 import re
 import tempfile
+import warnings
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
@@ -13,14 +14,16 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-# PIL's default decompression-bomb guard is 178 956 970 px.
-# We cap renders slightly below that so downstream tools can open
-# rendered pages safely.
-_MAX_RENDER_PIXELS: int = 150_000_000
+# Keep one fail-closed limit for PDF renders and decoded raster pages.
+DEFAULT_MAX_INPUT_PIXELS: int = 150_000_000
+_MAX_RENDER_PIXELS: int = DEFAULT_MAX_INPUT_PIXELS
 
 
 def _safe_render_dpi(page_size, requested_dpi: int, max_pixels: int = _MAX_RENDER_PIXELS) -> int:
     """Calculate the highest safe DPI without silently changing the request."""
+    max_pixels = int(max_pixels)
+    if max_pixels < 1:
+        raise ValueError("Maximum input pixel count must be positive.")
     if hasattr(page_size, "width") and hasattr(page_size, "height"):
         w_pt = float(page_size.width)
         h_pt = float(page_size.height)
@@ -28,12 +31,28 @@ def _safe_render_dpi(page_size, requested_dpi: int, max_pixels: int = _MAX_RENDE
         w_pt, h_pt = (float(value) for value in page_size)
     if w_pt <= 0 or h_pt <= 0:
         return requested_dpi
-    w_px = w_pt / 72.0 * requested_dpi
-    h_px = h_pt / 72.0 * requested_dpi
-    if w_px * h_px <= max_pixels:
+
+    def rendered_pixels(dpi: int) -> int:
+        scale = dpi / 72.0
+        return math.ceil(w_pt * scale) * math.ceil(h_pt * scale)
+
+    if rendered_pixels(requested_dpi) <= max_pixels:
         return requested_dpi
-    scale = math.sqrt(max_pixels / (w_px * h_px))
-    return max(1, int(requested_dpi * scale))
+
+    # PDFium allocates ceil(width * scale) by ceil(height * scale), so a
+    # continuous-area estimate is unsafe for very narrow or otherwise extreme
+    # pages. Find the highest integer DPI whose actual allocation stays bounded.
+    low = 1
+    high = requested_dpi - 1
+    safe_dpi = 0
+    while low <= high:
+        candidate = (low + high) // 2
+        if rendered_pixels(candidate) <= max_pixels:
+            safe_dpi = candidate
+            low = candidate + 1
+        else:
+            high = candidate - 1
+    return safe_dpi
 
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp"}
@@ -42,6 +61,19 @@ PDF_EXTS = {".pdf"}
 LoadedItem = tuple[str, np.ndarray]
 ProgressCb = Callable[[int, int, str], None]
 CancelCb = Callable[[], bool]
+
+
+def _validated_pixel_count(size, *, source_name: str, max_pixels: int) -> None:
+    limit = int(max_pixels)
+    if limit < 1:
+        raise ValueError("Maximum input pixel count must be positive.")
+    width, height = map(int, size)
+    pixels = width * height
+    if width < 1 or height < 1 or pixels > limit:
+        raise RuntimeError(
+            f"Image {source_name}: {width}x{height} ({pixels:,} pixels); "
+            f"safe input limit: {limit:,} pixels."
+        )
 
 
 def natural_key(value: str) -> list[int | str]:
@@ -112,30 +144,49 @@ def _pil_frame_to_bgr(frame: Image.Image) -> np.ndarray:
     return cv2.cvtColor(_scale_to_uint8(rgb), cv2.COLOR_RGB2BGR)
 
 
-def _opencv_image_to_bgr(image: np.ndarray) -> np.ndarray:
-    normalized = _scale_to_uint8(image)
-    if normalized.ndim == 2:
-        return cv2.cvtColor(normalized, cv2.COLOR_GRAY2BGR)
-    if normalized.ndim == 3 and normalized.shape[2] == 4:
-        alpha = normalized[:, :, 3:4].astype(np.float32) / 255.0
-        composited = normalized[:, :, :3].astype(np.float32) * alpha + 255.0 * (1.0 - alpha)
-        return np.clip(np.rint(composited), 0, 255).astype(np.uint8)
-    if normalized.ndim == 3 and normalized.shape[2] == 3:
-        return normalized
-    raise ValueError(f"Unsupported decoded image shape: {normalized.shape}")
+def _pil_frame_to_unchanged_cv(frame: Image.Image) -> np.ndarray:
+    """Preserve grayscale/alpha channels while converting RGB order for OpenCV."""
+    if frame.mode in {"1", "L", "I", "I;16", "F"}:
+        return np.array(frame, copy=True)
+    bands = frame.getbands()
+    has_alpha = "A" in bands or (frame.mode == "P" and "transparency" in frame.info)
+    if has_alpha:
+        rgba = np.asarray(frame.convert("RGBA"))
+        return cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA)
+    rgb = np.asarray(frame if frame.mode == "RGB" else frame.convert("RGB"))
+    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
 
-def imread_unicode(path: Path) -> np.ndarray | None:
+def imread_unicode(
+    path: Path,
+    *,
+    max_pixels: int = DEFAULT_MAX_INPUT_PIXELS,
+    preserve_channels: bool = False,
+) -> np.ndarray | None:
     """Read an image as BGR and apply its EXIF orientation when present."""
     try:
-        with Image.open(path) as source:
-            oriented = ImageOps.exif_transpose(source)
-            return _pil_frame_to_bgr(oriented)
-    except (OSError, UnidentifiedImageError, ValueError):
-        # OpenCV remains a useful fallback for formats/plugins Pillow cannot decode.
-        data = np.fromfile(str(path), dtype=np.uint8)
-        decoded = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
-        return None if decoded is None else _opencv_image_to_bgr(decoded)
+        # Handle Pillow's warning locally; do not weaken its global hard guard.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+            with Image.open(path) as source:
+                _validated_pixel_count(
+                    source.size,
+                    source_name=path.name,
+                    max_pixels=max_pixels,
+                )
+                oriented = ImageOps.exif_transpose(source)
+                if preserve_channels:
+                    return _pil_frame_to_unchanged_cv(oriented)
+                return _pil_frame_to_bgr(oriented)
+    except Image.DecompressionBombError as exc:
+        raise RuntimeError(
+            f"Image {path.name} exceeds Pillow's decompression-bomb safety limit."
+        ) from exc
+    except (OSError, UnidentifiedImageError):
+        # Every advertised raster format is supported by Pillow. Do not fall
+        # back to cv2.imdecode: it allocates the full image before its dimensions
+        # can be checked against the fail-closed pixel limit.
+        return None
 
 
 def imwrite_unicode(path: Path, image: np.ndarray) -> bool:
@@ -166,20 +217,27 @@ def imwrite_unicode(path: Path, image: np.ndarray) -> bool:
             temporary_path.unlink(missing_ok=True)
 
 
-def _render_pdf_page(page, *, pdf_path: Path, page_index: int, dpi: int) -> LoadedItem:
+def _render_pdf_page(
+    page,
+    *,
+    pdf_path: Path,
+    page_index: int,
+    dpi: int,
+    max_pixels: int = DEFAULT_MAX_INPUT_PIXELS,
+) -> LoadedItem:
     """Render one zero-based PDFium page index to a named BGR image."""
-    safe_dpi = _safe_render_dpi(page.get_size(), dpi)
+    safe_dpi = _safe_render_dpi(page.get_size(), dpi, max_pixels=max_pixels)
     if safe_dpi != dpi:
         raise RuntimeError(
             f"PDF page {page_index + 1} from {pdf_path.name} exceeds the safe pixel limit "
-            f"at {dpi} DPI (maximum safe render: {safe_dpi} DPI). Lower --pdf-dpi; "
+            f"at {dpi} DPI (maximum safe render: {safe_dpi} DPI). Lower "
+            "--input-pdf-dpi (or the legacy --pdf-dpi); "
             "the page was not rendered because silently lowering DPI would change its "
             "physical output size."
         )
     bitmap = page.render(
         scale=safe_dpi / 72.0,
         rev_byteorder=True,
-        maybe_alpha=False,
         fill_color=(255, 255, 255, 255),
     )
     try:
@@ -199,6 +257,7 @@ def iter_pdf_pages(
     pdf_path: Path,
     dpi: int,
     *,
+    max_pixels: int = DEFAULT_MAX_INPUT_PIXELS,
     cancel_cb: CancelCb | None = None,
 ) -> Iterator[LoadedItem]:
     """Yield PDF pages one at a time without materializing the full document."""
@@ -216,20 +275,38 @@ def iter_pdf_pages(
                 raise RuntimeError("Cancelled by user.")
             page = doc[page_index]
             try:
-                yield _render_pdf_page(page, pdf_path=pdf_path, page_index=page_index, dpi=dpi)
+                item = _render_pdf_page(
+                    page,
+                    pdf_path=pdf_path,
+                    page_index=page_index,
+                    dpi=dpi,
+                    max_pixels=max_pixels,
+                )
+                if cancel_cb is not None and cancel_cb():
+                    raise RuntimeError("Cancelled by user.")
+                yield item
             finally:
                 page.close()
     finally:
         doc.close()
 
 
-def render_pdf_pages(pdf_path: Path, dpi: int) -> list[LoadedItem]:
+def render_pdf_pages(
+    pdf_path: Path,
+    dpi: int,
+    *,
+    max_pixels: int = DEFAULT_MAX_INPUT_PIXELS,
+) -> list[LoadedItem]:
     """Render all PDF pages to BGR images for backwards-compatible callers."""
-    return list(iter_pdf_pages(pdf_path, dpi))
+    return list(iter_pdf_pages(pdf_path, dpi, max_pixels=max_pixels))
 
 
 def render_pdf_page_indices(
-    pdf_path: Path, page_indices: Iterable[int], dpi: int
+    pdf_path: Path,
+    page_indices: Iterable[int],
+    dpi: int,
+    *,
+    max_pixels: int = DEFAULT_MAX_INPUT_PIXELS,
 ) -> list[LoadedItem]:
     """Render selected PDF pages to BGR images without materializing the full document."""
     try:
@@ -253,6 +330,7 @@ def render_pdf_page_indices(
                         pdf_path=pdf_path,
                         page_index=page_index,
                         dpi=dpi,
+                        max_pixels=max_pixels,
                     )
                 )
             finally:
@@ -266,33 +344,57 @@ def render_pdf_page_indices(
 def _iter_image_frames(
     path: Path,
     *,
+    max_pixels: int = DEFAULT_MAX_INPUT_PIXELS,
     cancel_cb: CancelCb | None = None,
 ) -> Iterator[LoadedItem]:
     """Yield every frame from an image container (notably multi-page TIFF)."""
     try:
-        source = Image.open(path)
-    except (OSError, UnidentifiedImageError):
-        image = imread_unicode(path)
-        if image is None:
-            raise RuntimeError(f"Cannot read image: {path}")
-        yield path.name, image
-        return
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+            source = Image.open(path)
+    except Image.DecompressionBombError as exc:
+        raise RuntimeError(
+            f"Image {path.name} exceeds Pillow's decompression-bomb safety limit."
+        ) from exc
+    except (OSError, UnidentifiedImageError) as exc:
+        raise RuntimeError(
+            f"Cannot safely read advertised raster format with Pillow: {path}"
+        ) from exc
 
     with source:
         frame_count = int(getattr(source, "n_frames", 1))
         for frame_index in range(frame_count):
             if cancel_cb is not None and cancel_cb():
                 raise RuntimeError("Cancelled by user.")
-            source.seek(frame_index)
-            frame = ImageOps.exif_transpose(source.copy())
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+                    source.seek(frame_index)
+                    _validated_pixel_count(
+                        source.size,
+                        source_name=f"{path.name} frame {frame_index + 1}",
+                        max_pixels=max_pixels,
+                    )
+                    frame = ImageOps.exif_transpose(source.copy())
+            except Image.DecompressionBombError as exc:
+                raise RuntimeError(
+                    f"Image {path.name} frame {frame_index + 1} exceeds Pillow's "
+                    "decompression-bomb safety limit."
+                ) from exc
+            if cancel_cb is not None and cancel_cb():
+                raise RuntimeError("Cancelled by user.")
             name = path.name if frame_count == 1 else f"{path.name} [p{frame_index + 1:04d}]"
-            yield name, _pil_frame_to_bgr(frame)
+            converted = _pil_frame_to_bgr(frame)
+            if cancel_cb is not None and cancel_cb():
+                raise RuntimeError("Cancelled by user.")
+            yield name, converted
 
 
 def iter_input_items(
     paths: Iterable[Path],
     *,
     pdf_dpi: int,
+    max_input_pixels: int = DEFAULT_MAX_INPUT_PIXELS,
     on_progress: ProgressCb | None = None,
     cancel_cb: CancelCb | None = None,
 ) -> Iterator[LoadedItem]:
@@ -309,9 +411,18 @@ def iter_input_items(
 
         ext = path.suffix.lower()
         if ext in IMG_EXTS:
-            yield from _iter_image_frames(path, cancel_cb=cancel_cb)
+            yield from _iter_image_frames(
+                path,
+                max_pixels=max_input_pixels,
+                cancel_cb=cancel_cb,
+            )
         elif ext in PDF_EXTS:
-            yield from iter_pdf_pages(path, dpi=pdf_dpi, cancel_cb=cancel_cb)
+            yield from iter_pdf_pages(
+                path,
+                dpi=pdf_dpi,
+                max_pixels=max_input_pixels,
+                cancel_cb=cancel_cb,
+            )
         else:
             raise RuntimeError(f"Unsupported input: {path}")
 
@@ -323,6 +434,7 @@ def load_input_items(
     paths: Iterable[Path],
     *,
     pdf_dpi: int,
+    max_input_pixels: int = DEFAULT_MAX_INPUT_PIXELS,
     on_progress: ProgressCb | None = None,
     cancel_cb: CancelCb | None = None,
 ) -> list[LoadedItem]:
@@ -331,6 +443,7 @@ def load_input_items(
         iter_input_items(
             paths,
             pdf_dpi=pdf_dpi,
+            max_input_pixels=max_input_pixels,
             on_progress=on_progress,
             cancel_cb=cancel_cb,
         )

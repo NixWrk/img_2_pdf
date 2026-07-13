@@ -26,6 +26,7 @@ from .orientation import (
     orient_document,
 )
 from .layout import (
+    DEFAULT_MAX_LAYOUT_PIXELS,
     HORIZONTAL_ALIGNMENTS,
     PAGE_LAYOUT_A4,
     PAGE_LAYOUT_CHOICES,
@@ -115,6 +116,7 @@ __all__ = [
     "ORIENTATION_METHOD_CHOICES",
     "ORIENTATION_METHOD_NONE",
     "OrientationDiagnostics",
+    "DEFAULT_MAX_LAYOUT_PIXELS",
     "HORIZONTAL_ALIGNMENTS",
     "PAGE_LAYOUT_A4",
     "PAGE_LAYOUT_CHOICES",

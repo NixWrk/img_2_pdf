@@ -13,6 +13,7 @@ PAGE_LAYOUT_LETTER = "letter"
 PAGE_LAYOUT_CHOICES = (PAGE_LAYOUT_NONE, PAGE_LAYOUT_A4, PAGE_LAYOUT_LETTER)
 HORIZONTAL_ALIGNMENTS = ("left", "center", "right")
 VERTICAL_ALIGNMENTS = ("top", "center", "bottom")
+DEFAULT_MAX_LAYOUT_PIXELS = 150_000_000
 
 _PAGE_SIZE_MM = {
     PAGE_LAYOUT_A4: (210.0, 297.0),
@@ -113,6 +114,7 @@ def layout_document_page(
     margin_mm: float = 10.0,
     horizontal_alignment: str = "center",
     vertical_alignment: str = "center",
+    max_pixels: int = DEFAULT_MAX_LAYOUT_PIXELS,
 ) -> tuple[np.ndarray, PageLayoutDiagnostics]:
     """Place detected content on a standard page with reproducible margins and alignment."""
     normalized = method.strip().lower()
@@ -140,10 +142,20 @@ def layout_document_page(
             reason="disabled",
         )
 
-    content_box, confidence, content_reason = detect_content_box(image)
     page_width_mm, page_height_mm = _PAGE_SIZE_MM[normalized]
     target_width = int(round(page_width_mm * dpi / 25.4))
     target_height = int(round(page_height_mm * dpi / 25.4))
+    pixel_limit = int(max_pixels)
+    if pixel_limit < 1:
+        raise ValueError("Maximum output layout pixel count must be positive.")
+    target_pixels = target_width * target_height
+    if target_pixels > pixel_limit:
+        raise ValueError(
+            f"{normalized.upper()} layout at {dpi} DPI is {target_width}x{target_height} "
+            f"({target_pixels:,} pixels), above the safe output limit of "
+            f"{pixel_limit:,} pixels. Reduce output PDF DPI."
+        )
+    content_box, confidence, content_reason = detect_content_box(image)
     margin_px = int(round(margin_mm * dpi / 25.4))
     available_width = target_width - 2 * margin_px
     available_height = target_height - 2 * margin_px

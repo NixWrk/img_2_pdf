@@ -1,7 +1,16 @@
 """Session layer for in-memory page management."""
 
-from .capture_session import CaptureEntry, CaptureSession
+from .capture_session import (
+    CaptureEntry,
+    CaptureSession,
+    CommittedPageProcessing,
+    ProcessingRecipe,
+)
 from .autosave import (
+    AutosaveSessionLock,
+    SessionInUseError,
+    UnsafeSessionLockError,
+    acquire_autosave_lock,
     create_persistent_session,
     default_autosave_path,
     default_state_dir,
@@ -10,6 +19,12 @@ from .autosave import (
 )
 
 __all__ = [
+    "UnsafeSessionLockError",
+    "CommittedPageProcessing",
+    "ProcessingRecipe",
+    "AutosaveSessionLock",
+    "SessionInUseError",
+    "acquire_autosave_lock",
     "CaptureEntry",
     "CaptureSession",
     "create_persistent_session",

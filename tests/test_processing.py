@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import pytest
 
+from uniscan.core.dewarp import DewarpDiagnostics
 from uniscan.core.postprocess import grayscale
 from uniscan.core.preprocess import PreprocessSettings, apply_enhancements
 from uniscan.core.processing import (
@@ -135,6 +136,60 @@ def test_processing_controller_checks_cancellation_between_stages() -> None:
         )
 
 
+def test_processing_cancellation_after_native_stage_prevents_cache_write(
+    tmp_path, monkeypatch
+) -> None:
+    cache = ProcessingStageCache(tmp_path / "stages", max_bytes=64 * 1024 * 1024)
+    cancelled = False
+    from uniscan.core import processing
+
+    real_orient = processing.orient_document
+
+    def orient_then_cancel(*args, **kwargs):
+        nonlocal cancelled
+        result = real_orient(*args, **kwargs)
+        cancelled = True
+        return result
+
+    monkeypatch.setattr(processing, "orient_document", orient_then_cancel)
+
+    with pytest.raises(RuntimeError, match="Cancelled by user"):
+        process_document_page(
+            _sideways_page(),
+            PageProcessingRequest(
+                orientation_method="auto",
+                stage_cache=cache,
+                cancel_cb=lambda: cancelled,
+            ),
+        )
+
+    assert cache.stats.writes == 0
+
+
+def test_processing_cancellation_during_final_lighting_is_not_lost(monkeypatch) -> None:
+    cancelled = False
+    from uniscan.core import processing
+
+    real_analyze = processing.analyze_lighting
+
+    def analyze_then_cancel(*args, **kwargs):
+        nonlocal cancelled
+        result = real_analyze(*args, **kwargs)
+        cancelled = True
+        return result
+
+    monkeypatch.setattr(processing, "analyze_lighting", analyze_then_cancel)
+
+    with pytest.raises(RuntimeError, match="Cancelled by user"):
+        process_document_page(
+            np.full((100, 120, 3), 220, dtype=np.uint8),
+            PageProcessingRequest(
+                lighting_diagnostics=True,
+                cancel_cb=lambda: cancelled,
+            ),
+        )
+
+
 def test_processing_controller_rejects_unknown_postprocess() -> None:
     with pytest.raises(ValueError, match="Unsupported postprocess"):
         process_document_page(
@@ -217,3 +272,45 @@ def test_processing_cache_does_not_reuse_previous_algorithm_version(tmp_path) ->
     assert "orientation" not in result.diagnostics.cache_hits
     assert result.diagnostics.orientation.reason != "stale-v1-entry"
     assert np.any(result.image != 0)
+
+
+@pytest.mark.parametrize(
+    ("dewarp_method", "auto_dewarp_uvdoc"),
+    (("paddleocr_uvdoc", False), ("auto", True)),
+)
+def test_processing_cache_does_not_reuse_uvdoc_without_model_identity(
+    tmp_path, monkeypatch, dewarp_method: str, auto_dewarp_uvdoc: bool
+) -> None:
+    cache = ProcessingStageCache(tmp_path / "stages", max_bytes=64 * 1024 * 1024)
+    image = np.full((100, 120, 3), 220, dtype=np.uint8)
+    calls = 0
+
+    def model_backed_dewarp(source, *, method, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return (
+            np.full_like(source, 200 - calls),
+            DewarpDiagnostics(
+                method=method,
+                applied=True,
+                selected_method=method,
+            ),
+        )
+
+    monkeypatch.setattr("uniscan.core.processing.dewarp_document", model_backed_dewarp)
+    request = PageProcessingRequest(
+        dewarp_method=dewarp_method,
+        auto_dewarp_uvdoc=auto_dewarp_uvdoc,
+        postprocess_name="Grayscale",
+        page_layout="a4",
+        page_dpi=100,
+        stage_cache=cache,
+    )
+
+    first = process_document_page(image, request)
+    second = process_document_page(image, request)
+
+    assert calls == 2
+    assert second.diagnostics.cache_hits == ()
+    assert not np.array_equal(first.image, second.image)
+    assert cache.stats.writes == 0

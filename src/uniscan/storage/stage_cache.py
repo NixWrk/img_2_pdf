@@ -13,6 +13,8 @@ from uuid import uuid4
 import cv2
 import numpy as np
 
+from uniscan.io.loaders import imread_unicode
+
 
 @dataclass(slots=True)
 class StageCacheStats:
@@ -82,8 +84,7 @@ class ProcessingStageCache:
                 self.stats.misses += 1
                 return None
             try:
-                data = np.fromfile(str(image_path), dtype=np.uint8)
-                image = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+                image = imread_unicode(image_path, preserve_channels=True)
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                 if (
                     image is None
@@ -96,7 +97,7 @@ class ProcessingStageCache:
                     raise ValueError("invalid cache metadata")
                 os.utime(image_path, None)
                 os.utime(metadata_path, None)
-            except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            except (OSError, RuntimeError, UnicodeError, ValueError, json.JSONDecodeError):
                 image_path.unlink(missing_ok=True)
                 metadata_path.unlink(missing_ok=True)
                 self.stats.misses += 1

@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import tempfile
 import uuid
 from collections.abc import Callable
@@ -13,11 +14,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Sequence
 
-import cv2
 import numpy as np
 
 from uniscan.core.pipeline import build_pdf_from_images
-from uniscan.io.loaders import imwrite_unicode
+from uniscan.io.loaders import imread_unicode, imwrite_unicode
 
 CancelCb = Callable[[], bool]
 _EXPORT_MANIFEST_NAME = ".uniscan-export-manifest.json"
@@ -26,6 +26,7 @@ _EXPORT_MANIFEST_VERSION = 1
 _DIRECTORY_TRANSACTION_OWNER = "uniscan.directory-export"
 _DIRECTORY_TRANSACTION_VERSION = 1
 _DIRECTORY_TRANSACTION_SUFFIX = ".uniscan-directory-transaction.json"
+_OUTPUT_LOCK_SUFFIX = ".uniscan-output.lock"
 
 
 def _check_cancelled(cancel_cb: CancelCb | None) -> None:
@@ -33,19 +34,33 @@ def _check_cancelled(cancel_cb: CancelCb | None) -> None:
         raise RuntimeError("Cancelled by user.")
 
 
+def _is_windows_reparse_point(path: Path) -> bool:
+    try:
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    except OSError:
+        return False
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    return bool(attributes & reparse_flag)
+
+
 def _is_junction(path: Path) -> bool:
     is_junction = getattr(path, "is_junction", None)
-    return bool(is_junction is not None and is_junction())
+    if is_junction is not None and is_junction():
+        return True
+    return _is_windows_reparse_point(path) and not path.is_symlink()
 
 
 def _is_link_like(path: Path) -> bool:
-    return path.is_symlink() or _is_junction(path)
+    return path.is_symlink() or _is_junction(path) or _is_windows_reparse_point(path)
 
 
 def _remove_path(path: Path) -> None:
-    if _is_junction(path):
-        path.rmdir()
-    elif path.is_symlink() or path.is_file():
+    if _is_link_like(path):
+        try:
+            path.unlink()
+        except (IsADirectoryError, PermissionError):
+            path.rmdir()
+    elif path.is_file():
         path.unlink()
     elif path.is_dir():
         shutil.rmtree(path)
@@ -72,26 +87,98 @@ def _path_key(path: Path) -> str:
     return os.path.normcase(str(_absolute_path(path)))
 
 
+def _canonical_export_target(path: Path, *, description: str) -> Path:
+    """Return one canonical sibling path without following the target itself."""
+    absolute = _absolute_path(path)
+    if absolute == absolute.parent:
+        raise ValueError(f"The filesystem root cannot be used as {description}.")
+    if _is_link_like(absolute):
+        raise ValueError(f"{description} cannot be a link or junction: {absolute}")
+
+    # Resolve only the parent. Resolving the target would hide a target symlink,
+    # while not resolving the parent would let aliases acquire different locks
+    # for the same physical output.
+    canonical = absolute.parent.resolve(strict=False) / absolute.name
+    if _is_link_like(canonical):
+        raise ValueError(f"{description} cannot be a link or junction: {canonical}")
+    return canonical
+
+
 def _directory_transaction_path(output_dir: Path) -> Path:
     output_dir = _absolute_path(output_dir)
     return output_dir.parent / f".{output_dir.name}{_DIRECTORY_TRANSACTION_SUFFIX}"
 
 
+def _output_export_lock_path(output_path: Path) -> Path:
+    output_path = _absolute_path(output_path)
+    return output_path.parent / f".{output_path.name}{_OUTPUT_LOCK_SUFFIX}"
+
+
 def _directory_export_lock_path(output_dir: Path) -> Path:
-    journal = _directory_transaction_path(output_dir)
-    return journal.with_name(f"{journal.name}.lock")
+    return _output_export_lock_path(output_dir)
+
+
+def _file_export_lock_path(output_file: Path) -> Path:
+    return _output_export_lock_path(output_file)
 
 
 @contextmanager
-def _directory_export_lock(output_dir: Path):
-    """Serialize recovery, staging, and publication for one image directory."""
-    lock_path = _directory_export_lock_path(output_dir)
-    if _is_link_like(lock_path) or (lock_path.exists() and not lock_path.is_file()):
-        raise ValueError(f"Invalid image-directory export lock path: {lock_path}")
+def _exclusive_export_lock(
+    lock_path: Path,
+    *,
+    invalid_path_message: str,
+    conflict_message: str,
+):
+    """Acquire one non-blocking, cross-process byte-range lock."""
+    lock_path = _absolute_path(lock_path)
+    try:
+        before = lock_path.lstat()
+    except FileNotFoundError:
+        before = None
+    if _is_link_like(lock_path) or (
+        before is not None and (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1)
+    ):
+        raise ValueError(f"{invalid_path_message}: {lock_path}")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    stream = lock_path.open("a+b")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        if _is_link_like(lock_path):
+            raise ValueError(f"{invalid_path_message}: {lock_path}") from exc
+        raise
+
+    stream = None
     locked = False
     try:
+        opened = os.fstat(descriptor)
+        try:
+            after = lock_path.lstat()
+        except FileNotFoundError as exc:
+            raise ValueError(f"{invalid_path_message}: {lock_path}") from exc
+        if (
+            _is_link_like(lock_path)
+            or not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(after.st_mode)
+            or opened.st_nlink != 1
+            or after.st_nlink != 1
+            or not os.path.samestat(opened, after)
+            or (before is not None and not os.path.samestat(before, opened))
+        ):
+            raise ValueError(f"{invalid_path_message}: {lock_path}")
+
+        stream = os.fdopen(descriptor, "r+b")
+        descriptor = -1
+        write_opened = os.fstat(stream.fileno())
+        write_path = lock_path.lstat()
+        if (
+            _is_link_like(lock_path)
+            or write_opened.st_nlink != 1
+            or write_path.st_nlink != 1
+            or not os.path.samestat(write_opened, write_path)
+        ):
+            raise ValueError(f"{invalid_path_message}: {lock_path}")
         stream.seek(0, os.SEEK_END)
         if stream.tell() == 0:
             stream.write(b"\0")
@@ -109,12 +196,19 @@ def _directory_export_lock(output_dir: Path):
                 fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             locked = True
         except OSError as exc:
-            raise RuntimeError(
-                "Another UniScan process is exporting to this image directory."
-            ) from exc
+            raise RuntimeError(conflict_message) from exc
+        final_opened = os.fstat(stream.fileno())
+        final_path = lock_path.lstat()
+        if (
+            _is_link_like(lock_path)
+            or final_opened.st_nlink != 1
+            or final_path.st_nlink != 1
+            or not os.path.samestat(final_opened, final_path)
+        ):
+            raise ValueError(f"{invalid_path_message}: {lock_path}")
         yield
     finally:
-        if locked:
+        if locked and stream is not None:
             try:
                 stream.seek(0)
                 if os.name == "nt":
@@ -127,7 +221,35 @@ def _directory_export_lock(output_dir: Path):
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
             except OSError:
                 pass
-        stream.close()
+        if stream is not None:
+            stream.close()
+        elif descriptor >= 0:
+            os.close(descriptor)
+
+
+@contextmanager
+def _directory_export_lock(output_dir: Path):
+    """Serialize recovery, staging, and publication for one image directory."""
+    with _exclusive_export_lock(
+        _directory_export_lock_path(output_dir),
+        invalid_path_message="Invalid image-directory export lock path",
+        conflict_message="Another UniScan process is exporting to this image directory.",
+    ):
+        yield
+
+
+@contextmanager
+def _file_export_lock(output_file: Path):
+    """Serialize publication for one regular-file output across processes."""
+    with _exclusive_export_lock(
+        _file_export_lock_path(output_file),
+        invalid_path_message="Invalid file export lock path",
+        conflict_message="Another UniScan process is exporting to this output file.",
+    ):
+        yield
+
+
+_pdf_export_lock = _file_export_lock
 
 
 def _write_directory_transaction(path: Path, payload: dict[str, object]) -> None:
@@ -383,6 +505,55 @@ def _write_owned_files_manifest(
         os.fsync(stream.fileno())
 
 
+def _clone_regular_file_for_staging(source: str, destination: str) -> str:
+    """Clone an unrelated file cheaply, falling back to a byte copy if needed."""
+    source_path = Path(source)
+    destination_path = Path(destination)
+    source_stat = source_path.stat(follow_symlinks=False)
+    if _is_link_like(source_path) or not stat.S_ISREG(source_stat.st_mode):
+        raise ValueError(f"Unsupported image-output entry: {source_path}")
+
+    try:
+        os.link(source_path, destination_path, follow_symlinks=False)
+    except (NotImplementedError, OSError):
+        shutil.copy2(source_path, destination_path, follow_symlinks=False)
+
+    # Fail closed if the source changed type between directory enumeration and
+    # cloning. In particular, never leave a followed symlink in the stage.
+    destination_stat = destination_path.stat(follow_symlinks=False)
+    if _is_link_like(destination_path) or not stat.S_ISREG(destination_stat.st_mode):
+        _remove_path(destination_path)
+        raise RuntimeError(f"Image-output entry changed while staging: {source_path}")
+    return str(destination_path)
+
+
+def _clone_directory_for_staging(source: Path, destination: Path) -> None:
+    """Clone a plain directory tree without following or publishing reparse points."""
+    source = _absolute_path(source)
+    destination = _absolute_path(destination)
+    source_stat = source.stat(follow_symlinks=False)
+    if _is_link_like(source) or not stat.S_ISDIR(source_stat.st_mode):
+        raise ValueError(f"Unsafe image-output directory entry: {source}")
+    destination.mkdir(parents=True, exist_ok=True)
+
+    with os.scandir(source) as entries:
+        for entry in entries:
+            source_entry = Path(entry.path)
+            destination_entry = destination / entry.name
+            entry_stat = source_entry.stat(follow_symlinks=False)
+            if _is_link_like(source_entry):
+                raise ValueError(
+                    f"Image-output directory contains a link or junction: {source_entry}"
+                )
+            if stat.S_ISREG(entry_stat.st_mode):
+                _clone_regular_file_for_staging(str(source_entry), str(destination_entry))
+            elif stat.S_ISDIR(entry_stat.st_mode):
+                _clone_directory_for_staging(source_entry, destination_entry)
+            else:
+                raise ValueError(f"Unsupported image-output directory entry: {source_entry}")
+    shutil.copystat(source, destination, follow_symlinks=False)
+
+
 def _new_staged_directory(
     output_dir: Path,
     *,
@@ -400,7 +571,7 @@ def _new_staged_directory(
     staged_dir = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.stage-", dir=output_dir.parent))
     try:
         if output_dir.exists():
-            shutil.copytree(output_dir, staged_dir, dirs_exist_ok=True, symlinks=True)
+            _clone_directory_for_staging(output_dir, staged_dir)
         _stored_base_name, owned_files = _load_owned_files(staged_dir)
         owned_set = set(owned_files)
         for name in desired_names:
@@ -440,25 +611,33 @@ def export_pages_as_pdf(
     if len(pages) == 0:
         raise ValueError("No pages to export.")
 
-    out_pdf = out_pdf.with_suffix(".pdf")
+    out_pdf = _canonical_export_target(
+        Path(out_pdf).with_suffix(".pdf"),
+        description="PDF output path",
+    )
+    if out_pdf.exists() and not out_pdf.is_file():
+        raise ValueError(f"PDF output path is not a regular file: {out_pdf}")
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="uniscan_pdf_") as tmp:
-        tmp_dir = Path(tmp)
-        image_paths: list[Path] = []
-        for idx, page in enumerate(pages, start=1):
-            _check_cancelled(cancel_cb)
-            page_path = tmp_dir / f"{idx:05d}.png"
-            if not imwrite_unicode(page_path, page):
-                raise RuntimeError(f"Failed to write temporary page image: {page_path}")
-            image_paths.append(page_path)
+    with _pdf_export_lock(out_pdf):
         _check_cancelled(cancel_cb)
-        build_pdf_from_images(
-            image_paths,
-            out_pdf=out_pdf,
-            dpi=int(dpi),
-            cancel_cb=cancel_cb,
-        )
+        with tempfile.TemporaryDirectory(prefix="uniscan_pdf_") as tmp:
+            tmp_dir = Path(tmp)
+            image_paths: list[Path] = []
+            for idx, page in enumerate(pages, start=1):
+                _check_cancelled(cancel_cb)
+                page_path = tmp_dir / f"{idx:05d}.png"
+                if not imwrite_unicode(page_path, page):
+                    raise RuntimeError(f"Failed to write temporary page image: {page_path}")
+                _check_cancelled(cancel_cb)
+                image_paths.append(page_path)
+            _check_cancelled(cancel_cb)
+            build_pdf_from_images(
+                image_paths,
+                out_pdf=out_pdf,
+                dpi=int(dpi),
+                cancel_cb=cancel_cb,
+            )
     return out_pdf
 
 
@@ -477,9 +656,10 @@ def export_pages_as_files(
     ext = _normalize_extension(ext)
     _validate_base_name(base_name)
     output_names = tuple(f"{base_name}_{idx:05d}.{ext}" for idx in range(1, len(pages) + 1))
-    output_dir = _absolute_path(Path(output_dir))
-    if output_dir == output_dir.parent:
-        raise ValueError("The filesystem root cannot be used as an images output directory.")
+    output_dir = _canonical_export_target(
+        Path(output_dir),
+        description="Images output path",
+    )
     with _directory_export_lock(output_dir):
         output_dir, staged_dir = _new_staged_directory(
             output_dir,
@@ -493,6 +673,7 @@ def export_pages_as_files(
                 staged_path = staged_dir / output_name
                 if not imwrite_unicode(staged_path, page):
                     raise RuntimeError(f"Failed to write page image: {staged_path}")
+                _check_cancelled(cancel_cb)
                 output_paths.append(output_dir / staged_path.name)
             _write_owned_files_manifest(staged_dir, base_name=base_name, files=output_names)
             _replace_directory_atomically(staged_dir, output_dir, cancel_cb=cancel_cb)
@@ -513,14 +694,21 @@ def export_image_paths_as_pdf(
     """Export image file paths to merged PDF without loading all images in memory."""
     if len(image_paths) == 0:
         raise ValueError("No image paths to export.")
-    out_pdf = out_pdf.with_suffix(".pdf")
-    out_pdf.parent.mkdir(parents=True, exist_ok=True)
-    build_pdf_from_images(
-        [Path(p) for p in image_paths],
-        out_pdf=out_pdf,
-        dpi=int(dpi),
-        cancel_cb=cancel_cb,
+    out_pdf = _canonical_export_target(
+        Path(out_pdf).with_suffix(".pdf"),
+        description="PDF output path",
     )
+    if out_pdf.exists() and not out_pdf.is_file():
+        raise ValueError(f"PDF output path is not a regular file: {out_pdf}")
+    out_pdf.parent.mkdir(parents=True, exist_ok=True)
+    with _pdf_export_lock(out_pdf):
+        _check_cancelled(cancel_cb)
+        build_pdf_from_images(
+            [Path(p) for p in image_paths],
+            out_pdf=out_pdf,
+            dpi=int(dpi),
+            cancel_cb=cancel_cb,
+        )
     return out_pdf
 
 
@@ -538,9 +726,10 @@ def export_image_paths_as_files(
     ext = _normalize_extension(ext)
     _validate_base_name(base_name)
     output_names = tuple(f"{base_name}_{idx:05d}.{ext}" for idx in range(1, len(image_paths) + 1))
-    output_dir = _absolute_path(Path(output_dir))
-    if output_dir == output_dir.parent:
-        raise ValueError("The filesystem root cannot be used as an images output directory.")
+    output_dir = _canonical_export_target(
+        Path(output_dir),
+        description="Images output path",
+    )
     with _directory_export_lock(output_dir):
         output_dir, staged_dir = _new_staged_directory(
             output_dir,
@@ -556,12 +745,12 @@ def export_image_paths_as_files(
                 if src_path.suffix.lower().lstrip(".") == ext:
                     shutil.copy2(src_path, staged_path)
                 else:
-                    data = np.fromfile(str(src_path), dtype=np.uint8)
-                    image = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+                    image = imread_unicode(src_path)
                     if image is None:
                         raise RuntimeError(f"Cannot read source image: {src_path}")
                     if not imwrite_unicode(staged_path, image):
                         raise RuntimeError(f"Failed to write page image: {staged_path}")
+                _check_cancelled(cancel_cb)
                 out_paths.append(output_dir / staged_path.name)
             _write_owned_files_manifest(staged_dir, base_name=base_name, files=output_names)
             _replace_directory_atomically(staged_dir, output_dir, cancel_cb=cancel_cb)

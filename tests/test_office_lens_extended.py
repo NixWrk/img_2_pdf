@@ -11,9 +11,11 @@ from uniscan.office_lens.adapter import (
     OfficeLensOnnx,
     QUAD_MODEL,
     _expand_quad,
+    _read_rgb,
     _quad_area,
     _quad_image_score,
     _quad_iou,
+    _write_image,
     choose_quad,
     detect_bright_document_quad,
     detect_edge_document_quad,
@@ -174,3 +176,29 @@ def test_overlay_without_quad_and_office_lens_cli(tmp_path, capsys, monkeypatch)
     report_path = out_dir / "scene_onnx_report.json"
     assert json.loads(report_path.read_text(encoding="utf-8"))["mode"] == "photo"
     assert "Saved:" in capsys.readouterr().out
+
+
+def test_office_lens_direct_io_keeps_common_loader_safety(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "oversized.png"
+    monkeypatch.setattr(
+        "uniscan.office_lens.adapter.imread_unicode",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("safe input limit exceeded")),
+    )
+
+    with pytest.raises(RuntimeError, match="safe input limit"):
+        _read_rgb(source)
+    with pytest.raises(RuntimeError, match="safe input limit"):
+        save_overlay(source, None, tmp_path / "overlay.png")
+
+    destination = tmp_path / "страница.png"
+    written: list[tuple[object, np.ndarray]] = []
+    monkeypatch.setattr(
+        "uniscan.office_lens.adapter.imwrite_unicode",
+        lambda path, image: written.append((path, image.copy())) or True,
+    )
+    rgb = np.array([[[255, 0, 0]]], dtype=np.uint8)
+
+    _write_image(destination, rgb)
+
+    assert written[0][0] == destination
+    np.testing.assert_array_equal(written[0][1], [[[0, 0, 255]]])

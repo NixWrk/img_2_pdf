@@ -39,7 +39,7 @@ from .preprocess import (
 from uniscan.storage.stage_cache import ProcessingStageCache
 
 CancelCb = Callable[[], bool]
-PROCESSING_ALGORITHM_VERSION = 2
+PROCESSING_ALGORITHM_VERSION = 3
 
 
 @dataclass(slots=True)
@@ -94,6 +94,21 @@ def _cancelled(request: PageProcessingRequest) -> None:
         raise RuntimeError("Cancelled by user.")
 
 
+def _uses_unidentified_uvdoc(request: PageProcessingRequest) -> bool:
+    """Whether this run may invoke model-backed UVDoc without a stable model identity."""
+    if request.dewarp_already_applied:
+        # The already-warped pixels are the controller input and therefore part
+        # of the source fingerprint.
+        return False
+    # This is intentionally conservative for auto: before executing the stage
+    # we cannot prove that deterministic textline correction will win, so
+    # model-independent persistent hits are disabled through all downstream
+    # stages whenever UVDoc is allowed.
+    return request.dewarp_method == "paddleocr_uvdoc" or (
+        request.dewarp_method == "auto" and request.auto_dewarp_uvdoc
+    )
+
+
 def _timed(stage: str, durations: dict[str, float], operation):
     started = time.perf_counter()
     result = operation()
@@ -115,6 +130,7 @@ def _run_stage(
     durations: dict[str, float],
     cache_hits: list[str],
 ):
+    _cancelled(request)
     cache = request.stage_cache
     key = (
         cache.stage_key(
@@ -128,17 +144,21 @@ def _run_stage(
     started = time.perf_counter()
     if cache is not None and cacheable:
         cached = cache.get(key)
+        _cancelled(request)
         if cached is not None:
             cached_image, metadata = cached
             diagnostics = decode_diagnostics(metadata)
             durations[stage] = round((time.perf_counter() - started) * 1000.0, 3)
             cache_hits.append(stage)
+            _cancelled(request)
             return cached_image, diagnostics, key
 
     output, diagnostics = operation()
     durations[stage] = round((time.perf_counter() - started) * 1000.0, 3)
+    _cancelled(request)
     if cache is not None and cacheable:
         cache.put(key, output, encode_diagnostics(diagnostics))
+        _cancelled(request)
     return output, diagnostics, key
 
 
@@ -165,6 +185,7 @@ def process_document_page(
     durations: dict[str, float] = {}
     cache_hits: list[str] = []
     cache = request.stage_cache
+    cache_safe_after_dewarp = not _uses_unidentified_uvdoc(request)
     upstream_key = ""
     if cache is not None:
         upstream_key = request.source_fingerprint or cache.fingerprint_image(image)
@@ -244,7 +265,7 @@ def process_document_page(
             ),
             encode_diagnostics=asdict,
             decode_diagnostics=lambda payload: DewarpDiagnostics(**payload),
-            cacheable=request.dewarp_method != DEWARP_METHOD_NONE,
+            cacheable=(request.dewarp_method != DEWARP_METHOD_NONE and cache_safe_after_dewarp),
             request=request,
             durations=durations,
             cache_hits=cache_hits,
@@ -291,7 +312,8 @@ def process_document_page(
         operation=cleanup_stage,
         encode_diagnostics=asdict,
         decode_diagnostics=lambda payload: DespeckleDiagnostics(**payload),
-        cacheable=request.postprocess_name != "None" or request.preprocess_settings is not None,
+        cacheable=cache_safe_after_dewarp
+        and (request.postprocess_name != "None" or request.preprocess_settings is not None),
         request=request,
         durations=durations,
         cache_hits=cache_hits,
@@ -318,14 +340,16 @@ def process_document_page(
         ),
         encode_diagnostics=asdict,
         decode_diagnostics=_layout_from_dict,
-        cacheable=request.page_layout != PAGE_LAYOUT_NONE,
+        cacheable=cache_safe_after_dewarp and request.page_layout != PAGE_LAYOUT_NONE,
         request=request,
         durations=durations,
         cache_hits=cache_hits,
     )
     lighting = None
     if request.lighting_diagnostics:
+        _cancelled(request)
         lighting = _timed("lighting", durations, lambda: analyze_lighting(dewarped))
+    _cancelled(request)
     return PageProcessingResult(
         image=laid_out,
         diagnostics=PageProcessingDiagnostics(

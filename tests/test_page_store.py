@@ -110,3 +110,15 @@ def test_page_store_recovers_new_generation_if_cleanup_was_interrupted(tmp_path)
     assert int(store.read_image(paths.current)[0, 0, 0]) == 120
     assert page_dir.is_dir()
     assert not backup_dir.exists()
+
+
+def test_page_store_propagates_bounded_decoder_failure(tmp_path, monkeypatch) -> None:
+    store = PageStore(root_dir=tmp_path)
+    paths = store.add_page("bounded", _img(10), _img(20))
+
+    def reject(_path, **_kwargs):
+        raise RuntimeError("safe input limit: 150,000,000 pixels")
+
+    monkeypatch.setattr("uniscan.storage.page_store.imread_unicode", reject)
+    with pytest.raises(RuntimeError, match="safe input limit"):
+        store.read_image(paths.current)

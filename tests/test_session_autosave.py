@@ -2,16 +2,24 @@ from __future__ import annotations
 
 import json
 import os
+import stat
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from uniscan.session import (
+    AutosaveSessionLock,
+    CommittedPageProcessing,
+    SessionInUseError,
+    UnsafeSessionLockError,
+    acquire_autosave_lock,
     CaptureSession,
     create_persistent_session,
     discard_autosave,
     load_or_create_session,
 )
+from uniscan.core.processing import PageProcessingRequest, process_document_page
 
 
 def _image(value: int) -> np.ndarray:
@@ -32,6 +40,7 @@ def test_session_manifest_round_trip(tmp_path) -> None:
     first.set_dewarp_control_points([(0.0, 0.0), (0.5, 0.015), (1.0, 0.0)])
     session.add_image(name="second", image=_image(30))
     session.save_manifest(manifest)
+    assert json.loads(manifest.read_text(encoding="utf-8"))["schemaVersion"] == 2
     session.close(preserve=True)
 
     restored, was_restored = load_or_create_session(manifest)
@@ -118,7 +127,14 @@ def test_restore_rebuilds_missing_or_corrupt_current_from_original(tmp_path, dam
         contour=None,
         backend=None,
     )
-    entry.current_image = _image(190)
+    request = PageProcessingRequest(postprocess_name="Grayscale")
+    result = process_document_page(entry.original_image, request)
+    entry.current_image = result.image
+    entry.committed_processing = CommittedPageProcessing.from_result(
+        request,
+        result.diagnostics,
+        result.image,
+    )
     session.save_manifest(manifest)
     if damage == "missing":
         entry.current_path.unlink()
@@ -131,6 +147,7 @@ def test_restore_rebuilds_missing_or_corrupt_current_from_original(tmp_path, dam
     assert [item.name for item in restored.entries] == ["recoverable"]
     assert restored.quarantined_entry_ids == ()
     np.testing.assert_array_equal(restored.entries[0].current_image, _image(70))
+    assert restored.entries[0].committed_processing is None
     assert "Recovered session page" in restored.restore_warnings[0]
     paths = restored.entries[0].paths
     assert all(
@@ -257,3 +274,154 @@ def test_discard_removes_manifest_before_deleting_assets(tmp_path, monkeypatch) 
 
     assert not manifest.exists()
     assert session.store.session_dir.exists()
+
+
+def test_autosave_lock_is_nonblocking_and_releasable(tmp_path) -> None:
+    manifest = tmp_path / "autosave.json"
+    first = acquire_autosave_lock(manifest)
+    try:
+        with pytest.raises(SessionInUseError, match="already|using"):
+            acquire_autosave_lock(manifest)
+    finally:
+        first.release()
+    acquire_autosave_lock(manifest).release()
+
+
+def test_autosave_lock_rejects_reparse_metadata() -> None:
+    fake_path = SimpleNamespace(
+        lstat=lambda: SimpleNamespace(
+            st_mode=stat.S_IFREG,
+            st_file_attributes=0x400,
+        ),
+        is_symlink=lambda: False,
+        is_junction=lambda: False,
+    )
+    with pytest.raises(UnsafeSessionLockError, match="Unsafe autosave lock path"):
+        AutosaveSessionLock._validate_path(fake_path)
+
+
+def test_autosave_lock_rejects_symlink_without_touching_referent(tmp_path) -> None:
+    referent = tmp_path / "referent.txt"
+    referent.write_bytes(b"keep-me")
+    lock_path = tmp_path / "autosave.lock"
+    try:
+        lock_path.symlink_to(referent)
+    except OSError:
+        pytest.skip("Creating symlinks is not permitted on this Windows host.")
+
+    with pytest.raises(UnsafeSessionLockError):
+        AutosaveSessionLock.acquire(lock_path)
+    assert referent.read_bytes() == b"keep-me"
+
+
+def test_autosave_lock_rejects_hardlink_without_touching_referent(tmp_path) -> None:
+    referent = tmp_path / "referent.txt"
+    referent.write_bytes(b"keep-hardlink")
+    lock_path = tmp_path / "autosave.lock"
+    os.link(referent, lock_path)
+
+    with pytest.raises(UnsafeSessionLockError):
+        AutosaveSessionLock.acquire(lock_path)
+    assert referent.read_bytes() == b"keep-hardlink"
+
+
+def test_manifest_v2_round_trips_committed_recipe_and_v1_migrates(tmp_path) -> None:
+    manifest = tmp_path / "autosave.json"
+    session = create_persistent_session(tmp_path)
+    entry = session.add_image(name="processed", image=_image(40))
+    request = PageProcessingRequest(postprocess_name="Grayscale", page_dpi=240)
+    result = process_document_page(entry.original_image, request)
+    entry.current_image = result.image
+    entry.committed_processing = CommittedPageProcessing.from_result(
+        request,
+        result.diagnostics,
+        result.image,
+    )
+    session.save_manifest(manifest)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert payload["schemaVersion"] == 2
+    session.close(preserve=True)
+
+    restored = CaptureSession.restore_manifest(manifest)
+    committed = restored.entries[0].committed_processing
+    assert committed is not None
+    assert committed.recipe.page_dpi == 240
+    assert committed.recipe.postprocess_name == "Grayscale"
+    assert "layout" in committed.diagnostics
+
+    payload["schemaVersion"] = 1
+    payload["entries"][0].pop("committedProcessing", None)
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    restored_v1 = CaptureSession.restore_manifest(manifest)
+    assert restored_v1.entries[0].committed_processing is None
+
+
+def test_invalid_optional_recipe_is_dropped_without_quarantining_page(tmp_path) -> None:
+    manifest = tmp_path / "autosave.json"
+    session = create_persistent_session(tmp_path)
+    entry = session.add_image(name="valid-page", image=_image(77))
+    session.save_manifest(manifest)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["entries"][0]["committedProcessing"] = {
+        "schemaVersion": 999,
+        "recipe": {},
+        "diagnostics": {},
+    }
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    session.close(preserve=True)
+
+    restored = CaptureSession.restore_manifest(manifest)
+    assert [item.entry_id for item in restored.entries] == [entry.entry_id]
+    assert restored.entries[0].committed_processing is None
+    assert restored.quarantined_entry_ids == ()
+    assert any("Ignored processing metadata" in warning for warning in restored.restore_warnings)
+
+
+def test_manifest_json_root_must_be_object(tmp_path) -> None:
+    manifest = tmp_path / "autosave.json"
+    manifest.write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="Unsupported session manifest"):
+        CaptureSession.restore_manifest(manifest)
+
+    manifest.write_text('{"schemaVersion": true, "entries": []}', encoding="utf-8")
+    with pytest.raises(ValueError, match="Unsupported session manifest"):
+        CaptureSession.restore_manifest(manifest)
+
+
+def test_restore_drops_recipe_if_current_pixels_changed_after_manifest(tmp_path) -> None:
+    manifest = tmp_path / "autosave.json"
+    session = create_persistent_session(tmp_path)
+    entry = session.add_image(name="crash-window", image=_image(20))
+    request = PageProcessingRequest(postprocess_name="Grayscale", page_dpi=220)
+    result = process_document_page(entry.original_image, request)
+    entry.current_image = result.image
+    entry.committed_processing = CommittedPageProcessing.from_result(
+        request,
+        result.diagnostics,
+        result.image,
+    )
+    session.save_manifest(manifest)
+    entry.store.write_image(entry.current_path, _image(230))
+    session.close(preserve=True)
+
+    restored = CaptureSession.restore_manifest(manifest)
+    assert restored.entries[0].committed_processing is None
+    assert any("current image fingerprint changed" in item for item in restored.restore_warnings)
+
+
+def test_replace_raw_invalidates_committed_processing_and_revision(tmp_path) -> None:
+    session = create_persistent_session(tmp_path)
+    entry = session.add_image(name="raw", image=_image(20))
+    request = PageProcessingRequest()
+    result = process_document_page(entry.original_image, request)
+    entry.committed_processing = CommittedPageProcessing.from_result(
+        request,
+        result.diagnostics,
+        result.image,
+    )
+    revision = entry.revision
+
+    entry.replace_raw(_image(90))
+
+    assert entry.committed_processing is None
+    assert entry.revision == revision + 1

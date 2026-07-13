@@ -1,3 +1,5 @@
+import multiprocessing
+import os
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +12,15 @@ from uniscan.export import (
     export_pages_as_files,
     export_pages_as_pdf,
 )
+
+
+def _hold_pdf_export_lock(output: str, ready, release) -> None:
+    from uniscan.export import exporters
+
+    with exporters._pdf_export_lock(Path(output)):
+        ready.set()
+        if not release.wait(20):
+            raise TimeoutError("Timed out waiting to release PDF export lock.")
 
 
 def _pages() -> list[np.ndarray]:
@@ -98,6 +109,99 @@ def test_pdf_export_cancellation_before_publish_preserves_existing_file(tmp_path
     assert not list(tmp_path.glob(".output.pdf.stage-*"))
 
 
+def test_pdf_export_fails_closed_while_another_process_holds_lock(tmp_path) -> None:
+    output = tmp_path / "shared.pdf"
+    output.write_bytes(b"previous")
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    process = context.Process(
+        target=_hold_pdf_export_lock,
+        args=(str(output), ready, release),
+    )
+    process.start()
+    try:
+        assert ready.wait(10), "Child process did not acquire the PDF export lock."
+        with pytest.raises(RuntimeError, match="Another UniScan process"):
+            export_pages_as_pdf(_pages()[:1], out_pdf=output)
+    finally:
+        release.set()
+        process.join(10)
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+
+    assert process.exitcode == 0
+    assert output.read_bytes() == b"previous"
+    assert not list(tmp_path.glob(".shared.pdf.stage-*"))
+
+
+def test_pdf_export_rejects_hardlinked_lock_without_touching_referent(tmp_path) -> None:
+    from uniscan.export import exporters
+
+    output = tmp_path / "shared.pdf"
+    output.write_bytes(b"previous-pdf")
+    referent = tmp_path / "personal.bin"
+    referent.write_bytes(b"personal-lock-referent")
+    lock_path = exporters._file_export_lock_path(output)
+    try:
+        os.link(referent, lock_path)
+    except OSError as exc:
+        pytest.skip(f"Hard links are not supported on this filesystem: {exc}")
+
+    with pytest.raises(ValueError, match="Invalid file export lock path"):
+        export_pages_as_pdf(_pages()[:1], out_pdf=output)
+
+    assert referent.read_bytes() == b"personal-lock-referent"
+    assert lock_path.read_bytes() == b"personal-lock-referent"
+    assert output.read_bytes() == b"previous-pdf"
+
+
+def test_pdf_export_rejects_symlink_target_without_touching_referent(tmp_path) -> None:
+    referent = tmp_path / "personal.pdf"
+    referent.write_bytes(b"personal")
+    output = tmp_path / "output.pdf"
+    try:
+        output.symlink_to(referent)
+    except OSError as exc:  # Windows may require Developer Mode for symlinks.
+        pytest.skip(f"Cannot create a test symlink: {exc}")
+
+    with pytest.raises(ValueError, match="link or junction"):
+        export_pages_as_pdf(_pages()[:1], out_pdf=output)
+
+    assert output.is_symlink()
+    assert referent.read_bytes() == b"personal"
+
+
+def test_pdf_export_checks_cancellation_immediately_after_page_encoding(
+    tmp_path, monkeypatch
+) -> None:
+    from uniscan.export import exporters
+
+    output = tmp_path / "output.pdf"
+    output.write_bytes(b"previous")
+    encoded = False
+    real_write = exporters.imwrite_unicode
+
+    def write_then_cancel(path, image) -> bool:
+        nonlocal encoded
+        result = real_write(path, image)
+        encoded = True
+        return result
+
+    monkeypatch.setattr(exporters, "imwrite_unicode", write_then_cancel)
+
+    with pytest.raises(RuntimeError, match="Cancelled by user"):
+        export_pages_as_pdf(
+            _pages()[:1],
+            out_pdf=output,
+            cancel_cb=lambda: encoded,
+        )
+
+    assert output.read_bytes() == b"previous"
+    assert not list(tmp_path.glob(".output.pdf.stage-*"))
+
+
 def test_file_export_replaces_entire_directory_without_stale_pages(tmp_path) -> None:
     output_dir = tmp_path / "pages"
     export_pages_as_files(_pages(), output_dir=output_dir, ext="png", base_name="page")
@@ -177,6 +281,96 @@ def test_file_export_failure_preserves_existing_directory(tmp_path, monkeypatch)
     assert keep.read_text(encoding="utf-8") == "previous"
     assert [path.name for path in output_dir.iterdir()] == ["keep.txt"]
     assert not list(tmp_path.glob(".pages.stage-*"))
+
+
+def test_file_export_failed_refresh_preserves_owned_pages_byte_for_byte(
+    tmp_path, monkeypatch
+) -> None:
+    output_dir = tmp_path / "pages"
+    previous_paths = export_pages_as_files(_pages(), output_dir=output_dir)
+    previous_bytes = {path.name: path.read_bytes() for path in previous_paths}
+    calls = 0
+
+    def fail_second_write(path, image) -> bool:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            return False
+        path.write_bytes(b"new-staged-page")
+        return True
+
+    monkeypatch.setattr("uniscan.export.exporters.imwrite_unicode", fail_second_write)
+
+    with pytest.raises(RuntimeError, match="Failed to write page image"):
+        export_pages_as_files(_pages(), output_dir=output_dir)
+
+    assert {path.name: path.read_bytes() for path in previous_paths} == previous_bytes
+    assert not list(tmp_path.glob(".pages.stage-*"))
+
+
+def test_file_export_hardlinks_unrelated_files_instead_of_copying_bytes(
+    tmp_path, monkeypatch
+) -> None:
+    from uniscan.export import exporters
+
+    output_dir = tmp_path / "pages"
+    export_pages_as_files(_pages()[:1], output_dir=output_dir)
+    unrelated = output_dir / "archive.bin"
+    unrelated.write_bytes(os.urandom(2 * 1024 * 1024))
+    inode_before = unrelated.stat().st_ino
+
+    probe = tmp_path / "hardlink-probe"
+    try:
+        os.link(unrelated, probe)
+    except OSError as exc:
+        pytest.skip(f"Hard links are not supported on this filesystem: {exc}")
+    else:
+        probe.unlink()
+
+    def unexpected_copy(*args, **kwargs):
+        raise AssertionError("Regular unrelated files should be hard-linked, not copied.")
+
+    monkeypatch.setattr(exporters.shutil, "copy2", unexpected_copy)
+    export_pages_as_files(_pages()[:1], output_dir=output_dir)
+
+    assert unrelated.stat().st_ino == inode_before
+    assert unrelated.stat().st_size == 2 * 1024 * 1024
+
+
+def test_file_export_falls_back_to_copy_when_hardlinks_are_unavailable(
+    tmp_path, monkeypatch
+) -> None:
+    from uniscan.export import exporters
+
+    output_dir = tmp_path / "pages"
+    export_pages_as_files(_pages()[:1], output_dir=output_dir)
+    unrelated = output_dir / "keep.txt"
+    unrelated.write_text("personal", encoding="utf-8")
+
+    def unavailable(*args, **kwargs):
+        raise OSError("hard links unavailable")
+
+    monkeypatch.setattr(exporters.os, "link", unavailable)
+    export_pages_as_files(_pages()[:1], output_dir=output_dir)
+
+    assert unrelated.read_text(encoding="utf-8") == "personal"
+
+
+def test_file_export_rejects_symlink_output_without_touching_referent(tmp_path) -> None:
+    referent = tmp_path / "personal-pages"
+    referent.mkdir()
+    (referent / "keep.txt").write_text("personal", encoding="utf-8")
+    output_dir = tmp_path / "pages"
+    try:
+        output_dir.symlink_to(referent, target_is_directory=True)
+    except OSError as exc:  # Windows may require Developer Mode for symlinks.
+        pytest.skip(f"Cannot create a test symlink: {exc}")
+
+    with pytest.raises(ValueError, match="link or junction"):
+        export_pages_as_files(_pages()[:1], output_dir=output_dir)
+
+    assert output_dir.is_symlink()
+    assert (referent / "keep.txt").read_text(encoding="utf-8") == "personal"
 
 
 def test_file_export_cancellation_preserves_existing_directory(tmp_path) -> None:

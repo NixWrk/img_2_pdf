@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from uniscan.ui.import_sources import (
@@ -35,3 +36,11 @@ def test_clipboard_adapters() -> None:
     files = clipboard_file_paths(["a.png", "b.pdf"])
     assert [path.name for path in files] == ["a.png", "b.pdf"]
     assert clipboard_image_to_bgr(["a.png"]) is None
+
+
+def test_clipboard_image_pixel_cap_is_checked_before_conversion() -> None:
+    image = Image.new("RGB", (4, 3), color=(10, 20, 30))
+    with pytest.raises(RuntimeError, match="Clipboard image.*safe input limit"):
+        clipboard_image_to_bgr(image, max_pixels=11)
+    with pytest.raises(ValueError, match="must be positive"):
+        clipboard_image_to_bgr(image, max_pixels=0)

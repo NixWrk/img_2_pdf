@@ -6,6 +6,13 @@ All notable changes to UniScan are documented here. The project follows Semantic
 
 ### Added
 
+- Separate input-render and output-layout PDF DPI controls, plus fail-closed pixel limits for
+  raster images, every TIFF/PDF page, standard-page layout, restored GUI pages, and stage-cache
+  entries.
+- Versioned per-page processing recipes, diagnostics, and current-pixel fingerprints in GUI
+  autosave state, with schema migration and stale crash-window metadata rejection.
+- Single-writer GUI session locking and shared cross-process locks for direct and batch output
+  publication.
 - Conservative local 0/90/180/270 page orientation based on layout and baseline evidence, with no
   OCR dependency and confidence-based no-op diagnostics.
 - Validated automatic dewarp selection with curvature/artifact metrics and an explicitly enabled
@@ -37,6 +44,11 @@ All notable changes to UniScan are documented here. The project follows Semantic
 
 ### Changed
 
+- GUI PDF import now streams pages through disk staging, while full-resolution Apply processing
+  runs in a cancellable worker and commits page generations transactionally with stale-revision
+  and rollback checks.
+- Runtime diagnostics now distinguish the required Office Lens quad model from the optional
+  classifier used only by uto cleanup mode.
 - GUI processing now exposes page-wave removal, and Page tools allows choosing the deskew
   estimator before applying automatic rotation correction.
 - Dewarp remains automatic-first while allowing correction of the generated model through control
@@ -48,6 +60,15 @@ All notable changes to UniScan are documented here. The project follows Semantic
 
 ### Fixed
 
+- Preserved camera configuration after failed resolution changes, reused one detected gutter for
+  raw/warped spread pairs, and made boundary/fallback status describe the result actually kept.
+- Added cancellation checkpoints around native processing, cache, rendering, staging, and
+  publication; excluded unidentified UVDoc generations from persistent downstream cache hits.
+- Prevented concurrent UniScan writers from losing PDF, report, or neighbouring image updates;
+  rejected link-like and multiply linked lock/target paths before mutation and made recovery use
+  canonical output identities.
+- Restored compatibility with the minimum supported pypdfium2 API, bounded exact PDF render
+  allocations, and reported each spread page's own duration instead of cumulative elapsed time.
 - Prevented report/output collisions from overwriting inputs or replacing directories with files.
 - Corrected PDF DPI/page dimensions and made direct PDF/image exports atomic, cancellable, and free
   of stale pages.

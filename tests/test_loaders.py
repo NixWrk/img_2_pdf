@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pypdfium2 as pdfium
 import pytest
@@ -10,6 +12,7 @@ from uniscan.io.loaders import (
     _render_pdf_page,
     imread_unicode,
     imwrite_unicode,
+    iter_input_items,
     iter_pdf_pages,
     list_supported_in_folder,
     load_input_items,
@@ -99,6 +102,78 @@ def test_load_input_items_yields_every_multipage_tiff_frame(tmp_path) -> None:
     assert [round(float(image.mean())) for _name, image in items] == [30, 210]
 
 
+def test_raster_input_fails_closed_above_configured_pixel_limit(tmp_path) -> None:
+    path = tmp_path / "large-for-test.png"
+    Image.fromarray(np.zeros((24, 32), dtype=np.uint8)).save(path)
+
+    with pytest.raises(RuntimeError, match=r"32x24 .*safe input limit: 700 pixels"):
+        imread_unicode(path, max_pixels=700)
+
+
+def test_each_tiff_frame_is_checked_before_it_is_decoded(tmp_path) -> None:
+    path = tmp_path / "mixed-sizes.tiff"
+    first = Image.fromarray(np.full((12, 16), 30, dtype=np.uint8))
+    second = Image.fromarray(np.full((20, 30), 210, dtype=np.uint8))
+    first.save(path, save_all=True, append_images=[second])
+
+    pages = iter_input_items([path], pdf_dpi=72, max_input_pixels=300)
+    assert next(pages)[0] == "mixed-sizes.tiff [p0001]"
+    with pytest.raises(RuntimeError, match=r"frame 2: 30x20 .*safe input limit: 300 pixels"):
+        next(pages)
+
+
+def test_pillow_warning_is_handled_locally_without_weakening_global_guard(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "warning-threshold.png"
+    Image.fromarray(np.zeros((11, 11), dtype=np.uint8)).save(path)
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        loaded = imread_unicode(path, max_pixels=150)
+
+    assert loaded is not None
+    assert Image.MAX_IMAGE_PIXELS == 100
+    assert not any(isinstance(item.message, Image.DecompressionBombWarning) for item in caught)
+
+
+def test_pillow_hard_decompression_bomb_guard_remains_enabled(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "hard-limit.png"
+    Image.fromarray(np.zeros((15, 15), dtype=np.uint8)).save(path)
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
+
+    with pytest.raises(RuntimeError, match="Pillow's decompression-bomb safety limit"):
+        imread_unicode(path, max_pixels=300)
+
+
+def test_unidentified_raster_never_falls_back_to_unbounded_opencv_decode(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "invalid.png"
+    path.write_bytes(b"not an image")
+    monkeypatch.setattr(
+        "uniscan.io.loaders.cv2.imdecode",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unsafe OpenCV fallback must not run")
+        ),
+    )
+
+    assert imread_unicode(path) is None
+    with pytest.raises(RuntimeError, match="Cannot safely read advertised raster"):
+        load_input_items([path], pdf_dpi=72)
+
+
+@pytest.mark.parametrize("max_pixels", (0, -1))
+def test_raster_pixel_limit_must_be_positive(tmp_path, max_pixels: int) -> None:
+    path = tmp_path / "small.png"
+    Image.fromarray(np.zeros((2, 2), dtype=np.uint8)).save(path)
+
+    with pytest.raises(ValueError, match="must be positive"):
+        imread_unicode(path, max_pixels=max_pixels)
+
+
 def test_imwrite_unicode_keeps_existing_target_when_replace_fails(tmp_path, monkeypatch) -> None:
     target = tmp_path / "atomic.png"
     target.write_bytes(b"existing")
@@ -121,22 +196,115 @@ def test_pdfium_page_selection_and_streaming_cancellation(tmp_path) -> None:
     assert [name for name, _image in selected] == ["two-pages.pdf [p0002]"]
     assert selected[0][1].shape[:2] == (100, 100)
 
-    calls = 0
+    cancelled = False
 
-    def cancel_after_first() -> bool:
-        nonlocal calls
-        calls += 1
-        return calls >= 2
-
-    pages = iter_pdf_pages(path, dpi=72, cancel_cb=cancel_after_first)
+    pages = iter_pdf_pages(path, dpi=72, cancel_cb=lambda: cancelled)
     assert next(pages)[0] == "two-pages.pdf [p0001]"
+    cancelled = True
     with pytest.raises(RuntimeError, match="Cancelled"):
         next(pages)
+
+
+def test_pdf_stream_checks_cancellation_immediately_after_native_render(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "one-page.pdf"
+    _make_pdf(path)
+    rendered = False
+    real_render = _render_pdf_page
+
+    def render_then_cancel(*args, **kwargs):
+        nonlocal rendered
+        item = real_render(*args, **kwargs)
+        rendered = True
+        return item
+
+    monkeypatch.setattr("uniscan.io.loaders._render_pdf_page", render_then_cancel)
+
+    with pytest.raises(RuntimeError, match="Cancelled"):
+        next(iter_pdf_pages(path, dpi=72, cancel_cb=lambda: rendered))
+
+
+def test_raster_stream_checks_cancellation_after_native_conversion(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "one-page.png"
+    Image.fromarray(np.zeros((10, 12), dtype=np.uint8)).save(path)
+    converted = False
+    from uniscan.io import loaders
+
+    real_convert = loaders._pil_frame_to_bgr
+
+    def convert_then_cancel(frame):
+        nonlocal converted
+        image = real_convert(frame)
+        converted = True
+        return image
+
+    monkeypatch.setattr(loaders, "_pil_frame_to_bgr", convert_then_cancel)
+
+    with pytest.raises(RuntimeError, match="Cancelled"):
+        next(iter_input_items([path], pdf_dpi=72, cancel_cb=lambda: converted))
+
+
+def test_pdf_render_uses_options_supported_by_minimum_pdfium(tmp_path) -> None:
+    class FakeBitmap:
+        def to_numpy(self):
+            return np.zeros((2, 3, 3), dtype=np.uint8)
+
+        def close(self) -> None:
+            return None
+
+    class MinimumApiPage:
+        def get_size(self):
+            return 3.0, 2.0
+
+        def render(self, *, scale, rev_byteorder, fill_color):
+            assert scale == 1.0
+            assert rev_byteorder is True
+            assert fill_color == (255, 255, 255, 255)
+            return FakeBitmap()
+
+    name, rendered = _render_pdf_page(
+        MinimumApiPage(),
+        pdf_path=tmp_path / "minimum.pdf",
+        page_index=0,
+        dpi=72,
+    )
+
+    assert name == "minimum.pdf [p0001]"
+    assert rendered.shape == (2, 3, 3)
 
 
 def test_safe_render_dpi_calculates_limit_without_claiming_to_change_request() -> None:
     safe = _safe_render_dpi((720.0, 720.0), requested_dpi=600, max_pixels=1_000_000)
     assert safe == 100
+    with pytest.raises(ValueError, match="must be positive"):
+        _safe_render_dpi((720.0, 720.0), requested_dpi=600, max_pixels=0)
+
+
+def test_pdf_render_checks_ceiled_dimensions_before_extreme_page_allocation(tmp_path) -> None:
+    class SkinnyExtremePage:
+        def get_size(self):
+            return 0.01, 72_000_000.0
+
+        def render(self, **_kwargs):
+            raise AssertionError("oversized page must not be rendered")
+
+    assert (
+        _safe_render_dpi(
+            SkinnyExtremePage().get_size(),
+            requested_dpi=2,
+            max_pixels=1_000_000,
+        )
+        == 1
+    )
+    with pytest.raises(RuntimeError, match="exceeds the safe pixel limit"):
+        _render_pdf_page(
+            SkinnyExtremePage(),
+            pdf_path=tmp_path / "skinny-extreme.pdf",
+            page_index=0,
+            dpi=2,
+            max_pixels=1_000_000,
+        )
 
 
 def test_pdf_render_fails_closed_if_pixel_cap_would_change_physical_size(

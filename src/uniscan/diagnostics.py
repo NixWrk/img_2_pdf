@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from uniscan.io.camera_service import CaptureFactory, CameraService, _opencv_capture_factory
-from uniscan.office_lens import CLASSIFIER_MODEL, MODEL_DIR, QUAD_MODEL
+from uniscan.office_lens import CLASSIFIER_MODEL, QUAD_MODEL
 
 
 RUNTIME_MODULES = (
@@ -31,6 +31,7 @@ class DiagnosticCheck:
     name: str
     ok: bool
     detail: str
+    blocking: bool = True
 
 
 @dataclass(slots=True, frozen=True)
@@ -41,7 +42,7 @@ class DiagnosticReport:
 
     @property
     def ok(self) -> bool:
-        return all(check.ok for check in self.checks)
+        return all(check.ok or not check.blocking for check in self.checks)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -64,23 +65,59 @@ def _module_checks(module_names: Sequence[str]) -> list[DiagnosticCheck]:
     return checks
 
 
-def _optional_office_lens_check() -> DiagnosticCheck:
-    """Report BYOM Office Lens availability without failing core diagnostics."""
-    missing = [path for path in (QUAD_MODEL, CLASSIFIER_MODEL) if not path.is_file()]
-    if missing:
-        return DiagnosticCheck(
-            "optional:office-lens",
-            True,
-            "disabled; install licensed models and the 'office-lens' extra to enable it",
-        )
-    try:
-        import onnxruntime as ort
+def _open_onnx_session(path: Path) -> None:
+    """Load one configured ONNX model so doctor catches incompatible payloads."""
+    import onnxruntime as ort
 
-        for path in (QUAD_MODEL, CLASSIFIER_MODEL):
-            ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+
+
+def _optional_onnx_model_check(
+    *,
+    name: str,
+    path: Path,
+    missing_detail: str,
+    loaded_label: str,
+    blocking: bool = True,
+) -> DiagnosticCheck:
+    if not path.is_file():
+        return DiagnosticCheck(name, True, missing_detail, blocking=blocking)
+    try:
+        _open_onnx_session(path)
     except Exception as exc:
-        return DiagnosticCheck("optional:office-lens", False, str(exc))
-    return DiagnosticCheck("optional:office-lens", True, f"licensed models loaded from {MODEL_DIR}")
+        return DiagnosticCheck(name, False, str(exc), blocking=blocking)
+    return DiagnosticCheck(
+        name,
+        True,
+        f"{loaded_label} loaded from {path.parent}",
+        blocking=blocking,
+    )
+
+
+def _optional_office_lens_checks() -> tuple[DiagnosticCheck, DiagnosticCheck]:
+    """Report the required quad model separately from optional auto-classification."""
+    return (
+        _optional_onnx_model_check(
+            name="optional:office-lens",
+            path=QUAD_MODEL,
+            missing_detail=(
+                "disabled; install a licensed quad model and the 'office-lens' extra to enable it"
+            ),
+            loaded_label="licensed quad model",
+        ),
+        _optional_onnx_model_check(
+            name="optional:office-lens-classifier",
+            path=CLASSIFIER_MODEL,
+            missing_detail=("disabled; explicit document/photo/whiteboard modes remain available"),
+            loaded_label="licensed classifier model",
+            blocking=False,
+        ),
+    )
+
+
+def _optional_office_lens_check() -> DiagnosticCheck:
+    """Return the historical primary Office Lens check for API compatibility."""
+    return _optional_office_lens_checks()[0]
 
 
 def _gui_runtime_check() -> DiagnosticCheck:
@@ -115,7 +152,7 @@ def run_diagnostics(
         )
     ]
     checks.extend(_module_checks(RUNTIME_MODULES))
-    checks.append(_optional_office_lens_check())
+    checks.extend(_optional_office_lens_checks())
     if check_gui_runtime:
         checks.append(_gui_runtime_check())
 
@@ -151,7 +188,8 @@ def run_diagnostics(
 def format_diagnostics(report: DiagnosticReport) -> str:
     lines = [f"UniScan diagnostics: {'OK' if report.ok else 'FAILED'}"]
     for check in report.checks:
-        lines.append(f"[{'ok' if check.ok else 'FAIL'}] {check.name}: {check.detail}")
+        status = "ok" if check.ok else ("warn" if not check.blocking else "FAIL")
+        lines.append(f"[{status}] {check.name}: {check.detail}")
     return "\n".join(lines)
 
 

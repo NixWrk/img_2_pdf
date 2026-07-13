@@ -74,6 +74,40 @@ def test_stage_cache_discards_valid_json_with_wrong_shape(tmp_path) -> None:
     assert not metadata_path.exists()
 
 
+def test_stage_cache_discards_oversized_image_before_decode(tmp_path, monkeypatch) -> None:
+    cache = ProcessingStageCache(tmp_path / "cache", max_bytes=1024 * 1024)
+    image = np.full((40, 50), 200, dtype=np.uint8)
+    key = cache.stage_key("a" * 64, "cleanup", {"method": "otsu"})
+    assert cache.put(key, image, {"valid": True}) is True
+    image_path = cache.root_dir / f"{key}.png"
+    metadata_path = cache.root_dir / f"{key}.json"
+
+    def reject_size(*_args, **_kwargs) -> None:
+        raise RuntimeError("test pixel limit exceeded")
+
+    monkeypatch.setattr("uniscan.io.loaders._validated_pixel_count", reject_size)
+
+    assert cache.get(key) is None
+    assert not image_path.exists()
+    assert not metadata_path.exists()
+    assert cache.stats.misses == 1
+
+
+def test_stage_cache_discards_corrupt_image_and_metadata_pair(tmp_path) -> None:
+    cache = ProcessingStageCache(tmp_path / "cache", max_bytes=1024 * 1024)
+    image = np.full((40, 50), 200, dtype=np.uint8)
+    key = cache.stage_key("a" * 64, "cleanup", {"method": "otsu"})
+    assert cache.put(key, image, {"valid": True}) is True
+    image_path = cache.root_dir / f"{key}.png"
+    metadata_path = cache.root_dir / f"{key}.json"
+    image_path.write_bytes(b"not a PNG")
+
+    assert cache.get(key) is None
+    assert not image_path.exists()
+    assert not metadata_path.exists()
+    assert cache.stats.misses == 1
+
+
 def test_stage_cache_rejects_invalid_limits(tmp_path) -> None:
     with pytest.raises(ValueError, match="1 MiB"):
         ProcessingStageCache(tmp_path / "small", max_bytes=100)

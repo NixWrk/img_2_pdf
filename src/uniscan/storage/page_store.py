@@ -13,7 +13,7 @@ from uuid import uuid4
 import cv2
 import numpy as np
 
-from uniscan.io.loaders import imwrite_unicode
+from uniscan.io.loaders import imread_unicode, imwrite_unicode
 
 
 @dataclass(slots=True, frozen=True)
@@ -89,8 +89,7 @@ class PageStore:
 
     @staticmethod
     def _read_image_file(path: Path) -> np.ndarray:
-        data = np.fromfile(str(path), dtype=np.uint8)
-        image = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+        image = imread_unicode(path, preserve_channels=True)
         if image is None:
             raise RuntimeError(f"Cannot read page image: {path}")
         return image

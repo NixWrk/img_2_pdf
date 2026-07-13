@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from uniscan.core.pipeline import (
     PipelineOptions,
@@ -8,6 +9,7 @@ from uniscan.core.pipeline import (
     process_loaded_items,
     split_spread,
 )
+from uniscan.core.scanner_adapter import ScanOutput
 
 
 def _img() -> np.ndarray:
@@ -54,6 +56,30 @@ def test_process_loaded_items_returns_page_results_with_raw() -> None:
     assert page.raw.shape == _img().shape
     assert page.detected is False
     assert page.fallback_reason is None
+
+
+def test_process_loaded_items_checks_cancellation_after_native_detector(monkeypatch) -> None:
+    detector_finished = False
+
+    def detector(image, **_kwargs):
+        nonlocal detector_finished
+        detector_finished = True
+        return ScanOutput(
+            warped=image,
+            contour=None,
+            backend="fake",
+            detected=True,
+            raw_result=None,
+        )
+
+    monkeypatch.setattr("uniscan.core.pipeline.scan_with_document_detector", detector)
+
+    with pytest.raises(RuntimeError, match="Cancelled by user"):
+        process_loaded_items(
+            [("sample.png", _img())],
+            options=PipelineOptions(),
+            cancel_cb=lambda: detector_finished,
+        )
 
 
 def _spread_image() -> np.ndarray:

@@ -3,18 +3,194 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
 
-from uniscan.core.dewarp import normalize_control_points
+from uniscan.core.dewarp import DewarpModel, normalize_control_points
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
+from uniscan.core.preprocess import PreprocessSettings
+from uniscan.core.processing import PageProcessingDiagnostics, PageProcessingRequest
 from uniscan.storage import PagePaths, PageStore
+
+
+@dataclass(slots=True, frozen=True)
+class ProcessingRecipe:
+    """Serializable settings required to reproduce one committed page."""
+
+    schema_version: int
+    orientation_method: str
+    deskew_method: str
+    dewarp_method: str
+    dewarp_model: dict[str, object] | None
+    dewarp_already_applied: bool
+    uvdoc_cache_home: str | None
+    auto_dewarp_uvdoc: bool
+    postprocess_name: str
+    preprocess_settings: dict[str, object] | None
+    page_layout: str
+    page_dpi: int
+    page_margin_mm: float
+    horizontal_alignment: str
+    vertical_alignment: str
+    lighting_diagnostics: bool
+    source_fingerprint: str | None
+
+    @classmethod
+    def from_request(cls, request: PageProcessingRequest) -> "ProcessingRecipe":
+        return cls(
+            schema_version=1,
+            orientation_method=request.orientation_method,
+            deskew_method=request.deskew_method,
+            dewarp_method=request.dewarp_method,
+            dewarp_model=asdict(request.dewarp_model) if request.dewarp_model else None,
+            dewarp_already_applied=request.dewarp_already_applied,
+            uvdoc_cache_home=str(request.uvdoc_cache_home) if request.uvdoc_cache_home else None,
+            auto_dewarp_uvdoc=request.auto_dewarp_uvdoc,
+            postprocess_name=request.postprocess_name,
+            preprocess_settings=(
+                asdict(request.preprocess_settings) if request.preprocess_settings else None
+            ),
+            page_layout=request.page_layout,
+            page_dpi=request.page_dpi,
+            page_margin_mm=request.page_margin_mm,
+            horizontal_alignment=request.horizontal_alignment,
+            vertical_alignment=request.vertical_alignment,
+            lighting_diagnostics=request.lighting_diagnostics,
+            source_fingerprint=request.source_fingerprint,
+        )
+
+    def to_request(self) -> PageProcessingRequest:
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            raise ValueError(f"Unsupported processing recipe: {self.schema_version}")
+        model = DewarpModel(**self.dewarp_model) if self.dewarp_model is not None else None
+        settings = (
+            PreprocessSettings(**self.preprocess_settings)
+            if self.preprocess_settings is not None
+            else None
+        )
+        return PageProcessingRequest(
+            orientation_method=self.orientation_method,
+            deskew_method=self.deskew_method,
+            dewarp_method=self.dewarp_method,
+            dewarp_model=model,
+            dewarp_already_applied=self.dewarp_already_applied,
+            uvdoc_cache_home=Path(self.uvdoc_cache_home) if self.uvdoc_cache_home else None,
+            auto_dewarp_uvdoc=self.auto_dewarp_uvdoc,
+            postprocess_name=self.postprocess_name,
+            preprocess_settings=settings,
+            page_layout=self.page_layout,
+            page_dpi=self.page_dpi,
+            page_margin_mm=self.page_margin_mm,
+            horizontal_alignment=self.horizontal_alignment,
+            vertical_alignment=self.vertical_alignment,
+            lighting_diagnostics=self.lighting_diagnostics,
+            source_fingerprint=self.source_fingerprint,
+        )
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "ProcessingRecipe":
+        if not isinstance(payload, dict):
+            raise ValueError("Processing recipe is not an object.")
+        try:
+            recipe = cls(**payload)
+        except TypeError as exc:
+            raise ValueError("Processing recipe fields are invalid.") from exc
+        string_fields = (
+            recipe.orientation_method,
+            recipe.deskew_method,
+            recipe.dewarp_method,
+            recipe.postprocess_name,
+            recipe.page_layout,
+            recipe.horizontal_alignment,
+            recipe.vertical_alignment,
+        )
+        if not all(isinstance(value, str) for value in string_fields):
+            raise ValueError("Processing recipe string fields are invalid.")
+        if not isinstance(recipe.page_dpi, int) or isinstance(recipe.page_dpi, bool):
+            raise ValueError("Processing recipe DPI is invalid.")
+        recipe.to_request()
+        return recipe
+
+    def to_payload(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(slots=True, frozen=True)
+class CommittedPageProcessing:
+    """Durable recipe and evidence for the pixels in current.png."""
+
+    recipe: ProcessingRecipe
+    diagnostics: dict[str, object]
+    current_fingerprint: str
+
+    @classmethod
+    def from_result(
+        cls,
+        request: PageProcessingRequest,
+        diagnostics: PageProcessingDiagnostics,
+        current_image: np.ndarray,
+    ) -> "CommittedPageProcessing":
+        payload = json.loads(json.dumps(asdict(diagnostics), allow_nan=False))
+        if not isinstance(payload, dict):
+            raise ValueError("Processing diagnostics are not an object.")
+        return cls(
+            recipe=ProcessingRecipe.from_request(request),
+            diagnostics=payload,
+            current_fingerprint=cls.fingerprint_image(current_image),
+        )
+
+    @staticmethod
+    def fingerprint_image(image: np.ndarray) -> str:
+        canonical = np.asarray(image)
+        if canonical.ndim == 3 and canonical.shape[2] == 1:
+            canonical = canonical[:, :, 0]
+        elif canonical.ndim == 3 and canonical.shape[2] == 3:
+            if np.array_equal(canonical[:, :, 0], canonical[:, :, 1]) and np.array_equal(
+                canonical[:, :, 0], canonical[:, :, 2]
+            ):
+                canonical = canonical[:, :, 0]
+        contiguous = np.ascontiguousarray(canonical)
+        digest = hashlib.sha256()
+        digest.update(str(contiguous.shape).encode("ascii"))
+        digest.update(contiguous.dtype.str.encode("ascii"))
+        digest.update(memoryview(contiguous))
+        return digest.hexdigest()
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "CommittedPageProcessing":
+        if (
+            not isinstance(payload, dict)
+            or type(payload.get("schemaVersion")) is not int
+            or payload.get("schemaVersion") != 1
+        ):
+            raise ValueError("Committed processing metadata is invalid.")
+        diagnostics = payload.get("diagnostics")
+        if not isinstance(diagnostics, dict):
+            raise ValueError("Committed processing diagnostics are invalid.")
+        fingerprint = payload.get("currentFingerprint")
+        if not isinstance(fingerprint, str) or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None:
+            raise ValueError("Committed current image fingerprint is invalid.")
+        json.dumps(diagnostics, allow_nan=False)
+        return cls(
+            recipe=ProcessingRecipe.from_payload(payload.get("recipe")),
+            diagnostics=diagnostics,
+            current_fingerprint=fingerprint,
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schemaVersion": 1,
+            "recipe": self.recipe.to_payload(),
+            "diagnostics": self.diagnostics,
+            "currentFingerprint": self.current_fingerprint,
+        }
 
 
 @dataclass(slots=True)
@@ -27,7 +203,9 @@ class CaptureEntry:
     detected_contour: np.ndarray | None = None
     detected_backend: str | None = None
     dewarp_control_points: tuple[tuple[float, float], ...] | None = None
+    committed_processing: CommittedPageProcessing | None = None
     selected: bool = False
+    revision: int = field(default=0, repr=False)
     entry_id: str = field(default_factory=lambda: uuid4().hex)
 
     @classmethod
@@ -118,6 +296,8 @@ class CaptureEntry:
             current_image=image,
         )
         self.dewarp_control_points = None
+        self.committed_processing = None
+        self.revision += 1
 
     @property
     def current_image(self) -> np.ndarray:
@@ -129,6 +309,8 @@ class CaptureEntry:
             self.entry_id,
             current_image=image,
         )
+        self.committed_processing = None
+        self.revision += 1
 
     @property
     def preview_original_image(self) -> np.ndarray:
@@ -148,14 +330,19 @@ class CaptureEntry:
             self.entry_id,
             raw_image=raw_image,
         )
+        self.committed_processing = None
+        self.revision += 1
 
     def set_dewarp_control_points(
         self,
         control_points: tuple[tuple[float, float], ...] | list[tuple[float, float]],
     ) -> None:
         self.dewarp_control_points = normalize_control_points(control_points)
+        self.revision += 1
 
     def clear_dewarp_control_points(self) -> None:
+        if self.dewarp_control_points is not None:
+            self.revision += 1
         self.dewarp_control_points = None
 
 
@@ -299,6 +486,8 @@ class CaptureSession:
             current_image=original_image if current_image is None else current_image,
         )
         entry.dewarp_control_points = None
+        entry.committed_processing = None
+        entry.revision += 1
         if name is not None and name.strip():
             entry.name = name.strip()
         # Replacement is authoritative.  A detector miss must clear metadata
@@ -315,7 +504,7 @@ class CaptureSession:
         manifest_path = Path(manifest_path)
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "sessionDir": str(self.store.session_dir.resolve()),
             "entries": [
                 {
@@ -331,6 +520,11 @@ class CaptureSession:
                     "dewarpControlPoints": (
                         [list(point) for point in entry.dewarp_control_points]
                         if entry.dewarp_control_points is not None
+                        else None
+                    ),
+                    "committedProcessing": (
+                        entry.committed_processing.to_payload()
+                        if entry.committed_processing is not None
                         else None
                     ),
                 }
@@ -395,7 +589,14 @@ class CaptureSession:
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError(f"Cannot read session manifest: {manifest_path}") from exc
-        if payload.get("schemaVersion") != 1 or not isinstance(payload.get("entries"), list):
+        if not isinstance(payload, dict):
+            raise ValueError(f"Unsupported session manifest: {manifest_path}")
+        manifest_version = payload.get("schemaVersion")
+        if (
+            type(manifest_version) is not int
+            or manifest_version not in {1, 2}
+            or not isinstance(payload.get("entries"), list)
+        ):
             raise ValueError(f"Unsupported session manifest: {manifest_path}")
         quarantined_entries = payload.get("quarantinedEntries", [])
         if not isinstance(quarantined_entries, list):
@@ -449,6 +650,31 @@ class CaptureSession:
                 backend_raw = item.get("detectedBackend")
                 if backend_raw is not None and not isinstance(backend_raw, str):
                     raise ValueError("invalid detected backend")
+                committed_payload = (
+                    item.get("committedProcessing") if manifest_version >= 2 else None
+                )
+                committed_processing = None
+                if committed_payload is not None:
+                    try:
+                        committed_processing = CommittedPageProcessing.from_payload(
+                            committed_payload
+                        )
+                    except (TypeError, ValueError) as exc:
+                        session.restore_warnings.append(
+                            f"Ignored processing metadata for session page {position} "
+                            f"({entry_id}): {exc}"
+                        )
+                if current_rebuilt:
+                    committed_processing = None
+                elif committed_processing is not None:
+                    current_image = store.read_image(paths.current)
+                    actual_fingerprint = CommittedPageProcessing.fingerprint_image(current_image)
+                    if actual_fingerprint != committed_processing.current_fingerprint:
+                        session.restore_warnings.append(
+                            f"Ignored stale processing metadata for session page {position} "
+                            f"({entry_id}): current image fingerprint changed."
+                        )
+                        committed_processing = None
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 if not can_quarantine and entry_id not in seen_ids:
                     # Without a valid UUID there is no safe way to associate
@@ -480,6 +706,7 @@ class CaptureSession:
                     detected_contour=contour,
                     detected_backend=backend_raw,
                     dewarp_control_points=control_points,
+                    committed_processing=committed_processing,
                     selected=bool(item.get("selected", False)),
                     entry_id=entry_id,
                 )

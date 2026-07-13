@@ -86,3 +86,22 @@ def test_layout_preserves_binary_pixels() -> None:
 def test_layout_validates_options(kwargs, message) -> None:
     with pytest.raises(ValueError, match=message):
         layout_document_page(_page(), **kwargs)
+
+
+def test_layout_rejects_unsafe_output_size_before_native_work(monkeypatch) -> None:
+    page = _page()
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("oversized layout must fail before native work or allocation")
+
+    monkeypatch.setattr("uniscan.core.layout.detect_content_box", unexpected)
+    monkeypatch.setattr("uniscan.core.layout.cv2.resize", unexpected)
+    monkeypatch.setattr("uniscan.core.layout.np.full", unexpected)
+
+    with pytest.raises(ValueError, match=r"A4 layout at 10000 DPI.*safe output limit"):
+        layout_document_page(page, method="a4", dpi=10_000)
+
+
+def test_layout_output_pixel_limit_is_configurable() -> None:
+    with pytest.raises(ValueError, match="safe output limit of 1,000 pixels"):
+        layout_document_page(_page(), method="letter", dpi=72, max_pixels=1_000)

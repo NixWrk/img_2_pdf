@@ -5,6 +5,7 @@ from __future__ import annotations
 import queue
 import re
 import shutil
+import sys
 import threading
 import tempfile
 import time
@@ -60,10 +61,19 @@ from uniscan.io.loaders import (
     IMG_EXTS,
     PDF_EXTS,
     imread_unicode,
+    imwrite_unicode,
+    iter_input_items,
     list_supported_in_folder,
-    load_input_items,
 )
-from uniscan.session import create_persistent_session, default_autosave_path, load_or_create_session
+from uniscan.session import (
+    CommittedPageProcessing,
+    SessionInUseError,
+    UnsafeSessionLockError,
+    acquire_autosave_lock,
+    create_persistent_session,
+    default_autosave_path,
+    load_or_create_session,
+)
 from uniscan.storage import ProcessingStageCache
 from uniscan.ui.camera_health import camera_health_state
 from uniscan.ui.import_sources import (
@@ -125,16 +135,97 @@ class _ExportPageSnapshot:
     current_path: Path
 
 
+@dataclass(slots=True, frozen=True)
+class _StagedImportPage:
+    name: str
+    raw_path: Path
+    warped_path: Path
+    contour: np.ndarray | None
+    backend: str | None
+    fallback_reason: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class _ApplyPageSnapshot:
+    entry_id: str
+    name: str
+    source_path: Path
+    previous_current_path: Path
+    revision: int
+    request: PageProcessingRequest
+    previous_committed: CommittedPageProcessing | None
+
+
+@dataclass(slots=True, frozen=True)
+class _StagedAppliedPage:
+    entry_id: str
+    result_path: Path
+    committed: CommittedPageProcessing
+    cache_hits: tuple[str, ...]
+
+
+def _split_spread_pair(
+    raw: np.ndarray,
+    warped: np.ndarray,
+) -> tuple[list[np.ndarray], list[np.ndarray]] | None:
+    """Detect one warped gutter and replay its ratio on the raw source."""
+    warped_halves = split_spread_accurate(warped, fallback="none")
+    if len(warped_halves) != 2 or raw.shape[1] < 2:
+        return None
+    ratio = warped_halves[0].shape[1] / max(1, warped.shape[1])
+    cut = max(1, min(raw.shape[1] - 1, int(round(raw.shape[1] * ratio))))
+    raw_halves = [raw[:, :cut], raw[:, cut:]]
+    return raw_halves, warped_halves
+
+
+def _detection_summary(results: list[PageResult]) -> str:
+    """Describe detector outcomes without calling fallback pages detected."""
+    fallback = sum(result.fallback_reason is not None for result in results)
+    return _detection_summary_counts(len(results), fallback)
+
+
+def _detection_summary_counts(total: int, fallback: int) -> str:
+    detected = total - fallback
+    if total == 0:
+        return "no pages were produced"
+    if fallback == 0:
+        return f"detected boundaries for all {detected} page(s)"
+    if detected == 0:
+        return f"kept {fallback} page(s) unchanged because no boundary was confident"
+    return f"detected {detected} page(s); kept {fallback} fallback page(s) unchanged"
+
+
 class UnifiedScanApp(ctk.CTk):
     """Main window for the unified scanner application."""
 
     def __init__(self) -> None:
+        try:
+            self._initialize()
+        except BaseException:
+            try:
+                lock = object.__getattribute__(self, "_autosave_lock")
+            except (AttributeError, TypeError):
+                lock = None
+            if lock is not None:
+                lock.release()
+            try:
+                self.destroy()
+            except Exception:
+                pass
+            raise
+
+    def _initialize(self) -> None:
         super().__init__()
         self.title("UniScan")
         self.geometry("1280x800")
         self.minsize(1024, 680)
 
         self.autosave_path = default_autosave_path()
+        try:
+            self._autosave_lock = acquire_autosave_lock(self.autosave_path)
+        except SessionInUseError:
+            self.destroy()
+            raise
         self._restore_error: str | None = None
         try:
             self.session, self._session_restored = load_or_create_session(self.autosave_path)
@@ -165,7 +256,7 @@ class UnifiedScanApp(ctk.CTk):
         if self._session_restored:
             initial_status = f"Restored {len(self.session)} autosaved page(s)."
             if self.session.restore_warnings:
-                initial_status += f" Skipped {len(self.session.restore_warnings)} damaged page(s)."
+                initial_status += f" Restore warnings: {len(self.session.restore_warnings)}."
         elif self._restore_error:
             initial_status = f"Autosave restore skipped: {self._restore_error}"
         self.status_var = tk.StringVar(value=initial_status)
@@ -174,6 +265,7 @@ class UnifiedScanApp(ctk.CTk):
         self.camera_index_var = tk.IntVar(value=0)
         self.camera_shots_var = tk.IntVar(value=1)
         self.camera_delay_var = tk.DoubleVar(value=1.0)
+        self.camera_resolution = self._default_camera_resolution()
         self.apply_changes_to_all_var = tk.BooleanVar(value=False)
         self.lightweight_preview_var = tk.BooleanVar(value=True)
         self.preview_mode_var = tk.StringVar(value="Processed")
@@ -853,7 +945,9 @@ class UnifiedScanApp(ctk.CTk):
                 self.session.close(preserve=False)
         except Exception:
             self.session.store.close()
-        self.destroy()
+        finally:
+            self._autosave_lock.release()
+            self.destroy()
 
     def _set_status(self, text: str) -> None:
         self.status_var.set(text)
@@ -1050,7 +1144,7 @@ class UnifiedScanApp(ctk.CTk):
         if parts:
             self._set_status(" | ".join(parts))
 
-    def _start_background_job(self, name: str, worker, on_done) -> bool:
+    def _start_background_job(self, name: str, worker, on_done, *, on_error=None) -> bool:
         if self.job_thread is not None and self.job_thread.is_alive():
             messagebox.showwarning("Busy", "Another background job is already running.")
             return False
@@ -1069,7 +1163,7 @@ class UnifiedScanApp(ctk.CTk):
                 result = worker(emit, self.job_cancel_event.is_set)
                 self.job_queue.put(("done", (on_done, result, name)))
             except Exception as exc:
-                self.job_queue.put(("error", (name, str(exc))))
+                self.job_queue.put(("error", (name, str(exc), on_error)))
 
         self.job_thread = threading.Thread(target=run, daemon=True)
         self.job_thread.start()
@@ -1084,22 +1178,20 @@ class UnifiedScanApp(ctk.CTk):
                 if kind == "progress":
                     stage, current, progress = payload
                     self._set_job_display(stage=stage, current=current, progress=progress)
-                elif kind == "import_chunk":
-                    results = payload
-                    if results:
-                        self._ingest_page_results(results)
                 elif kind == "done":
                     on_done, result, name = payload
                     try:
                         on_done(result)
+                    except Exception as exc:
+                        self._set_status(f"{name} failed: {exc}")
+                        messagebox.showerror(f"{name} Error", str(exc))
                     finally:
                         self.cancel_task_button.configure(state=tk.DISABLED)
-                        self._set_job_display(
-                            stage=f"{name}: done", current="Completed", progress=100
-                        )
                 elif kind == "error":
                     self.cancel_task_button.configure(state=tk.DISABLED)
-                    name, text = payload
+                    name, text, on_error = payload
+                    if on_error is not None:
+                        on_error()
                     if "Cancelled by user." in text:
                         self._set_job_display(stage=f"{name}: cancelled", current=text, progress=0)
                         self._set_status(f"{name} cancelled")
@@ -1112,6 +1204,10 @@ class UnifiedScanApp(ctk.CTk):
                 elif kind == "diagnostics":
                     report = payload
                     if not report.ok:
+                        report = replace(
+                            report,
+                            checks=tuple(check for check in report.checks if check.blocking),
+                        )
                         failed = ", ".join(check.name for check in report.checks if not check.ok)
                         self._set_status(
                             f"Startup diagnostics failed: {failed}. Run 'uniscan doctor'."
@@ -1139,12 +1235,17 @@ class UnifiedScanApp(ctk.CTk):
         self._set_job_display(current="Cancellation requested...")
         self._set_status("Cancellation requested")
 
-    def _max_camera_resolution(self) -> tuple[int, int]:
+    @staticmethod
+    def _default_camera_resolution() -> tuple[int, int]:
         best = RESOLUTIONS[0]
         match = re.match(r"^(\d+)x(\d+)$", best.strip())
         if match is None:
             return (3264, 2448)
         return (int(match.group(1)), int(match.group(2)))
+
+    def _max_camera_resolution(self) -> tuple[int, int]:
+        """Return the configured resolution (legacy method name retained)."""
+        return getattr(self, "camera_resolution", self._default_camera_resolution())
 
     def _ensure_camera(self) -> CameraService:
         index = int(self.camera_index_var.get())
@@ -1153,13 +1254,13 @@ class UnifiedScanApp(ctk.CTk):
             self.camera = CameraService(index=index, resolution=resolution)
             self.camera.open()
         elif self.camera.index != index:
-            self.camera.set_index(index)
+            self.camera.release()
+            self.camera = CameraService(index=index, resolution=resolution)
+            self.camera.open()
+        elif self.camera.resolution != resolution:
             self.camera.set_resolution(resolution)
         elif self.camera.read_frame() is None:
             self.camera.open()
-            self.camera.set_resolution(resolution)
-        else:
-            self.camera.set_resolution(resolution)
         return self.camera
 
     def open_camera(self) -> None:
@@ -1458,6 +1559,28 @@ class UnifiedScanApp(ctk.CTk):
                 backend=result.backend,
             )
 
+    def _ingest_staged_import_pages(self, pages: list[_StagedImportPage]) -> None:
+        """Publish a fully staged import to the session or roll it back logically."""
+        added_entry_ids: list[str] = []
+        try:
+            for page in pages:
+                raw = imread_unicode(page.raw_path)
+                warped = imread_unicode(page.warped_path)
+                if raw is None or warped is None:
+                    raise RuntimeError(f"Cannot read staged imported page: {page.name}")
+                entry = self.session.add_image_with_contour(
+                    name=page.name,
+                    raw_image=raw,
+                    warped_image=warped,
+                    contour=page.contour,
+                    backend=page.backend,
+                )
+                added_entry_ids.append(entry.entry_id)
+        except Exception:
+            for entry_id in reversed(added_entry_ids):
+                self.session.remove_entry(entry_id)
+            raise
+
     def _detect_single_page(self, frame: np.ndarray, *, name: str) -> PageResult:
         """Run detection on a single frame (no spread split) and return one PageResult."""
         options = PipelineOptions(
@@ -1486,7 +1609,8 @@ class UnifiedScanApp(ctk.CTk):
             self.refresh_page_list(keep_index=len(self.session) - 1)
             self.go_to_review_tab()
             self._set_status(
-                f"Captured {len(results)} page(s) with detected boundaries. Session pages: {len(self.session)}"
+                f"Captured {len(results)} page(s): {_detection_summary(results)}. "
+                f"Session pages: {len(self.session)}"
             )
         except Exception as exc:
             messagebox.showerror("Capture Error", str(exc))
@@ -1543,13 +1667,41 @@ class UnifiedScanApp(ctk.CTk):
                 self.refresh_page_list(keep_index=len(self.session) - 1)
                 self.go_to_review_tab()
                 self._set_status(
-                    f"Burst captured {len(results)} page(s) with detected boundaries. Session pages: {len(self.session)}"
+                    f"Burst captured {len(results)} page(s): {_detection_summary(results)}. "
+                    f"Session pages: {len(self.session)}"
                 )
 
             self._start_background_job("Capture Burst", worker, on_done)
         except Exception as exc:
             messagebox.showerror("Burst Error", str(exc))
             self._set_status("Burst capture failed")
+
+    def _set_camera_resolution(self, resolution: tuple[int, int]) -> None:
+        """Apply a camera resolution and commit the preference only on success."""
+        previous_resolution = self.camera_resolution
+        if self.camera is None:
+            candidate = CameraService(
+                index=int(self.camera_index_var.get()),
+                resolution=resolution,
+            )
+            try:
+                candidate.open()
+            except Exception:
+                candidate.release()
+                raise
+            self.camera = candidate
+        else:
+            camera = self.camera
+            try:
+                camera.set_resolution(resolution)
+            except Exception:
+                try:
+                    camera.set_resolution(previous_resolution)
+                except Exception:
+                    camera.release()
+                    self.camera = None
+                raise
+        self.camera_resolution = resolution
 
     def configure_camera_event(self) -> None:
         def _set_camera_index(index_str: str) -> None:
@@ -1574,13 +1726,12 @@ class UnifiedScanApp(ctk.CTk):
                 )
                 return
             resolution = (int(match.group(1)), int(match.group(2)))
-            if self.camera is None:
-                self.camera = CameraService(
-                    index=int(self.camera_index_var.get()), resolution=resolution
-                )
-                self.camera.open()
-            else:
-                self.camera.set_resolution(resolution)
+            try:
+                self._set_camera_resolution(resolution)
+            except Exception as exc:
+                messagebox.showerror("Resolution Error", str(exc))
+                self._set_status(f"Camera resolution failed: {exc}")
+                return
             self._set_status(f"Camera resolution set to {resolution[0]}x{resolution[1]}")
 
         window = ctk.CTkToplevel(self)
@@ -1606,6 +1757,7 @@ class UnifiedScanApp(ctk.CTk):
 
         ctk.CTkLabel(window, text="Preset resolution").pack(anchor="w", padx=12, pady=(0, 4))
         preset_var = tk.StringVar(value=RESOLUTIONS[-1])
+        preset_var.set(f"{self.camera_resolution[0]}x{self.camera_resolution[1]}")
         preset_menu = ctk.CTkOptionMenu(
             window,
             values=RESOLUTIONS,
@@ -1616,6 +1768,7 @@ class UnifiedScanApp(ctk.CTk):
 
         ctk.CTkLabel(window, text="Custom resolution").pack(anchor="w", padx=12, pady=(0, 4))
         custom_var = tk.StringVar(value=RESOLUTIONS[-1])
+        custom_var.set(f"{self.camera_resolution[0]}x{self.camera_resolution[1]}")
         custom_entry = ctk.CTkEntry(window, textvariable=custom_var)
         custom_entry.pack(fill=ctk.X, padx=12, pady=(0, 8))
         ctk.CTkButton(
@@ -1917,11 +2070,14 @@ class UnifiedScanApp(ctk.CTk):
             raise RuntimeError("PDF DPI must be >= 72.")
         two_page_mode = bool(self.import_two_page_mode_var.get())
         self._set_status(f"Starting import for {len(paths)} file(s)...")
+        staging_dir = tempfile.TemporaryDirectory(prefix="uniscan_gui_import_")
 
         def worker(emit, is_cancelled):
             emit(stage="Import", current=f"{len(paths)} input file(s)", progress=0)
             total_paths = len(paths)
             added_pages = 0
+            fallback_pages = 0
+            staged_pages: list[_StagedImportPage] = []
             options = PipelineOptions(
                 detect_document=True,
                 two_page_mode=two_page_mode,
@@ -1937,33 +2093,46 @@ class UnifiedScanApp(ctk.CTk):
                     current=f"{file_index}/{total_paths}: {path.name}",
                     progress=int(((file_index - 1) / total_paths) * 30),
                 )
-                loaded = load_input_items(
-                    [path],
-                    pdf_dpi=pdf_dpi,
-                    cancel_cb=is_cancelled,
-                )
-
                 emit(
                     stage="Import detect",
                     current=f"{file_index}/{total_paths}: {path.name}",
                     progress=int(((file_index - 1) / total_paths) * 30) + 5,
                 )
-                results = process_loaded_items(
-                    loaded,
-                    options=options,
+                loaded_items = iter_input_items(
+                    [path],
+                    pdf_dpi=pdf_dpi,
                     cancel_cb=is_cancelled,
                 )
-
-                chunk: list[PageResult] = []
-                chunk_size = 4
-                for result in results:
-                    chunk.append(result)
-                    added_pages += 1
-                    if len(chunk) >= chunk_size:
-                        self.job_queue.put(("import_chunk", chunk))
-                        chunk = []
-                if chunk:
-                    self.job_queue.put(("import_chunk", chunk))
+                for loaded_item in loaded_items:
+                    if is_cancelled():
+                        raise RuntimeError("Cancelled by user.")
+                    results = process_loaded_items(
+                        [loaded_item],
+                        options=options,
+                        cancel_cb=is_cancelled,
+                    )
+                    for result in results:
+                        page_index = len(staged_pages) + 1
+                        raw_path = Path(staging_dir.name) / f"{page_index:06d}-raw.png"
+                        warped_path = Path(staging_dir.name) / f"{page_index:06d}-warped.png"
+                        if not imwrite_unicode(raw_path, result.raw) or not imwrite_unicode(
+                            warped_path, result.warped
+                        ):
+                            raise RuntimeError(f"Cannot stage imported page: {result.name}")
+                        if is_cancelled():
+                            raise RuntimeError("Cancelled by user.")
+                        staged_pages.append(
+                            _StagedImportPage(
+                                name=result.name,
+                                raw_path=raw_path,
+                                warped_path=warped_path,
+                                contour=result.contour,
+                                backend=result.backend,
+                                fallback_reason=result.fallback_reason,
+                            )
+                        )
+                        added_pages += 1
+                        fallback_pages += result.fallback_reason is not None
 
                 emit(
                     stage="Import ingest",
@@ -1971,18 +2140,36 @@ class UnifiedScanApp(ctk.CTk):
                     progress=45 + int((file_index / total_paths) * 55),
                 )
 
-            return {"files": total_paths, "pages": added_pages}
+            return {
+                "files": total_paths,
+                "pages": added_pages,
+                "fallbackPages": fallback_pages,
+                "stagedPages": staged_pages,
+            }
 
         def on_done(stats):
-            files_count = int(stats["files"])
-            pages_count = int(stats["pages"])
-            self.refresh_page_list(keep_index=len(self.session) - 1)
-            self.go_to_review_tab()
-            self._set_status(
-                f"Imported {files_count} file(s), added {pages_count} page(s) with detected boundaries. Session pages: {len(self.session)}"
-            )
+            try:
+                files_count = int(stats["files"])
+                pages_count = int(stats["pages"])
+                fallback_pages = int(stats["fallbackPages"])
+                self._ingest_staged_import_pages(stats["stagedPages"])
+                self.refresh_page_list(keep_index=len(self.session) - 1)
+                self.go_to_review_tab()
+                summary = _detection_summary_counts(pages_count, fallback_pages)
+                self._set_status(
+                    f"Imported {files_count} file(s), added {pages_count} page(s): {summary}. "
+                    f"Session pages: {len(self.session)}"
+                )
+            finally:
+                staging_dir.cleanup()
 
-        self._start_background_job("Import", worker, on_done)
+        if not self._start_background_job(
+            "Import",
+            worker,
+            on_done,
+            on_error=staging_dir.cleanup,
+        ):
+            staging_dir.cleanup()
 
     def refresh_page_list(self, keep_index: int | None = None) -> None:
         self.page_listbox.delete(0, tk.END)
@@ -2722,12 +2909,16 @@ class UnifiedScanApp(ctk.CTk):
         self._open_corner_editor_dialog(indices, auto_detect=True)
 
     def _reprocess_entry_from_original(self, entry):
-        result = self._process_review_page(
-            entry.original_image,
-            entry=entry,
-            preview=False,
+        request = self._processing_request(entry=entry, preview=False)
+        result = process_document_page(entry.original_image, request)
+        committed = CommittedPageProcessing.from_result(
+            request,
+            result.diagnostics,
+            result.image,
         )
         entry.current_image = result.image
+        entry.committed_processing = committed
+        self._last_processing_cache_hits = result.diagnostics.cache_hits
         return result.diagnostics.dewarp
 
     def analyze_selected_page_lighting(self) -> None:
@@ -2797,16 +2988,11 @@ class UnifiedScanApp(ctk.CTk):
                 entry = self.session.entries[idx]
                 raw = entry.raw_image
                 warped = entry.original_image
-                raw_halves = split_spread_accurate(raw, fallback="none")
-                warped_halves = split_spread_accurate(warped, fallback="none")
-                if len(warped_halves) != 2:
+                split_pair = _split_spread_pair(raw, warped)
+                if split_pair is None:
                     untouched_count += 1
                     continue
-                # Use warped split ratio to keep raw aligned even if the detector disagrees.
-                ratio = warped_halves[0].shape[1] / max(1, warped.shape[1])
-                if len(raw_halves) != 2:
-                    cut_raw = max(1, min(raw.shape[1] - 1, int(round(raw.shape[1] * ratio))))
-                    raw_halves = [raw[:, :cut_raw], raw[:, cut_raw:]]
+                raw_halves, warped_halves = split_pair
 
                 # Replace existing entry with the left half, append the right half after it.
                 left_raw, right_raw = raw_halves
@@ -3176,6 +3362,114 @@ class UnifiedScanApp(ctk.CTk):
     def _on_review_processing_slider_change(self, _value: float) -> None:
         self.update_page_preview()
 
+    def _snapshot_apply_pages(self, target_entries):
+        snapshot_dir = tempfile.TemporaryDirectory(prefix="uniscan_gui_apply_")
+        snapshots: list[_ApplyPageSnapshot] = []
+        try:
+            root = Path(snapshot_dir.name)
+            for position, (_index, entry) in enumerate(target_entries, start=1):
+                source_path = root / f"{position:06d}-source.png"
+                current_path = root / f"{position:06d}-previous.png"
+                entry.store.snapshot_image(entry.original_path, source_path)
+                entry.store.snapshot_image(entry.current_path, current_path)
+                snapshots.append(
+                    _ApplyPageSnapshot(
+                        entry_id=entry.entry_id,
+                        name=entry.name,
+                        source_path=source_path,
+                        previous_current_path=current_path,
+                        revision=entry.revision,
+                        request=self._processing_request(entry=entry, preview=False),
+                        previous_committed=entry.committed_processing,
+                    )
+                )
+        except Exception:
+            snapshot_dir.cleanup()
+            raise
+        return snapshot_dir, snapshots
+
+    @staticmethod
+    def _stage_apply_pages(snapshots, *, emit, is_cancelled):
+        staged: list[_StagedAppliedPage] = []
+        total = len(snapshots)
+        for position, snapshot in enumerate(snapshots, start=1):
+            if is_cancelled():
+                raise RuntimeError("Cancelled by user.")
+            emit(
+                stage="Apply processing",
+                current=f"{position}/{total}: {snapshot.name}",
+                progress=int(((position - 1) / max(1, total)) * 100),
+            )
+            source = imread_unicode(snapshot.source_path)
+            if source is None:
+                raise RuntimeError(f"Cannot read processing snapshot: {snapshot.name}")
+            request = replace(snapshot.request, cancel_cb=is_cancelled)
+            result = process_document_page(source, request)
+            committed = CommittedPageProcessing.from_result(
+                request,
+                result.diagnostics,
+                result.image,
+            )
+            result_path = snapshot.source_path.with_name(f"{snapshot.source_path.stem}-result.png")
+            if not imwrite_unicode(result_path, result.image):
+                raise RuntimeError(f"Cannot stage processed page: {snapshot.name}")
+            if is_cancelled():
+                raise RuntimeError("Cancelled by user.")
+            staged.append(
+                _StagedAppliedPage(
+                    entry_id=snapshot.entry_id,
+                    result_path=result_path,
+                    committed=committed,
+                    cache_hits=result.diagnostics.cache_hits,
+                )
+            )
+        return staged
+
+    def _commit_staged_apply(self, snapshots, staged) -> int:
+        entries_by_id = {entry.entry_id: entry for entry in self.session.entries}
+        staged_by_id = {page.entry_id: page for page in staged}
+        if len(staged_by_id) != len(snapshots):
+            raise RuntimeError("Processed page set is incomplete; no pages were changed.")
+        for snapshot in snapshots:
+            entry = entries_by_id.get(snapshot.entry_id)
+            if entry is None or entry.revision != snapshot.revision:
+                raise RuntimeError(
+                    f"Page changed while processing: {snapshot.name}. No pages were changed."
+                )
+            page = staged_by_id[snapshot.entry_id]
+            if not page.result_path.is_file() or page.result_path.stat().st_size == 0:
+                raise RuntimeError(f"Processed page is missing: {snapshot.name}")
+
+        committed_snapshots: list[_ApplyPageSnapshot] = []
+        try:
+            for snapshot in snapshots:
+                entry = entries_by_id[snapshot.entry_id]
+                image = imread_unicode(staged_by_id[snapshot.entry_id].result_path)
+                if image is None:
+                    raise RuntimeError(f"Processed page is unreadable: {snapshot.name}")
+                entry.current_image = image
+                entry.committed_processing = staged_by_id[snapshot.entry_id].committed
+                committed_snapshots.append(snapshot)
+        except Exception as exc:
+            rollback_error: Exception | None = None
+            for snapshot in reversed(committed_snapshots):
+                try:
+                    entry = entries_by_id[snapshot.entry_id]
+                    previous = imread_unicode(snapshot.previous_current_path)
+                    if previous is None:
+                        raise RuntimeError(f"Rollback snapshot is unreadable: {snapshot.name}")
+                    entry.current_image = previous
+                    entry.committed_processing = snapshot.previous_committed
+                    entry.revision = snapshot.revision
+                except Exception as rollback_exc:
+                    rollback_error = rollback_exc
+            if rollback_error is not None:
+                raise RuntimeError(
+                    f"Apply failed and rollback was incomplete: {rollback_error}"
+                ) from exc
+            raise
+        return sum(len(page.cache_hits) for page in staged)
+
     def open_review_processing_dialog(self) -> None:
         if (
             self.review_processing_window is not None
@@ -3344,16 +3638,37 @@ class UnifiedScanApp(ctk.CTk):
             target_entries = [(idx, self.session.entries[idx]) for idx in indices]
 
         try:
-            cache_hit_count = 0
-            for _idx, entry in target_entries:
-                self._reprocess_entry_from_original(entry)
-                cache_hit_count += len(self._last_processing_cache_hits)
-            self.refresh_page_list(keep_index=target_entries[-1][0])
-            scope = "all pages" if self.apply_changes_to_all_var.get() else "selected pages"
-            cache_note = f" Stage cache hits: {cache_hit_count}." if cache_hit_count else ""
-            self._set_status(f"Reprocessed {len(target_entries)} {scope}.{cache_note}")
+            snapshot_dir, snapshots = self._snapshot_apply_pages(target_entries)
         except Exception as exc:
             messagebox.showerror("Postprocess Error", str(exc))
+            return
+
+        scope = "all pages" if self.apply_changes_to_all_var.get() else "selected pages"
+        keep_index = target_entries[-1][0]
+
+        def worker(emit, is_cancelled):
+            return self._stage_apply_pages(
+                snapshots,
+                emit=emit,
+                is_cancelled=is_cancelled,
+            )
+
+        def on_done(staged):
+            try:
+                cache_hit_count = self._commit_staged_apply(snapshots, staged)
+                self.refresh_page_list(keep_index=keep_index)
+                cache_note = f" Stage cache hits: {cache_hit_count}." if cache_hit_count else ""
+                self._set_status(f"Reprocessed {len(target_entries)} {scope}.{cache_note}")
+            finally:
+                snapshot_dir.cleanup()
+
+        if not self._start_background_job(
+            "Apply processing",
+            worker,
+            on_done,
+            on_error=snapshot_dir.cleanup,
+        ):
+            snapshot_dir.cleanup()
 
     def choose_export_pdf_path(self) -> None:
         path = filedialog.asksaveasfilename(
@@ -3398,6 +3713,27 @@ class UnifiedScanApp(ctk.CTk):
         return snapshot_dir, snapshots
 
     @staticmethod
+    def _validate_pdf_layout_dpi(entries, export_dpi: int) -> None:
+        mismatches: list[tuple[str, int]] = []
+        for entry in entries:
+            committed = entry.committed_processing
+            if committed is None:
+                continue
+            recipe = committed.recipe
+            if recipe.page_layout in {"a4", "letter"} and recipe.page_dpi != export_dpi:
+                mismatches.append((entry.name, recipe.page_dpi))
+        if not mismatches:
+            return
+        examples = ", ".join(f"{name} ({dpi} DPI)" for name, dpi in mismatches[:3])
+        if len(mismatches) > 3:
+            examples += f", and {len(mismatches) - 3} more"
+        raise RuntimeError(
+            f"PDF DPI {export_dpi} would change the physical A4/Letter size of committed "
+            f"page(s): {examples}. Set PDF DPI to the committed value, or set the desired "
+            "DPI and Apply processing to those pages again."
+        )
+
+    @staticmethod
     def _render_export_paths(
         snapshots: list[_ExportPageSnapshot],
         *,
@@ -3419,11 +3755,7 @@ class UnifiedScanApp(ctk.CTk):
                 progress=int(((index - 1) / max(1, total)) * 75),
             )
             path = stage_dir / f"{index:05d}.png"
-            try:
-                encoded = np.fromfile(str(snapshot.current_path), dtype=np.uint8)
-            except OSError as exc:
-                raise RuntimeError(f"Cannot read committed page: {snapshot.name}") from exc
-            if encoded.size == 0 or cv2.imdecode(encoded, cv2.IMREAD_UNCHANGED) is None:
+            if imread_unicode(snapshot.current_path) is None:
                 raise RuntimeError(f"Cannot read committed page: {snapshot.name}")
             try:
                 shutil.copy2(snapshot.current_path, path)
@@ -3454,6 +3786,7 @@ class UnifiedScanApp(ctk.CTk):
             if dpi < 72:
                 raise RuntimeError("PDF DPI must be >= 72.")
             entries = list(entries)
+            self._validate_pdf_layout_dpi(entries, dpi)
             snapshot_dir, snapshots = self._snapshot_entries_for_export(entries)
 
             def worker(emit, is_cancelled):
@@ -3546,6 +3879,10 @@ class UnifiedScanApp(ctk.CTk):
 
 
 def run_app() -> int:
-    app = UnifiedScanApp()
+    try:
+        app = UnifiedScanApp()
+    except (SessionInUseError, UnsafeSessionLockError, OSError) as exc:
+        print(f"UniScan startup failed: {exc}", file=sys.stderr)
+        return 2
     app.mainloop()
     return 0

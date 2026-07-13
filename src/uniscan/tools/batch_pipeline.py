@@ -47,8 +47,18 @@ from uniscan.core.scanner_adapter import (
     DETECTOR_BACKEND_OPENCV_MINRECT,
 )
 from uniscan.export import export_image_paths_as_files, export_image_paths_as_pdf
-from uniscan.export.exporters import _directory_export_lock, _directory_export_lock_path
+from uniscan.export.exporters import (
+    _canonical_export_target,
+    _clone_directory_for_staging,
+    _directory_export_lock,
+    _directory_export_lock_path,
+    _exclusive_export_lock,
+    _file_export_lock,
+    _file_export_lock_path,
+    _is_link_like,
+)
 from uniscan.io import (
+    DEFAULT_MAX_INPUT_PIXELS,
     IMG_EXTS,
     PDF_EXTS,
     imwrite_unicode,
@@ -226,6 +236,10 @@ def _validate_output_targets(
     images_dir: Path | None,
     input_files: Sequence[Path],
 ) -> None:
+    if _is_link_like(output_pdf):
+        raise ValueError("PDF output path cannot be a link or junction.")
+    if _is_link_like(report_path):
+        raise ValueError("JSON report path cannot be a link or junction.")
     output_resolved = output_pdf.resolve()
     report_resolved = report_path.resolve()
     input_resolved = tuple(path.resolve() for path in input_files)
@@ -281,19 +295,13 @@ def _new_stage_file(target: Path) -> Path:
     return Path(raw_path)
 
 
-def _is_junction(path: Path) -> bool:
-    is_junction = getattr(path, "is_junction", None)
-    return bool(is_junction is not None and is_junction())
-
-
-def _is_link_like(path: Path) -> bool:
-    return path.is_symlink() or _is_junction(path)
-
-
 def _remove_path(path: Path) -> None:
-    if _is_junction(path):
-        path.rmdir()
-    elif path.is_symlink() or path.is_file():
+    if _is_link_like(path):
+        try:
+            path.unlink()
+        except (IsADirectoryError, PermissionError):
+            path.rmdir()
+    elif path.is_file():
         path.unlink()
     elif path.is_dir():
         shutil.rmtree(path)
@@ -366,7 +374,7 @@ def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
 
 
 def _transaction_journal_path(output_pdf: Path) -> Path:
-    output_pdf = _absolute_path(output_pdf)
+    output_pdf = _canonical_export_target(output_pdf, description="PDF output path")
     return output_pdf.parent / f".{output_pdf.name}{_TRANSACTION_SUFFIX}"
 
 
@@ -374,48 +382,12 @@ def _transaction_journal_path(output_pdf: Path) -> Path:
 def _transaction_lock(journal_path: Path):
     """Hold a non-blocking inter-process lock for recovery/publication."""
     lock_path = journal_path.with_name(f"{journal_path.name}.lock")
-    if _is_link_like(lock_path) or (lock_path.exists() and not lock_path.is_file()):
-        raise ValueError(f"Invalid transaction lock path: {lock_path}")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    stream = lock_path.open("a+b")
-    locked = False
-    try:
-        stream.seek(0, os.SEEK_END)
-        if stream.tell() == 0:
-            stream.write(b"\0")
-            stream.flush()
-            os.fsync(stream.fileno())
-        stream.seek(0)
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-            else:  # pragma: no cover - exercised by Linux CI
-                import fcntl
-
-                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            locked = True
-        except OSError as exc:
-            raise RuntimeError(
-                "Another UniScan process is publishing or recovering these outputs."
-            ) from exc
+    with _exclusive_export_lock(
+        lock_path,
+        invalid_path_message="Invalid transaction lock path",
+        conflict_message="Another UniScan process is publishing or recovering these outputs.",
+    ):
         yield
-    finally:
-        if locked:
-            try:
-                stream.seek(0)
-                if os.name == "nt":
-                    import msvcrt
-
-                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-                else:  # pragma: no cover - exercised by Linux CI
-                    import fcntl
-
-                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
-            except OSError:
-                pass
-        stream.close()
 
 
 def _transaction_target_specs(
@@ -424,10 +396,14 @@ def _transaction_target_specs(
     images_dir: Path | None,
     report_path: Path,
 ) -> tuple[tuple[Path, str], ...]:
-    specs: list[tuple[Path, str]] = [(_absolute_path(output_pdf), "file")]
+    specs: list[tuple[Path, str]] = [
+        (_canonical_export_target(output_pdf, description="PDF output path"), "file")
+    ]
     if images_dir is not None:
-        specs.append((_absolute_path(images_dir), "directory"))
-    specs.append((_absolute_path(report_path), "file"))
+        specs.append(
+            (_canonical_export_target(images_dir, description="Images output path"), "directory")
+        )
+    specs.append((_canonical_export_target(report_path, description="JSON report path"), "file"))
     return tuple(specs)
 
 
@@ -437,22 +413,15 @@ def _transaction_output_locks(
     *,
     expected_targets: Sequence[tuple[Path, str]],
 ):
-    """Serialize shared directories before taking the batch-specific lock.
-
-    A direct image export only takes the directory lock, while two batch runs
-    can use different PDF journals for the same images directory.  Taking every
-    directory lock first, in a stable path order, gives all writers one common
-    lock hierarchy and avoids holding a journal lock while waiting for a shared
-    directory.
-    """
-    directory_targets = {
-        _path_key(path): _absolute_path(path)
-        for path, kind in expected_targets
-        if kind == "directory"
+    """Lock every canonical final target in stable order, then the batch journal."""
+    output_targets = {
+        _path_key(path): (_absolute_path(path), kind) for path, kind in expected_targets
     }
     with ExitStack() as stack:
-        for key in sorted(directory_targets):
-            stack.enter_context(_directory_export_lock(directory_targets[key]))
+        for key in sorted(output_targets):
+            path, kind = output_targets[key]
+            lock = _directory_export_lock if kind == "directory" else _file_export_lock
+            stack.enter_context(lock(path))
         stack.enter_context(_transaction_lock(journal_path))
         yield
 
@@ -460,13 +429,13 @@ def _transaction_output_locks(
 def _validate_transaction_path_type(path: Path, *, kind: str, role: str) -> None:
     if not _path_exists(path):
         return
-    if role == "staged" and _is_link_like(path):
-        raise ValueError(f"Invalid transaction journal: staged path is a link: {path}")
+    if _is_link_like(path):
+        raise ValueError(f"Invalid transaction journal: {role} path is a link: {path}")
     if kind == "directory":
         if _is_link_like(path) or not path.is_dir():
             raise ValueError(f"Invalid transaction journal directory path: {path}")
     elif kind == "file":
-        if not (path.is_file() or path.is_symlink()):
+        if not path.is_file():
             raise ValueError(f"Invalid transaction journal file path: {path}")
     else:  # pragma: no cover - guarded by strict journal schema validation
         raise ValueError(f"Invalid transaction target kind: {kind}")
@@ -748,7 +717,9 @@ def _report_payload(
     images_dir: Path | None,
     image_outputs: Sequence[Path],
     image_format: str,
-    pdf_dpi: int,
+    input_pdf_dpi: int,
+    output_pdf_dpi: int,
+    max_input_pixels: int,
     input_files: Sequence[Path],
     pages: Sequence[PageRunReport],
     detect_document: bool,
@@ -784,13 +755,17 @@ def _report_payload(
     fallback_pages = sum(page.fallback_reason is not None for page in pages)
     effective_preprocess = preprocess_settings or PreprocessSettings()
     return {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "outputPdf": str(output_pdf),
         "reportPath": str(report_path),
         "imagesDirectory": str(images_dir) if images_dir is not None else None,
         "imageOutputs": [str(path) for path in image_outputs],
         "imageFormat": image_format,
-        "pdfDpi": pdf_dpi,
+        # Kept for report consumers written before the two DPI roles were split.
+        "pdfDpi": output_pdf_dpi,
+        "inputPdfDpi": input_pdf_dpi,
+        "outputPdfDpi": output_pdf_dpi,
+        "maxInputPixels": max_input_pixels,
         "inputFiles": [str(path) for path in input_files],
         "detectionEnabled": detect_document,
         "detectorPolicy": detector_policy,
@@ -902,12 +877,16 @@ def _stage_outputs(
     try:
         staged_pdf = _new_stage_file(output_pdf)
         targets.append(_StagedTarget(staged=staged_pdf, target=output_pdf))
-        export_image_paths_as_pdf(
-            staged_page_paths,
-            out_pdf=staged_pdf,
-            dpi=dpi,
-            cancel_cb=cancel_cb,
-        )
+        staging_pdf_lock = _file_export_lock_path(staged_pdf)
+        try:
+            export_image_paths_as_pdf(
+                staged_page_paths,
+                out_pdf=staged_pdf,
+                dpi=dpi,
+                cancel_cb=cancel_cb,
+            )
+        finally:
+            _cleanup_path_best_effort(staging_pdf_lock)
 
         if images_dir is not None:
             images_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -919,12 +898,7 @@ def _stage_outputs(
                 # The images directory may contain user-owned neighbours.  Seed
                 # the transaction stage from the live directory, then let the
                 # ownership-aware exporter replace only files from its manifest.
-                shutil.copytree(
-                    images_dir,
-                    staged_images_dir,
-                    dirs_exist_ok=True,
-                    symlinks=True,
-                )
+                _clone_directory_for_staging(images_dir, staged_images_dir)
             staging_lock = _directory_export_lock_path(staged_images_dir)
             try:
                 staged_images = export_image_paths_as_files(
@@ -964,6 +938,9 @@ def run_batch_pipeline(
     image_format: str = "png",
     report_path: Path | None = None,
     pdf_dpi: int = 300,
+    input_pdf_dpi: int | None = None,
+    output_pdf_dpi: int | None = None,
+    max_input_pixels: int = DEFAULT_MAX_INPUT_PIXELS,
     detect_document: bool = True,
     detector_policy: str = "auto",
     strict_detect: bool = False,
@@ -989,9 +966,16 @@ def run_batch_pipeline(
     cancel_cb: CancelCb | None = None,
 ) -> BatchPipelineResult:
     """Run the complete streaming pre-OCR pipeline and atomically publish its outputs."""
-    dpi = int(pdf_dpi)
-    if dpi < 72:
-        raise ValueError("PDF DPI must be >= 72.")
+    legacy_dpi = int(pdf_dpi)
+    input_dpi = int(input_pdf_dpi) if input_pdf_dpi is not None else legacy_dpi
+    output_dpi = int(output_pdf_dpi) if output_pdf_dpi is not None else legacy_dpi
+    max_input_pixels = int(max_input_pixels)
+    if input_dpi < 72:
+        raise ValueError("Input PDF DPI must be >= 72.")
+    if output_dpi < 72:
+        raise ValueError("Output PDF DPI must be >= 72.")
+    if max_input_pixels < 1:
+        raise ValueError("Maximum input pixel count must be positive.")
     if strict_detect and not detect_document:
         raise ValueError("strict_detect cannot be used when document detection is disabled.")
     image_format = image_format.strip().lower().lstrip(".")
@@ -1039,10 +1023,20 @@ def run_batch_pipeline(
     if int(stage_cache_max_mb) < 1:
         raise ValueError("Stage cache size must be at least 1 MiB.")
 
-    output_pdf = Path(output_pdf).with_suffix(".pdf")
-    report_path = Path(report_path) if report_path else output_pdf.with_suffix(".pdf.report.json")
+    output_pdf = _canonical_export_target(
+        Path(output_pdf).with_suffix(".pdf"),
+        description="PDF output path",
+    )
+    report_path = _canonical_export_target(
+        Path(report_path) if report_path else output_pdf.with_suffix(".pdf.report.json"),
+        description="JSON report path",
+    )
     input_files = resolve_input_paths(inputs, output_pdf=output_pdf)
-    images_dir = Path(images_dir) if images_dir is not None else None
+    images_dir = (
+        _canonical_export_target(Path(images_dir), description="Images output path")
+        if images_dir is not None
+        else None
+    )
     _validate_output_targets(
         output_pdf=output_pdf,
         report_path=report_path,
@@ -1109,19 +1103,24 @@ def run_batch_pipeline(
 
         for loaded_item in iter_input_items(
             input_files,
-            pdf_dpi=dpi,
+            pdf_dpi=input_dpi,
+            max_input_pixels=max_input_pixels,
             cancel_cb=cancel_cb,
         ):
             if cancel_cb is not None and cancel_cb():
                 raise RuntimeError("Cancelled by user.")
-            started = time.perf_counter()
+            detection_started = time.perf_counter()
             page_results = process_loaded_items(
                 [loaded_item],
                 options=options,
                 uvdoc_cache_home=uvdoc_cache_home,
                 cancel_cb=cancel_cb,
             )
+            detection_share_ms = (
+                (time.perf_counter() - detection_started) * 1000.0 / max(1, len(page_results))
+            )
             for page in page_results:
+                page_started = time.perf_counter()
                 processed = process_document_page(
                     page.current,
                     PageProcessingRequest(
@@ -1133,7 +1132,7 @@ def run_batch_pipeline(
                         postprocess_name=postprocess_name,
                         preprocess_settings=preprocess_settings,
                         page_layout=page_layout,
-                        page_dpi=dpi,
+                        page_dpi=output_dpi,
                         page_margin_mm=page_margin_mm,
                         horizontal_alignment=horizontal_alignment,
                         vertical_alignment=vertical_alignment,
@@ -1153,6 +1152,8 @@ def run_batch_pipeline(
                 page_path = page_stage_dir / f"{len(staged_page_paths) + 1:05d}.png"
                 if not imwrite_unicode(page_path, current):
                     raise RuntimeError(f"Failed to write processed page: {page_path}")
+                if cancel_cb is not None and cancel_cb():
+                    raise RuntimeError("Cancelled by user.")
                 staged_page_paths.append(page_path)
                 page_reports.append(
                     PageRunReport(
@@ -1161,7 +1162,10 @@ def run_batch_pipeline(
                         detected=page.detected,
                         backend=page.backend,
                         fallback_reason=page.fallback_reason,
-                        duration_ms=round((time.perf_counter() - started) * 1000.0, 3),
+                        duration_ms=round(
+                            detection_share_ms + (time.perf_counter() - page_started) * 1000.0,
+                            3,
+                        ),
                         orientation_method=orientation_method,
                         orientation_applied=orientation_diagnostics.applied,
                         orientation_angle_degrees=orientation_diagnostics.angle_degrees,
@@ -1226,7 +1230,9 @@ def run_batch_pipeline(
             images_dir=images_dir,
             image_outputs=(),
             image_format=image_format,
-            pdf_dpi=dpi,
+            input_pdf_dpi=input_dpi,
+            output_pdf_dpi=output_dpi,
+            max_input_pixels=max_input_pixels,
             input_files=input_files,
             pages=page_reports,
             detect_document=bool(detect_document),
@@ -1267,25 +1273,36 @@ def run_batch_pipeline(
             ),
             uvdoc_cache_home=(Path(uvdoc_cache_home) if uvdoc_cache_home is not None else None),
         )
-        staged_targets, final_image_paths = _stage_outputs(
-            staged_page_paths=staged_page_paths,
-            output_pdf=output_pdf,
-            images_dir=images_dir,
-            image_format=image_format,
-            report_path=report_path,
-            report_payload=report_payload,
-            dpi=dpi,
-            cancel_cb=cancel_cb,
-        )
-        if cancel_cb is not None and cancel_cb():
-            for item in staged_targets:
-                if item.staged.exists():
-                    _remove_path(item.staged)
-            raise RuntimeError("Cancelled by user.")
-        _publish_staged_targets(
-            staged_targets,
-            journal_path=transaction_journal,
-        )
+        with _transaction_output_locks(
+            transaction_journal,
+            expected_targets=transaction_targets,
+        ):
+            _recover_batch_transaction(
+                transaction_journal,
+                expected_targets=transaction_targets,
+                locks_held=True,
+            )
+            try:
+                staged_targets, final_image_paths = _stage_outputs(
+                    staged_page_paths=staged_page_paths,
+                    output_pdf=output_pdf,
+                    images_dir=images_dir,
+                    image_format=image_format,
+                    report_path=report_path,
+                    report_payload=report_payload,
+                    dpi=output_dpi,
+                    cancel_cb=cancel_cb,
+                )
+                if cancel_cb is not None and cancel_cb():
+                    raise RuntimeError("Cancelled by user.")
+                _publish_staged_targets_locked(
+                    staged_targets,
+                    journal_path=transaction_journal,
+                )
+            except Exception:
+                for item in staged_targets:
+                    _cleanup_path_best_effort(item.staged)
+                raise
 
     detected_pages = sum(page.detected for page in page_reports)
     fallback_pages = sum(page.fallback_reason is not None for page in page_reports)

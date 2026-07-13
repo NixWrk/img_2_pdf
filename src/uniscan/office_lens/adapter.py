@@ -9,12 +9,7 @@ import cv2
 import numpy as np
 
 from uniscan.core.geometry import order_quad_points
-
-try:
-    from PIL import Image, ImageOps
-except ImportError:  # pragma: no cover - OpenCV fallback is enough for runtime use.
-    Image = None
-    ImageOps = None
+from uniscan.io.loaders import imread_unicode, imwrite_unicode
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -91,14 +86,7 @@ class PipelineResult:
 
 
 def _read_rgb(path: str | Path) -> np.ndarray:
-    if Image is not None and ImageOps is not None:
-        try:
-            with Image.open(path) as image:
-                return np.asarray(ImageOps.exif_transpose(image).convert("RGB"))
-        except Exception:
-            pass
-
-    image_bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    image_bgr = imread_unicode(Path(path))
     if image_bgr is None:
         raise ValueError(f"Could not read image: {path}")
     return cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
@@ -108,7 +96,8 @@ def _write_image(path: str | Path, image: np.ndarray) -> None:
     output = image
     if image.ndim == 3:
         output = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-    cv2.imwrite(str(path), output)
+    if not imwrite_unicode(Path(path), output):
+        raise RuntimeError(f"Could not write image atomically: {path}")
 
 
 def _resize_rgb(image_rgb: np.ndarray, size: int = 256) -> np.ndarray:
@@ -697,11 +686,13 @@ def result_to_report(image_path: str | Path, result: PipelineResult) -> dict[str
 
 def save_mask(mask: np.ndarray, output_path: str | Path) -> None:
     normalized = np.clip(mask, 0.0, 1.0)
-    cv2.imwrite(str(output_path), (normalized * 255.0).astype(np.uint8))
+    output = (normalized * 255.0).astype(np.uint8)
+    if not imwrite_unicode(Path(output_path), output):
+        raise RuntimeError(f"Could not write image atomically: {output_path}")
 
 
 def save_overlay(image_path: str | Path, quad: np.ndarray | None, output_path: str | Path) -> None:
-    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    image = imread_unicode(Path(image_path))
     if image is None:
         raise ValueError(f"Could not read image: {image_path}")
     if quad is not None:
@@ -712,7 +703,8 @@ def save_overlay(image_path: str | Path, quad: np.ndarray | None, output_path: s
             cv2.putText(
                 image, str(index), tuple(point), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
             )
-    cv2.imwrite(str(output_path), image)
+    if not imwrite_unicode(Path(output_path), image):
+        raise RuntimeError(f"Could not write image atomically: {output_path}")
 
 
 def save_pipeline_outputs(
