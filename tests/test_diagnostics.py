@@ -31,7 +31,7 @@ def test_runtime_diagnostics_pass_without_camera() -> None:
     assert "UniScan diagnostics: OK" in format_diagnostics(report)
     payload = json.loads(diagnostics_json(report))
     assert payload["ok"] is True
-    assert any(check["name"] == "model:quad" for check in payload["checks"])
+    assert any(check["name"] == "optional:office-lens" for check in payload["checks"])
 
 
 def test_runtime_diagnostics_with_fake_camera() -> None:
@@ -44,6 +44,15 @@ def test_runtime_diagnostics_with_fake_camera() -> None:
     assert report.ok
     camera = next(check for check in report.checks if check.name == "camera")
     assert "20x10" in camera.detail
+
+
+def test_runtime_diagnostics_can_probe_native_gui(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "uniscan.diagnostics._gui_runtime_check",
+        lambda: type("Check", (), {"name": "gui-runtime", "ok": True, "detail": "fake"})(),
+    )
+    report = run_diagnostics(check_gui_runtime=True)
+    assert any(check.name == "gui-runtime" for check in report.checks)
 
 
 def test_cli_doctor_json(capsys) -> None:

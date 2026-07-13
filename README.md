@@ -1,10 +1,12 @@
-# UniScan (`img_2_pdf`)
+# UniScan
 
 `uniscan` is a pre-OCR document preparation pipeline. It imports images or PDF pages,
 detects and rectifies document boundaries, applies cleanup presets, and exports processed
 images and a plain merged PDF.
 
 OCR, searchable-PDF assembly, and OCR engine benchmarking are intentionally out of scope.
+The repository directory keeps its historical `img_2_pdf` name, but the maintained package,
+commands, and product identity are `uniscan`/UniScan.
 
 ## Quick start on Windows
 
@@ -29,6 +31,10 @@ longer contains a separate legacy implementation.
 
 The GUI follows a single-document workspace with persistent add, camera, processing, and export
 actions. Its preview can show one large processed/original page or a side-by-side comparison.
+`Fast preview` is explicitly approximate and processes the stored display proxy; turn it off for
+an export-quality full-resolution preview. Use `Apply processing` to commit that result to the
+selected page(s): export publishes each page's last committed full-resolution pixels and never
+reapplies pending global controls.
 Design rationale and the next UX iterations are in
 [`docs/gui_ux_research.md`](docs/gui_ux_research.md). A source-level feature and performance
 comparison with ScanTailor Advanced is in
@@ -57,7 +63,8 @@ launcher because it forwards CLI arguments:
 Useful options:
 
 - `--mode {none,document,whiteboard,photo,b/w}` selects the cleanup profile.
-- `--backend {auto,office_lens_onnx,cv_hybrid,paddleocr_uvdoc}` fixes detector policy.
+- `--backend {auto,office_lens_onnx,cv_hybrid}` fixes boundary-detector policy. `auto` uses the
+  redistributable OpenCV hybrid detector. Office Lens is an optional bring-your-own-model backend.
 - `--strict-detect` fails atomically instead of keeping a page with no detected boundary.
 - `--report PATH` selects the per-page JSON run report path.
 - `--no-detect` disables boundary detection and perspective correction.
@@ -82,9 +89,13 @@ Useful options:
 - `--pdf-dpi 300` controls PDF rendering and export DPI.
 - `--images-dir DIR --image-format png` also writes processed page images.
 
-The default detector cascade is bundled Office Lens ONNX, optional PaddleOCR UVDoc, then the
-OpenCV hybrid fallback. PDF input is streamed one page at a time. PDF, image-directory, and JSON
-report outputs are staged and published together, so cancellation/failure preserves prior output.
+The default boundary detector is the OpenCV hybrid backend. Optional Office Lens weights and
+PaddleOCR UVDoc are never downloaded or distributed by UniScan; UVDoc belongs to the separate
+dewarp stage. PDF input is streamed one page at a time. PDF, image-directory, and JSON
+report outputs are staged and published together. A durable journal rolls back an interrupted
+prepared publication on the next matching run, retains committed outputs, and serializes recovery
+and publication across processes; cancellation/failure preserves the prior output set. Image
+exports replace only the exact files recorded in their ownership manifest and preserve neighbours.
 Boundary detection, right-angle orientation, deskew, and local dewarp are independent stages;
 their selected methods and
 per-page results are recorded in the JSON report. See
@@ -98,7 +109,8 @@ scope.
 
 ## Runtime diagnostics
 
-Check Python/runtime modules, both ONNX models, temporary storage, and optionally a camera:
+Check required runtime modules, optional Office Lens status, temporary storage, and optionally a
+camera:
 
 ```powershell
 .\.venv\Scripts\python.exe -m uniscan doctor
@@ -108,11 +120,16 @@ Check Python/runtime modules, both ONNX models, temporary storage, and optionall
 The GUI restores unfinished sessions from `%LOCALAPPDATA%\UniScan`, supports file drag-and-drop
 and clipboard images/files, and runs non-camera diagnostics shortly after startup.
 
-## Office Lens adapter
+## Optional Office Lens adapter
 
-Run the bundled Office Lens ONNX/OpenCV adapter on a single image and save its diagnostics:
+UniScan does not distribute weights extracted from the Microsoft Lens application because this
+project has no explicit redistribution grant for them. If you independently have compatible,
+lawfully obtained weights, install the optional runtime, set `UNISCAN_OFFICE_LENS_MODEL_DIR`, and
+run the adapter:
 
 ```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[office-lens]"
+$env:UNISCAN_OFFICE_LENS_MODEL_DIR = "D:\licensed-models\office-lens"
 .\.venv\Scripts\python.exe -m uniscan.office_lens.cli `
   path\to\document.jpg --mode auto --out office_lens_out
 ```
@@ -131,7 +148,7 @@ image -> ONNX classifier -> ONNX quad mask -> OpenCV quad refinement
   --input path\to\images --output out
 ```
 
-The benchmark defaults to `office_lens_onnx` and writes a PDF for each requested backend. It is
+The benchmark defaults to `cv_hybrid` and writes a PDF for each requested backend. It is
 a comparison tool, not the production conversion command.
 
 Ground-truth quality regression (crop success, corner error, latency, and fallback rate):
@@ -176,13 +193,13 @@ both the GUI and CLI without development Python. See
 
 - `src/uniscan/core` — geometry, detector cascade, spread split, and preprocessing primitives.
 - `src/uniscan/io` — image/PDF loaders and camera input.
-- `src/uniscan/office_lens` — bundled Android-free Office Lens ONNX/OpenCV adapter.
+- `src/uniscan/office_lens` — optional BYOM Office Lens ONNX/OpenCV adapter.
 - `src/uniscan/session` and `src/uniscan/storage` — disk-backed GUI session state.
 - `src/uniscan/export` — image and merged-PDF export.
 - `src/uniscan/tools/batch_pipeline.py` — supported headless production pipeline.
 - `src/uniscan/tools/crop_benchmark.py` — crop-backend comparison tool.
 - `src/uniscan/tools/quality_benchmark.py` — ground-truth quality regression tool.
-- `src/uniscan/ui` — desktop Import → Scan → Review → Export workflow.
+- `src/uniscan/ui` — desktop Workspace/Camera/Import options/Export options workflow.
 
 The canonical implementation roadmap is in [`docs/roadmap.md`](docs/roadmap.md). Older plan
 documents are retained as implementation history.

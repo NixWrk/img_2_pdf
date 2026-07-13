@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import queue
 import re
+import shutil
 import threading
+import tempfile
+import time
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -26,15 +30,11 @@ from uniscan.core.dewarp import (
     DEWARP_METHOD_NONE,
     DEWARP_METHOD_TEXTLINE,
     DewarpModel,
-    apply_dewarp_model,
-    dewarp_document,
     estimate_textline_dewarp_model,
 )
 from uniscan.core.pipeline import PageResult, PipelineOptions, process_loaded_items
 from uniscan.core.processing import PageProcessingRequest, process_document_page
-from uniscan.core.orientation import ORIENTATION_METHOD_AUTO, orient_document
-from uniscan.core.layout import layout_document_page
-from uniscan.core.cleanup import analyze_lighting
+from uniscan.core.orientation import ORIENTATION_METHOD_AUTO
 from uniscan.core.preprocess import (
     DESKEW_METHOD_HOUGH,
     DESKEW_METHOD_HYBRID,
@@ -42,14 +42,14 @@ from uniscan.core.preprocess import (
     LENS_MODE_VALUES,
     PREPROCESS_PRESETS,
     PreprocessSettings,
-    apply_enhancements,
-    deskew_document,
     infer_lens_mode,
     resolve_lens_mode_profile,
 )
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.scanner_adapter import (
     DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
+    DETECTOR_BACKEND_PADDLEOCR_UVDOC,
+    DETECTOR_BACKEND_UVDOC,
     ScanAdapterError,
     scan_with_document_detector,
 )
@@ -75,6 +75,7 @@ from uniscan.ui.live_detect import DEFAULT_LIVE_BACKEND, LIVE_BACKEND_CHOICES, L
 from uniscan.ui.overlays import draw_quad_overlay
 
 PREVIEW_WAIT_MS = 25
+REVIEW_PREVIEW_DEBOUNCE_MS = 120
 RESOLUTIONS = [
     "3264x2448",
     "3264x1836",
@@ -118,6 +119,12 @@ PAGE_LAYOUT_UI_METHODS = {
 }
 
 
+@dataclass(slots=True, frozen=True)
+class _ExportPageSnapshot:
+    name: str
+    current_path: Path
+
+
 class UnifiedScanApp(ctk.CTk):
     """Main window for the unified scanner application."""
 
@@ -145,6 +152,11 @@ class UnifiedScanApp(ctk.CTk):
         self.preview_photo: ctk.CTkImage | None = None
         self.page_preview_before_photo: ctk.CTkImage | None = None
         self.page_preview_after_photo: ctk.CTkImage | None = None
+        self.review_preview_job: str | None = None
+        self.review_preview_thread: threading.Thread | None = None
+        self.review_preview_threads: list[threading.Thread] = []
+        self.review_preview_cancel_event = threading.Event()
+        self.review_preview_generation = 0
         self.review_processing_window: ctk.CTkToplevel | None = None
         self.corner_editor_window: ctk.CTkToplevel | None = None
         self.live_detector = LiveContourDetector(backend=DEFAULT_LIVE_BACKEND)
@@ -152,6 +164,8 @@ class UnifiedScanApp(ctk.CTk):
         initial_status = "Ready"
         if self._session_restored:
             initial_status = f"Restored {len(self.session)} autosaved page(s)."
+            if self.session.restore_warnings:
+                initial_status += f" Skipped {len(self.session.restore_warnings)} damaged page(s)."
         elif self._restore_error:
             initial_status = f"Autosave restore skipped: {self._restore_error}"
         self.status_var = tk.StringVar(value=initial_status)
@@ -174,6 +188,7 @@ class UnifiedScanApp(ctk.CTk):
         self.binarization_method_var = tk.StringVar(value="None")
         self.binarization_window_var = tk.IntVar(value=31)
         self.binarization_k_var = tk.DoubleVar(value=0.2)
+        self._binarization_k_custom = False
         self.despeckle_strength_var = tk.StringVar(value="None")
         self.page_layout_var = tk.StringVar(value="Keep source page")
         self.page_margin_mm_var = tk.DoubleVar(value=10.0)
@@ -198,6 +213,9 @@ class UnifiedScanApp(ctk.CTk):
         self.job_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.job_cancel_event = threading.Event()
         self.job_thread: threading.Thread | None = None
+        self._closing = False
+        self._close_wait_job: str | None = None
+        self._close_deadline: float | None = None
         self.autosave_job: str | None = None
         self.tab_review_name = "Workspace"
         self.tab_scan_name = "Camera"
@@ -633,7 +651,7 @@ class UnifiedScanApp(ctk.CTk):
         ).pack(anchor="w", padx=6, pady=(0, 6))
         ctk.CTkCheckBox(
             processing,
-            text="Fast preview",
+            text="Fast preview (approximate)",
             variable=self.lightweight_preview_var,
             command=self.update_page_preview,
         ).pack(anchor="w", padx=6, pady=(0, 6))
@@ -661,7 +679,7 @@ class UnifiedScanApp(ctk.CTk):
             processing,
             values=list(BINARIZATION_UI_METHODS),
             variable=self.binarization_method_var,
-            command=lambda _value: self.update_page_preview(),
+            command=self._on_binarization_method_change,
         ).pack(fill=ctk.X, padx=6, pady=(0, 8))
 
         ctk.CTkLabel(processing, text="Despeckle", anchor="w").pack(fill=ctk.X, padx=6, pady=(0, 2))
@@ -795,8 +813,12 @@ class UnifiedScanApp(ctk.CTk):
         return "break"
 
     def _on_close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
         self.stop_preview()
         self.job_cancel_event.set()
+        self._cancel_review_page_preview()
         if (
             self.review_processing_window is not None
             and self.review_processing_window.winfo_exists()
@@ -808,8 +830,22 @@ class UnifiedScanApp(ctk.CTk):
         if self.autosave_job is not None:
             self.after_cancel(self.autosave_job)
             self.autosave_job = None
+        self._set_status("Closing: waiting for background work to stop...")
+        self._close_deadline = time.monotonic() + 5.0
+        self._finish_close_when_idle()
+
+    def _finish_close_when_idle(self) -> None:
+        workers = [self.job_thread, *self.review_preview_threads]
+        alive = any(worker is not None and worker.is_alive() for worker in workers)
+        if alive and (self._close_deadline is None or time.monotonic() < self._close_deadline):
+            self._close_wait_job = self.after(25, self._finish_close_when_idle)
+            return
+        # Workers receive immutable arrays/files and never mutate CaptureSession.
+        # After the bounded grace period it is therefore safe to finalize assets
+        # even if an uncooperative third-party call has not returned yet.
+        self._close_wait_job = None
         try:
-            if len(self.session):
+            if self.session.has_recoverable_state:
                 self.session.save_manifest(self.autosave_path)
                 self.session.close(preserve=True)
             else:
@@ -824,7 +860,7 @@ class UnifiedScanApp(ctk.CTk):
 
     def _autosave_tick(self) -> None:
         try:
-            if len(self.session):
+            if self.session.has_recoverable_state:
                 self.session.save_manifest(self.autosave_path)
             else:
                 self.autosave_path.unlink(missing_ok=True)
@@ -984,13 +1020,19 @@ class UnifiedScanApp(ctk.CTk):
         self.preprocess_denoise_var.set(int(preset.denoise))
         self.preprocess_threshold_var.set(int(preset.threshold))
 
-        # Preset may guide main postprocess mode for clearer UX.
-        if preset_name == "B/W High Contrast":
-            self.postprocess_var.set("Black and White")
-        elif preset_name in {"Document", "Whiteboard"} and self.postprocess_var.get() == "None":
-            self.postprocess_var.set("Grayscale")
-        elif preset_name == "Photo" and self.postprocess_var.get() == "Black and White":
-            self.postprocess_var.set("None")
+        # Keep preset selection aligned with the canonical lens profiles.  In
+        # particular, Whiteboard must retain marker colour (`postprocess=None`).
+        matching_profile = next(
+            (
+                profile
+                for mode_name in LENS_MODE_VALUES
+                if (profile := resolve_lens_mode_profile(mode_name)) is not None
+                and profile.preset_name == preset_name
+            ),
+            None,
+        )
+        if matching_profile is not None:
+            self.postprocess_var.set(matching_profile.postprocess_name)
         self._sync_lens_mode_from_controls()
         self.update_page_preview()
 
@@ -1037,6 +1079,8 @@ class UnifiedScanApp(ctk.CTk):
         try:
             for _ in range(6):
                 kind, payload = self.job_queue.get_nowait()
+                if self._closing:
+                    continue
                 if kind == "progress":
                     stage, current, progress = payload
                     self._set_job_display(stage=stage, current=current, progress=progress)
@@ -1072,10 +1116,14 @@ class UnifiedScanApp(ctk.CTk):
                         self._set_status(
                             f"Startup diagnostics failed: {failed}. Run 'uniscan doctor'."
                         )
+                elif kind == "review_preview":
+                    generation, image, error = payload
+                    self._handle_review_preview_result(generation, image, error)
         except queue.Empty:
             pass
         finally:
-            self.after(40, self._poll_job_queue)
+            if not self._closing and self.winfo_exists():
+                self.after(40, self._poll_job_queue)
 
     def _start_startup_diagnostics(self) -> None:
         def run() -> None:
@@ -1193,6 +1241,10 @@ class UnifiedScanApp(ctk.CTk):
         apply_threshold = bool(
             preset.apply_threshold or self.postprocess_var.get() == "Black and White"
         )
+        binarization_method = BINARIZATION_UI_METHODS.get(
+            self.binarization_method_var.get(),
+            "none",
+        )
         return PreprocessSettings(
             contrast=float(self.preprocess_contrast_var.get()),
             brightness=int(self.preprocess_brightness_var.get()),
@@ -1200,15 +1252,12 @@ class UnifiedScanApp(ctk.CTk):
             threshold=int(self.preprocess_threshold_var.get()),
             apply_threshold=apply_threshold,
             correct_illumination=bool(self.preprocess_illumination_var.get()),
-            binarization_method=BINARIZATION_UI_METHODS.get(
-                self.binarization_method_var.get(),
-                "none",
-            ),
+            binarization_method=binarization_method,
             binarization_window=int(self.binarization_window_var.get()),
             binarization_k=(
                 float(self.binarization_k_var.get())
-                if BINARIZATION_UI_METHODS.get(self.binarization_method_var.get())
-                in {"sauvola", "wolf"}
+                if binarization_method in {"sauvola", "wolf"}
+                and getattr(self, "_binarization_k_custom", False)
                 else None
             ),
             despeckle_strength=DESPECKLE_UI_STRENGTHS.get(
@@ -1217,22 +1266,45 @@ class UnifiedScanApp(ctk.CTk):
             ),
         )
 
+    def _on_binarization_method_change(self, value: str) -> None:
+        method = BINARIZATION_UI_METHODS.get(value, "none")
+        if not self._binarization_k_custom:
+            # Match the controller/CLI defaults instead of applying Sauvola's
+            # 0.2 coefficient to Wolf, whose documented default is 0.5.
+            if method == "wolf":
+                self.binarization_k_var.set(0.5)
+            elif method == "sauvola":
+                self.binarization_k_var.set(0.2)
+        self.update_page_preview()
+
+    def _on_binarization_k_change(self, _value: float) -> None:
+        self._binarization_k_custom = True
+        self.update_page_preview()
+
     def _apply_postprocess(self, image: np.ndarray) -> np.ndarray:
-        mode = self.postprocess_var.get()
-        fn = POSTPROCESSING_OPTIONS.get(mode, POSTPROCESSING_OPTIONS["None"])
-        out = fn(image)
-        return apply_enhancements(out, self._current_preprocess_settings())
+        """Compatibility helper routed through the canonical controller."""
+        return process_document_page(
+            image,
+            PageProcessingRequest(
+                postprocess_name=self.postprocess_var.get(),
+                preprocess_settings=self._current_preprocess_settings(),
+            ),
+        ).image
 
     def _apply_page_layout(self, image: np.ndarray, *, preview: bool):
+        """Compatibility helper routed through the canonical controller."""
         dpi = 100 if preview else max(72, int(self.export_pdf_dpi_var.get()))
-        return layout_document_page(
+        result = process_document_page(
             image,
-            method=PAGE_LAYOUT_UI_METHODS.get(self.page_layout_var.get(), "none"),
-            dpi=dpi,
-            margin_mm=float(self.page_margin_mm_var.get()),
-            horizontal_alignment=self.page_align_x_var.get(),
-            vertical_alignment=self.page_align_y_var.get(),
+            PageProcessingRequest(
+                page_layout=PAGE_LAYOUT_UI_METHODS.get(self.page_layout_var.get(), "none"),
+                page_dpi=dpi,
+                page_margin_mm=float(self.page_margin_mm_var.get()),
+                horizontal_alignment=self.page_align_x_var.get(),
+                vertical_alignment=self.page_align_y_var.get(),
+            ),
         )
+        return result.image, result.diagnostics.layout
 
     def _entry_dewarp_model(self, entry) -> DewarpModel | None:
         if entry is None or entry.dewarp_control_points is None:
@@ -1244,30 +1316,55 @@ class UnifiedScanApp(ctk.CTk):
         )
 
     def _apply_dewarp(self, image: np.ndarray, *, entry=None):
-        method = DEWARP_UI_METHODS.get(self.dewarp_method_var.get(), DEWARP_METHOD_NONE)
-        return dewarp_document(
-            image,
-            method=method,
-            model=self._entry_dewarp_model(entry),
+        """Compatibility helper routed through the canonical controller."""
+        dewarp_method = DEWARP_UI_METHODS.get(
+            self.dewarp_method_var.get(),
+            DEWARP_METHOD_NONE,
         )
-
-    def _processing_request(self, *, entry=None, preview: bool) -> PageProcessingRequest:
-        return PageProcessingRequest(
-            dewarp_method=DEWARP_UI_METHODS.get(
-                self.dewarp_method_var.get(),
-                DEWARP_METHOD_NONE,
-            ),
+        request = PageProcessingRequest(
+            dewarp_method=dewarp_method,
             dewarp_model=self._entry_dewarp_model(entry),
+            dewarp_already_applied=self._entry_was_dewarped(entry, dewarp_method),
+        )
+        result = process_document_page(image, request)
+        return result.image, result.diagnostics.dewarp
+
+    def _processing_request(
+        self,
+        *,
+        entry=None,
+        preview: bool = False,
+        lighting_diagnostics: bool = False,
+    ) -> PageProcessingRequest:
+        self._last_processing_cache_hits = ()
+        dewarp_method = DEWARP_UI_METHODS.get(
+            self.dewarp_method_var.get(),
+            DEWARP_METHOD_NONE,
+        )
+        return PageProcessingRequest(
+            dewarp_method=dewarp_method,
+            dewarp_model=self._entry_dewarp_model(entry),
+            dewarp_already_applied=self._entry_was_dewarped(entry, dewarp_method),
             postprocess_name=self.postprocess_var.get(),
             preprocess_settings=self._current_preprocess_settings(),
             page_layout=PAGE_LAYOUT_UI_METHODS.get(self.page_layout_var.get(), "none"),
-            page_dpi=100 if preview else max(72, int(self.export_pdf_dpi_var.get())),
+            page_dpi=(100 if preview else max(72, int(self.export_pdf_dpi_var.get()))),
             page_margin_mm=float(self.page_margin_mm_var.get()),
             horizontal_alignment=self.page_align_x_var.get(),
             vertical_alignment=self.page_align_y_var.get(),
+            lighting_diagnostics=lighting_diagnostics,
             stage_cache=self.processing_cache,
         )
-        self._last_processing_cache_hits: tuple[str, ...] = ()
+
+    @staticmethod
+    def _entry_was_dewarped(entry, requested_method: str) -> bool:
+        # `none` means identity over the already-rectified original.  Marking it
+        # as "already applied" is invalid in the controller and unnecessary.
+        return bool(
+            requested_method != DEWARP_METHOD_NONE
+            and entry is not None
+            and entry.detected_backend in {DETECTOR_BACKEND_UVDOC, DETECTOR_BACKEND_PADDLEOCR_UVDOC}
+        )
 
     def _process_review_page(self, image: np.ndarray, *, entry=None, preview: bool):
         result = process_document_page(
@@ -1306,12 +1403,14 @@ class UnifiedScanApp(ctk.CTk):
         return draw_quad_overlay(raw_image, scaled)
 
     def _review_after_image(self, entry, before_image: np.ndarray) -> np.ndarray:
-        # After-preview always comes from the warped original (not the overlaid raw).
-        if self.lightweight_preview_var.get():
-            base = entry.preview_original_image
-        else:
-            base = entry.original_image
-        return self._process_review_page(base, entry=entry, preview=True).image
+        # Process the durable full-resolution source with the exact request used
+        # by export.  The UI downsizes only the finished pixels for display.
+        del before_image
+        return self._process_review_page(
+            entry.original_image,
+            entry=entry,
+            preview=False,
+        ).image
 
     def _show_in_preview(self, image: np.ndarray) -> None:
         photo = self._to_ctk_photo_for_label(image, self.preview_label)
@@ -1339,10 +1438,12 @@ class UnifiedScanApp(ctk.CTk):
         self,
         frame: np.ndarray,
         base_name: str,
+        *,
+        two_page_mode: bool,
     ) -> list[PageResult]:
         options = PipelineOptions(
             detect_document=True,
-            two_page_mode=bool(self.import_two_page_mode_var.get()),
+            two_page_mode=bool(two_page_mode),
             postprocess_name="None",
         )
         return process_loaded_items([(base_name, frame)], options=options)
@@ -1376,7 +1477,11 @@ class UnifiedScanApp(ctk.CTk):
             if frame is None:
                 raise RuntimeError("Could not capture an image from the camera.")
             timestamp = datetime.now().strftime(r"%Y%m%d_%H%M%S_%f")
-            results = self._process_capture_frame(frame, base_name=timestamp)
+            results = self._process_capture_frame(
+                frame,
+                base_name=timestamp,
+                two_page_mode=bool(self.import_two_page_mode_var.get()),
+            )
             self._ingest_page_results(results)
             self.refresh_page_list(keep_index=len(self.session) - 1)
             self.go_to_review_tab()
@@ -1392,6 +1497,7 @@ class UnifiedScanApp(ctk.CTk):
             shots = int(self.camera_shots_var.get())
             delay_sec = float(self.camera_delay_var.get())
             index = int(self.camera_index_var.get())
+            two_page_mode = bool(self.import_two_page_mode_var.get())
             timestamp = datetime.now().strftime(r"%Y%m%d_%H%M%S")
 
             self.stop_preview()
@@ -1422,6 +1528,7 @@ class UnifiedScanApp(ctk.CTk):
                     current_results = self._process_capture_frame(
                         frame,
                         base_name=f"{timestamp}_{idx:03d}",
+                        two_page_mode=two_page_mode,
                     )
                     results.extend(current_results)
                     emit(
@@ -1747,7 +1854,11 @@ class UnifiedScanApp(ctk.CTk):
             payload = ImageGrab.grabclipboard()
             image = clipboard_image_to_bgr(payload)
             if image is not None:
-                results = self._process_capture_frame(image, base_name="clipboard")
+                results = self._process_capture_frame(
+                    image,
+                    base_name="clipboard",
+                    two_page_mode=bool(self.import_two_page_mode_var.get()),
+                )
                 self._ingest_page_results(results)
                 self.refresh_page_list(keep_index=len(self.session) - 1)
                 self.go_to_review_tab()
@@ -1955,6 +2066,7 @@ class UnifiedScanApp(ctk.CTk):
             )
 
     def update_page_preview(self) -> None:
+        self._cancel_review_page_preview()
         selected = self.page_listbox.curselection()
         if len(selected) != 1:
             self._clear_preview_label(self.page_preview_before_label)
@@ -1972,8 +2084,17 @@ class UnifiedScanApp(ctk.CTk):
             return
 
         entry = self.session.entries[index]
-        before = self._review_before_image(entry)
         mode = self.preview_mode_var.get()
+        try:
+            before = self._review_before_image(entry)
+        except Exception as exc:
+            message = f"Preview failed: {exc}"
+            self._set_preview_message(self.page_preview_before_label, message)
+            self._set_preview_message(self.page_preview_after_label, message)
+            self.page_preview_before_photo = None
+            self.page_preview_after_photo = None
+            self._set_status(message)
+            return
 
         if mode in {"Original", "Compare"}:
             before_photo = self._to_ctk_photo_for_label(before, self.page_preview_before_label)
@@ -1983,29 +2104,126 @@ class UnifiedScanApp(ctk.CTk):
             self.page_preview_before_photo = None
 
         if mode in {"Processed", "Compare"}:
+            fast_preview = bool(self.lightweight_preview_var.get())
+            # Reading one committed generation on Tk is quick; all expensive
+            # processing runs after debounce on a cancellable worker.
             try:
-                after = self._review_after_image(entry, before)
-            except Exception:
-                after = (
-                    entry.preview_current_image
-                    if self.lightweight_preview_var.get()
-                    else entry.current_image
+                source = (
+                    entry.preview_original_image.copy()
+                    if fast_preview
+                    else entry.original_image.copy()
                 )
-            after_photo = self._to_ctk_photo_for_label(after, self.page_preview_after_label)
-            self.page_preview_after_label.configure(image=after_photo, text="")
-            self.page_preview_after_photo = after_photo
+                request = self._processing_request(entry=entry, preview=fast_preview)
+            except Exception as exc:
+                message = f"Preview failed: {exc}"
+                self._set_preview_message(self.page_preview_after_label, message)
+                self.page_preview_after_photo = None
+                self._set_status(message)
+                return
+            generation = self.review_preview_generation
+            cancel_event = self.review_preview_cancel_event
+            mode_label = "fast preview (approximate)" if fast_preview else "full-resolution"
+            self._set_preview_message(
+                self.page_preview_after_label,
+                f"Preparing {mode_label}...",
+            )
+            self.page_preview_after_photo = None
+            self.review_preview_job = self.after(
+                REVIEW_PREVIEW_DEBOUNCE_MS,
+                lambda: self._launch_review_page_preview(
+                    generation,
+                    source,
+                    request,
+                    cancel_event,
+                ),
+            )
         else:
             self.page_preview_after_photo = None
 
+    def _cancel_review_page_preview(self) -> None:
+        self.review_preview_generation = getattr(self, "review_preview_generation", 0) + 1
+        event = getattr(self, "review_preview_cancel_event", None)
+        if event is not None:
+            event.set()
+        self.review_preview_cancel_event = threading.Event()
+        job = getattr(self, "review_preview_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except (tk.TclError, ValueError):
+                pass
+            self.review_preview_job = None
+
+    def _launch_review_page_preview(
+        self,
+        generation: int,
+        source: np.ndarray,
+        request: PageProcessingRequest,
+        cancel_event: threading.Event,
+    ) -> None:
+        self.review_preview_job = None
+        if self._closing or generation != self.review_preview_generation:
+            return
+
+        def run() -> None:
+            try:
+                result = process_document_page(
+                    source,
+                    replace(request, cancel_cb=cancel_event.is_set),
+                )
+            except Exception as exc:
+                if cancel_event.is_set():
+                    return
+                self.job_queue.put(("review_preview", (generation, None, str(exc))))
+            else:
+                if not cancel_event.is_set():
+                    self.job_queue.put(("review_preview", (generation, result.image, None)))
+
+        self.review_preview_thread = threading.Thread(
+            target=run,
+            daemon=True,
+            name=f"uniscan-review-preview-{generation}",
+        )
+        self.review_preview_threads = [
+            thread for thread in self.review_preview_threads if thread.is_alive()
+        ]
+        self.review_preview_threads.append(self.review_preview_thread)
+        self.review_preview_thread.start()
+
+    def _handle_review_preview_result(
+        self,
+        generation: int,
+        image: np.ndarray | None,
+        error: str | None,
+    ) -> None:
+        if self._closing or generation != self.review_preview_generation:
+            return
+        self.review_preview_threads = [
+            thread for thread in self.review_preview_threads if thread.is_alive()
+        ]
+        if error is not None or image is None:
+            message = f"Preview failed: {error or 'no image was produced'}"
+            self._set_preview_message(self.page_preview_after_label, message)
+            self.page_preview_after_photo = None
+            self._set_status(message)
+            return
+        after_photo = self._to_ctk_photo_for_label(image, self.page_preview_after_label)
+        self.page_preview_after_label.configure(image=after_photo, text="")
+        self.page_preview_after_photo = after_photo
+
+    @staticmethod
+    def _set_preview_message(label: ctk.CTkLabel, message: str) -> None:
+        label._label.configure(image="")
+        label.configure(image=None, text=message)
+
     def _clear_preview_label(self, label: ctk.CTkLabel) -> None:
         # customtkinter 5.2 leaves the old Tcl image name behind for image=None.
-        label._label.configure(image="")
         message = (
             "Add files, paste, or drop pages here"
             if len(self.session) == 0
             else "Select one page to preview"
         )
-        label.configure(image=None, text=message)
+        self._set_preview_message(label, message)
 
     def _single_selected_index(self) -> int | None:
         selected = self.page_listbox.curselection()
@@ -2407,9 +2625,9 @@ class UnifiedScanApp(ctk.CTk):
             if warped is None or warped.size == 0:
                 raise RuntimeError("Perspective transform returned empty image.")
             entry.original_image = warped
-            entry.current_image = self._apply_postprocess(warped)
             entry.detected_contour = points.astype(np.float32).reshape(-1, 2).copy()
             entry.detected_backend = "manual"
+            self._reprocess_entry_from_original(entry)
 
         def _apply_current():
             try:
@@ -2517,8 +2735,14 @@ class UnifiedScanApp(ctk.CTk):
         if entry is None:
             self._set_status("Select exactly one page to analyze lighting.")
             return
-        dewarped, _diagnostics = self._apply_dewarp(entry.original_image, entry=entry)
-        lighting = analyze_lighting(dewarped)
+        request = self._processing_request(
+            entry=entry,
+            preview=False,
+            lighting_diagnostics=True,
+        )
+        lighting = process_document_page(entry.original_image, request).diagnostics.lighting
+        if lighting is None:
+            raise RuntimeError("Lighting diagnostics were not produced.")
         warnings = ", ".join(lighting.warnings) if lighting.warnings else "none"
         self.lighting_summary_var.set(
             f"Shadow {lighting.shadow_fraction:.1%} | glare {lighting.glare_fraction:.1%}\n"
@@ -2587,24 +2811,24 @@ class UnifiedScanApp(ctk.CTk):
                 # Replace existing entry with the left half, append the right half after it.
                 left_raw, right_raw = raw_halves
                 left_warped, right_warped = warped_halves
-                left_current = self._apply_postprocess(left_warped)
                 self.session.replace_entry_image(
                     entry.entry_id,
                     raw_image=left_raw,
                     original_image=left_warped,
-                    current_image=left_current,
+                    current_image=left_warped,
                     name=f"{entry.name} [L]",
                     contour=None,
-                    backend=entry.detected_backend,
+                    backend=None,
                 )
                 right_entry = self.session.add_image_with_contour(
                     name=f"{entry.name} [R]",
                     raw_image=right_raw,
                     warped_image=right_warped,
                     contour=None,
-                    backend=entry.detected_backend,
+                    backend=None,
                 )
-                right_entry.current_image = self._apply_postprocess(right_warped)
+                self._reprocess_entry_from_original(entry)
+                self._reprocess_entry_from_original(right_entry)
                 # New entry is at the end of the list; move it to right after the original.
                 from_index = self.session.entries.index(right_entry)
                 target_index = idx + 1
@@ -2638,10 +2862,13 @@ class UnifiedScanApp(ctk.CTk):
         )
         for idx in indices:
             entry = self.session.entries[idx]
-            deskewed, angle = deskew_document(entry.original_image, method=method)
-            entry.original_image = deskewed
+            stage_result = process_document_page(
+                entry.original_image,
+                PageProcessingRequest(deskew_method=method),
+            )
+            entry.original_image = stage_result.image
             self._reprocess_entry_from_original(entry)
-            angles.append(angle)
+            angles.append(stage_result.diagnostics.deskew_angle_degrees)
 
         self.refresh_page_list(keep_index=indices[-1])
         mean_angle = sum(angles) / max(1, len(angles))
@@ -2656,10 +2883,12 @@ class UnifiedScanApp(ctk.CTk):
         diagnostics = []
         for idx in indices:
             entry = self.session.entries[idx]
-            oriented, item = orient_document(
+            stage_result = process_document_page(
                 entry.original_image,
-                method=ORIENTATION_METHOD_AUTO,
+                PageProcessingRequest(orientation_method=ORIENTATION_METHOD_AUTO),
             )
+            oriented = stage_result.image
+            item = stage_result.diagnostics.orientation
             if item.applied:
                 entry.original_image = oriented
                 self._reprocess_entry_from_original(entry)
@@ -2840,7 +3069,13 @@ class UnifiedScanApp(ctk.CTk):
                 )
 
         def render_corrected() -> None:
-            corrected = apply_dewarp_model(display_source, current_model())
+            corrected = process_document_page(
+                display_source,
+                PageProcessingRequest(
+                    dewarp_method=DEWARP_METHOD_TEXTLINE,
+                    dewarp_model=current_model(),
+                ),
+            ).image
             state["corrected_photo"] = to_photo(corrected)
             right_canvas.delete("all")
             right_canvas.create_image(
@@ -3031,7 +3266,7 @@ class UnifiedScanApp(ctk.CTk):
             to=0.8,
             number_of_steps=15,
             variable=self.binarization_k_var,
-            command=self._on_review_processing_slider_change,
+            command=self._on_binarization_k_change,
         ).grid(row=6, column=1, sticky="ew", padx=8, pady=4)
 
         ctk.CTkLabel(body, text="Page margin (mm)").grid(
@@ -3142,6 +3377,63 @@ class UnifiedScanApp(ctk.CTk):
             entries = self.session.entries
         return entries
 
+    def _snapshot_entries_for_export(self, entries):
+        """Freeze each page's committed full-resolution result for export."""
+        snapshot_dir = tempfile.TemporaryDirectory(prefix="uniscan_export_snapshot_")
+        snapshots: list[_ExportPageSnapshot] = []
+        try:
+            root = Path(snapshot_dir.name)
+            for index, entry in enumerate(entries, start=1):
+                destination = root / f"{index:05d}.png"
+                entry.store.snapshot_image(entry.current_path, destination)
+                snapshots.append(
+                    _ExportPageSnapshot(
+                        name=str(entry.name),
+                        current_path=destination,
+                    )
+                )
+        except Exception:
+            snapshot_dir.cleanup()
+            raise
+        return snapshot_dir, snapshots
+
+    @staticmethod
+    def _render_export_paths(
+        snapshots: list[_ExportPageSnapshot],
+        *,
+        stage_dir: Path,
+        emit,
+        is_cancelled,
+        job_name: str,
+    ) -> list[Path]:
+        """Validate and stage committed full-resolution pixels for export."""
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        paths: list[Path] = []
+        total = len(snapshots)
+        for index, snapshot in enumerate(snapshots, start=1):
+            if is_cancelled():
+                raise RuntimeError("Cancelled by user.")
+            emit(
+                stage=f"{job_name} staging",
+                current=f"{index}/{total}: {snapshot.name}",
+                progress=int(((index - 1) / max(1, total)) * 75),
+            )
+            path = stage_dir / f"{index:05d}.png"
+            try:
+                encoded = np.fromfile(str(snapshot.current_path), dtype=np.uint8)
+            except OSError as exc:
+                raise RuntimeError(f"Cannot read committed page: {snapshot.name}") from exc
+            if encoded.size == 0 or cv2.imdecode(encoded, cv2.IMREAD_UNCHANGED) is None:
+                raise RuntimeError(f"Cannot read committed page: {snapshot.name}")
+            try:
+                shutil.copy2(snapshot.current_path, path)
+            except OSError as exc:
+                raise RuntimeError(f"Cannot stage committed page: {snapshot.name}") from exc
+            paths.append(path)
+        if is_cancelled():
+            raise RuntimeError("Cancelled by user.")
+        return paths
+
     def export_to_pdf(self) -> None:
         try:
             entries = self._entries_for_export()
@@ -3161,18 +3453,40 @@ class UnifiedScanApp(ctk.CTk):
             dpi = int(self.export_pdf_dpi_var.get())
             if dpi < 72:
                 raise RuntimeError("PDF DPI must be >= 72.")
-            image_paths = [entry.current_path for entry in entries]
+            entries = list(entries)
+            snapshot_dir, snapshots = self._snapshot_entries_for_export(entries)
 
-            def worker(emit, _is_cancelled):
-                emit(stage="Export PDF", current=f"Writing {len(image_paths)} page(s)", progress=10)
-                out_path = export_image_paths_as_pdf(image_paths, out_pdf=Path(path_raw), dpi=dpi)
-                emit(stage="Export PDF", current="Finalizing", progress=100)
-                return out_path
+            def worker(emit, is_cancelled):
+                try:
+                    with tempfile.TemporaryDirectory(prefix="uniscan_gui_export_") as raw_stage:
+                        image_paths = self._render_export_paths(
+                            snapshots,
+                            stage_dir=Path(raw_stage),
+                            emit=emit,
+                            is_cancelled=is_cancelled,
+                            job_name="Export PDF",
+                        )
+                        emit(
+                            stage="Export PDF",
+                            current=f"Writing {len(image_paths)} page(s)",
+                            progress=80,
+                        )
+                        out_path = export_image_paths_as_pdf(
+                            image_paths,
+                            out_pdf=Path(path_raw),
+                            dpi=dpi,
+                            cancel_cb=is_cancelled,
+                        )
+                        emit(stage="Export PDF", current="Finalizing", progress=100)
+                        return out_path
+                finally:
+                    snapshot_dir.cleanup()
 
             def on_done(out_path):
-                self._set_status(f"Exported {len(image_paths)} page(s) to PDF: {out_path}")
+                self._set_status(f"Exported {len(entries)} page(s) to PDF: {out_path}")
 
-            self._start_background_job("Export PDF", worker, on_done)
+            if not self._start_background_job("Export PDF", worker, on_done):
+                snapshot_dir.cleanup()
         except Exception as exc:
             messagebox.showerror("Export PDF Error", str(exc))
             self._set_status("PDF export failed")
@@ -3191,25 +3505,41 @@ class UnifiedScanApp(ctk.CTk):
                 self.export_dir_var.set(chosen)
 
             fmt = self.export_format_var.get()
-            image_paths = [entry.current_path for entry in entries]
+            entries = list(entries)
+            snapshot_dir, snapshots = self._snapshot_entries_for_export(entries)
 
-            def worker(emit, _is_cancelled):
-                emit(
-                    stage="Export files", current=f"Writing {len(image_paths)} page(s)", progress=10
-                )
-                out_paths = export_image_paths_as_files(
-                    image_paths,
-                    output_dir=Path(path_raw),
-                    ext=fmt,
-                    base_name="page",
-                )
-                emit(stage="Export files", current="Finalizing", progress=100)
-                return out_paths
+            def worker(emit, is_cancelled):
+                try:
+                    with tempfile.TemporaryDirectory(prefix="uniscan_gui_export_") as raw_stage:
+                        image_paths = self._render_export_paths(
+                            snapshots,
+                            stage_dir=Path(raw_stage),
+                            emit=emit,
+                            is_cancelled=is_cancelled,
+                            job_name="Export files",
+                        )
+                        emit(
+                            stage="Export files",
+                            current=f"Writing {len(image_paths)} page(s)",
+                            progress=80,
+                        )
+                        out_paths = export_image_paths_as_files(
+                            image_paths,
+                            output_dir=Path(path_raw),
+                            ext=fmt,
+                            base_name="page",
+                            cancel_cb=is_cancelled,
+                        )
+                        emit(stage="Export files", current="Finalizing", progress=100)
+                        return out_paths
+                finally:
+                    snapshot_dir.cleanup()
 
             def on_done(out_paths):
                 self._set_status(f"Exported {len(out_paths)} file(s) to: {Path(path_raw)}")
 
-            self._start_background_job("Export files", worker, on_done)
+            if not self._start_background_job("Export files", worker, on_done):
+                snapshot_dir.cleanup()
         except Exception as exc:
             messagebox.showerror("Export Files Error", str(exc))
             self._set_status("Files export failed")

@@ -33,21 +33,21 @@ UniScan закрывает путь `камера/изображения/PDF →
 | Область | ScanTailor Advanced | UniScan | Вывод |
 |---|---|---|---|
 | Получение страниц | Импорт сканов; захват и сборка PDF вне scope | Камера, файлы, папки, clipboard, drag-and-drop, многостраничный PDF | UniScan функциональнее |
-| Поиск документа | Не является camera document scanner | ONNX Office Lens, OpenCV fallback, optional UVDoc, ручные углы | UniScan функциональнее для фотографий |
+| Поиск документа | Не является camera document scanner | OpenCV default, optional BYOM Office Lens, ручные углы | UniScan функциональнее для фотографий |
 | Развороты | Auto/manual cutters, типы страниц, адаптация разреза к разным размерам, fill offcut | Автопоиск корешка с midpoint fallback и ручные инструменты | ScanTailor точнее и лучше управляется |
 | Наклон | Отдельная стадия, ручной/автоматический режим, deviation и сортировка проблемных страниц | Otsu + `minAreaRect`, без оценки доверия и статистики по документу | ScanTailor зрелее; алгоритм UniScan уязвим к рамкам и крупным изображениям |
 | Кривизна книги | Автоматическая и ручная цилиндрическая модель, редактируемые верхняя/нижняя линии и depth | Offline text-line dewarp, optional UVDoc и сохранённые control points | Automatic-first подход сохранён, но пользователь может исправить ошибку модели |
-| Содержимое и поля | Content box, page box, auto/manual/original margins, выравнивание, guides, физические единицы | Отсутствуют как отдельная стадия | Крупный функциональный пробел UniScan |
-| Ч/б обработка | Otsu, Sauvola, Wolf, illumination normalization, Savitzky-Golay и morphology smoothing | Fixed adaptive Gaussian, ручной global threshold в preset, optional illumination correction | ScanTailor дает существенно больше контроля |
-| Шум | Регулируемый despeckle и отдельная визуализация удаленных точек | NLMeans denoise без семантики размера компонента и preview удалений | ScanTailor удобнее для архивного текста |
+| Содержимое и поля | Content box, page box, auto/manual/original margins, выравнивание, guides, физические единицы | Content-box detection, A4/Letter layout, поля и выравнивание; без guides/zones | ScanTailor точнее для сложных проектов |
+| Ч/б обработка | Otsu, Sauvola, Wolf, illumination normalization, Savitzky-Golay и morphology smoothing | Otsu/Sauvola/Wolf, selectable parameters, optional illumination correction | ScanTailor всё ещё богаче для архивной доводки |
+| Шум | Регулируемый despeckle и отдельная визуализация удаленных точек | Safe component despeckle + NLMeans, без отдельного removed-speck preview | ScanTailor удобнее для ручного контроля |
 | Смешанные страницы | B/W, color/grayscale, mixed; picture/fill zones; foreground/background split | Общий стиль применяется ко всей странице | Крупный пробел, но не P0 для обычных camera scans |
 | Цвет | Color segmentation, posterization, отдельные параметры RGB | Контраст, яркость, grayscale, sharpen | ScanTailor богаче для DjVu/архивной подготовки |
 | Пакетные настройки | Параметры на страницу и применение к выбранным страницам/диапазонам | Apply to all или selected в части GUI-команд | ScanTailor точнее |
 | Проекты | Явное чтение/запись проекта со всеми стадиями, recent projects, default profiles | Crash-safe autosave/restore одной текущей сессии | Нужны New/Open/Save As и профили |
 | Миниатюры | Многоколоночный undockable view, выбор качества/размера, отдельные caches, problem marks | Текстовый список; thumbnail уже хранится на диске, но не показывается | Можно улучшить без новых вычислений |
-| Производительность | `QThreadPool` с регулируемым числом потоков, очередь отменяемых задач, stage caches | Один background job; страницы внутри job обрабатываются последовательно | ScanTailor лучше масштабируется по страницам |
+| Производительность | `QThreadPool` с регулируемым числом потоков, очередь отменяемых задач, stage caches | Bounded persistent stage cache, но один background job и последовательные страницы | ScanTailor лучше масштабируется по страницам |
 | Экспорт | TIFF с выбором compression, отдельные foreground/background outputs; PDF вне scope | Atomic PDF и набор изображений PNG/JPEG/WebP/TIFF | UniScan удобнее как конечный PDF pipeline |
-| Проверяемость | C++ unit tests, но upstream заморожен на Qt 5 и commit 2020 года | CI, 111 тестов, coverage gates, quality corpus, runtime diagnostics, portable build | UniScan современнее как поддерживаемый продукт |
+| Проверяемость | C++ unit tests, но upstream заморожен на Qt 5 и commit 2020 года | CI, growing regression suite, coverage gates, quality corpora, runtime diagnostics, portable build | UniScan современнее как поддерживаемый продукт |
 
 ## Что в ScanTailor сделано потенциально быстрее
 

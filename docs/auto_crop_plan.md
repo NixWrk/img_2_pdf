@@ -1,7 +1,7 @@
 # Auto Crop Upgrade Plan
 
-> Historical design note. The current production cascade is documented in `README.md` and uses
-> bundled Office Lens ONNX first, optional PaddleOCR UVDoc second, and OpenCV hybrid as fallback.
+> Historical design note. The current production policy is documented in `README.md`: OpenCV
+> hybrid performs boundary detection, UVDoc is an optional dewarp stage, and Office Lens is BYOM.
 
 ## Goal
 
@@ -14,8 +14,7 @@ Current external scanner logic already integrated in the project. Keep it as one
 
 2. OpenCV quad detector
 Classical CV pipeline: grayscale, blur, threshold/edges, morphology, contour ranking,
-quadrilateral fitting, perspective warp. This remains the lowest-friction offline fallback; it
-is no longer the production default.
+quadrilateral fitting, perspective warp. This is now the redistributable production default.
 
 3. PaddleOCR UVDoc
 Model-based image rectification is available in PaddleOCR as `TextImageUnwarping (UVDoc)`. This is promising for hard perspective cases, but adds model download/runtime weight and should be an optional test branch, not the first-line dependency.

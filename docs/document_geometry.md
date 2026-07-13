@@ -19,13 +19,14 @@ boundary detection remain outside it because they can produce zero, one, or two 
 
 The production CLI accepts these policies through `--backend`:
 
-- `auto`: bundled Office Lens ONNX, optional UVDoc, then the OpenCV hybrid fallback;
-- `office_lens_onnx`: model mask plus OpenCV quad refinement;
+- `auto`: offline OpenCV hybrid detector;
+- `office_lens_onnx`: optional BYOM model mask plus OpenCV quad refinement;
 - `cv_hybrid`: compares contour, Hough-line, and minimum-rectangle candidates;
 - `opencv_quad`, `opencv_hough`, `opencv_minrect`: explicit classical baselines;
-- `paddleocr_uvdoc`: optional holistic rectifier.
 
-Keeping the classical baselines selectable makes quality and latency comparisons reproducible.
+PaddleOCR UVDoc is deliberately absent from boundary policies: it is a holistic rectifier and
+belongs to the independent dewarp stage. Keeping the classical baselines selectable makes quality
+and latency comparisons reproducible.
 
 ## Orientation
 
@@ -95,8 +96,9 @@ by the offline method, but requires the large optional runtime and model cache.
 The GUI currently offers the offline method so preview remains local and predictable. Use
 Workspace → Processing → Remove page waves or Page tools → Auto remove waves. If the automatic
 curve needs correction, Page tools → Adjust dewarp points opens the source model and a live
-corrected preview. The points are normalized, saved with the page, and replayed identically at
-preview and export resolution.
+corrected preview. The points are normalized and saved with the page; `Apply processing` commits
+the full-resolution result, and export publishes that committed generation without replaying
+different global settings.
 
 ## Automation and source policy
 

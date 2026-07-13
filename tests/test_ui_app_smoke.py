@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,11 +15,30 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _pump_until(app, predicate, *, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            app.update()
+        except Exception:
+            if predicate():
+                return
+            raise
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError("Timed out waiting for GUI background work.")
+
+
 def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("UNISCAN_STATE_DIR", str(tmp_path / "state"))
-    from uniscan.ui.app import UnifiedScanApp
+    from uniscan.ui import app as app_module
 
-    app = UnifiedScanApp()
+    app = app_module.UnifiedScanApp()
+    preview_release = threading.Event()
+    close_release = threading.Event()
+    close_started = False
+    close_completed = False
     try:
         app.withdraw()
         app.update()
@@ -95,22 +116,13 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         ]
         assert len(dewarp_editors) == 1
         dewarp_editors[0].destroy()
-        preview_calls: list[str] = []
-        original_preview = app._review_after_image
-
-        def tracked_preview(entry, before):
-            preview_calls.append(entry.name)
-            return original_preview(entry, before)
-
-        monkeypatch.setattr(app, "_review_after_image", tracked_preview)
         app.preview_mode_var.set("Original")
         app._on_preview_mode_change()
-        assert preview_calls == []
         assert app.page_preview_before_frame.winfo_manager() == "grid"
         assert app.page_preview_after_frame.winfo_manager() == ""
         app.preview_mode_var.set("Compare")
         app._on_preview_mode_change()
-        assert preview_calls == ["second.png"]
+        _pump_until(app, lambda: app.page_preview_after_photo is not None)
         assert app.page_preview_before_frame.winfo_manager() == "grid"
         assert app.page_preview_after_frame.winfo_manager() == "grid"
         app.move_selected_up()
@@ -125,7 +137,68 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         app.delete_selected_pages()
         assert len(app.session) == 0
         assert app.page_count_var.get() == "0 pages"
-    finally:
-        app._on_close()
 
-    assert not app.autosave_path.exists()
+        started = threading.Event()
+        seen_shapes: list[tuple[int, ...]] = []
+        real_process = app_module.process_document_page
+
+        def slow_process(image, request):
+            seen_shapes.append(image.shape)
+            started.set()
+            preview_release.wait(timeout=5)
+            return real_process(image, request)
+
+        wide_source = np.full((120, 2400, 3), 180, dtype=np.uint8)
+        wide_entry = app.session.add_image(name="wide", image=wide_source)
+        app.refresh_page_list(keep_index=0)
+        app._cancel_review_page_preview()
+        app.page_preview_after_photo = None
+        monkeypatch.setattr(app_module, "process_document_page", slow_process)
+
+        before = time.monotonic()
+        app.update_page_preview()
+        elapsed = time.monotonic() - before
+
+        assert elapsed < 0.15
+        assert "Preparing fast preview" in app.page_preview_after_label.cget("text")
+        _pump_until(app, started.is_set)
+        assert seen_shapes == [wide_entry.preview_original_image.shape]
+        assert seen_shapes[0][1] < wide_source.shape[1]
+        preview_release.set()
+        _pump_until(
+            app,
+            lambda: (
+                app.page_preview_after_photo is not None
+                and not any(thread.is_alive() for thread in app.review_preview_threads)
+            ),
+        )
+        monkeypatch.setattr(app_module, "process_document_page", real_process)
+
+        app.select_all_pages()
+        app.delete_selected_pages()
+        app.session.add_image(
+            name="close-page",
+            image=np.full((20, 30, 3), 180, dtype=np.uint8),
+        )
+        worker = threading.Thread(target=close_release.wait, daemon=True)
+        worker.start()
+        app.job_thread = worker
+
+        app._on_close()
+        close_started = True
+        assert app._close_wait_job is not None
+        assert app.session.store.session_dir.exists()
+        assert not app.autosave_path.exists()
+
+        close_release.set()
+        _pump_until(app, lambda: app._close_wait_job is None)
+        close_completed = True
+        assert app.autosave_path.exists()
+    finally:
+        preview_release.set()
+        close_release.set()
+        if not close_started:
+            app._on_close()
+            close_started = True
+        if not close_completed:
+            _pump_until(app, lambda: app._close_wait_job is None)

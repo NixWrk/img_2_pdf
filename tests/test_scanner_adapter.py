@@ -55,31 +55,63 @@ def test_scanner_adapter_disabled_returns_original() -> None:
     assert np.array_equal(result.warped, image)
 
 
-def test_scanner_adapter_defaults_to_office_lens_onnx(monkeypatch) -> None:
+def test_scanner_adapter_defaults_to_redistributable_cv_hybrid(monkeypatch) -> None:
     image = _perspective_doc()
     expected = np.full((300, 240, 3), 195, dtype=np.uint8)
     quad = np.array([[10, 20], [230, 20], [230, 280], [10, 280]], dtype=np.float32)
 
+    monkeypatch.setattr(
+        "uniscan.core.scanner_adapter._opencv_hybrid_document_detector",
+        lambda _image: SimpleNamespace(
+            warped=expected,
+            contour=quad,
+            backend=DETECTOR_BACKEND_CV_HYBRID,
+            detected=True,
+            raw_result=None,
+        ),
+    )
+    monkeypatch.setattr(
+        "uniscan.core.scanner_adapter._load_office_lens_model",
+        lambda: (_ for _ in ()).throw(AssertionError("Office Lens must be opt-in")),
+    )
+
+    result = scan_with_document_detector(image, enabled=True)
+
+    assert result.backend == DETECTOR_BACKEND_CV_HYBRID
+    assert result.detected is True
+    assert result.contour is not None
+    assert np.array_equal(result.warped, expected)
+
+
+def test_scanner_adapter_office_lens_detection_does_not_run_classifier(monkeypatch) -> None:
+    image = _perspective_doc()
+    quad = np.array([[10, 20], [230, 20], [230, 280], [10, 280]], dtype=np.float32)
+
     class _FakeRunner:
-        def process_image(self, image_rgb, mode="auto"):
-            assert mode == "auto"
+        def predict_quad_mask(self, image_rgb):
             assert image_rgb.shape == image.shape
-            return SimpleNamespace(
-                warped=expected,
-                mask_result=SimpleNamespace(quad=quad),
-            )
+            return SimpleNamespace(quad=quad)
+
+        def classify(self, _image_rgb):
+            raise AssertionError("boundary detection must not run classification")
+
+        def process_image(self, *_args, **_kwargs):
+            raise AssertionError("boundary detection must not run enhancement")
 
     monkeypatch.setattr(
         "uniscan.core.scanner_adapter._load_office_lens_model",
         lambda: _FakeRunner(),
     )
 
-    result = scan_with_document_detector(image, enabled=True)
+    result = scan_with_document_detector(
+        image,
+        enabled=True,
+        backends=(DETECTOR_BACKEND_OFFICE_LENS_ONNX,),
+    )
 
     assert result.backend == DETECTOR_BACKEND_OFFICE_LENS_ONNX
     assert result.detected is True
-    assert result.contour is not None
-    assert np.array_equal(result.warped, expected)
+    assert result.warped is not None
 
 
 def test_scanner_adapter_gracefully_returns_no_contour() -> None:
@@ -114,6 +146,7 @@ def test_scanner_adapter_supports_uvdoc_backend_without_contour(monkeypatch) -> 
         image,
         enabled=True,
         backends=(DETECTOR_BACKEND_UVDOC,),
+        allow_dewarp_backends=True,
     )
 
     assert result.backend == DETECTOR_BACKEND_UVDOC
@@ -184,9 +217,34 @@ def test_scanner_adapter_supports_paddleocr_uvdoc_alias(monkeypatch) -> None:
         image,
         enabled=True,
         backends=(DETECTOR_BACKEND_PADDLEOCR_UVDOC,),
+        allow_dewarp_backends=True,
     )
 
     assert result.backend == DETECTOR_BACKEND_PADDLEOCR_UVDOC
     assert result.detected is True
     assert result.contour is None
     assert np.array_equal(result.warped, expected)
+
+
+def test_scanner_adapter_skips_uvdoc_during_boundary_detection(monkeypatch) -> None:
+    image = _perspective_doc()
+    model_calls = 0
+
+    def unexpected_model(*_args, **_kwargs):
+        nonlocal model_calls
+        model_calls += 1
+        raise AssertionError("UVDoc must not run as a boundary detector")
+
+    monkeypatch.setattr("uniscan.core.scanner_adapter._load_uvdoc_model", unexpected_model)
+
+    result = scan_with_document_detector(
+        image,
+        enabled=True,
+        backends=(DETECTOR_BACKEND_PADDLEOCR_UVDOC,),
+    )
+
+    assert result.detected is False
+    assert result.backend is None
+    assert np.array_equal(result.warped, image)
+    assert model_calls == 0
+    assert "use it as a dewarp method" in result.raw_result["errors"][0]

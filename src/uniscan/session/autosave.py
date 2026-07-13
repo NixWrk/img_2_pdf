@@ -42,5 +42,7 @@ def load_or_create_session(manifest_path: Path | None = None) -> tuple[CaptureSe
 
 def discard_autosave(session: CaptureSession, manifest_path: Path | None = None) -> None:
     manifest = Path(manifest_path) if manifest_path is not None else default_autosave_path()
-    session.close(preserve=False)
+    # Remove the durable reference first.  A crash afterwards can leave only
+    # harmless orphaned assets, never a manifest pointing at deleted files.
     manifest.unlink(missing_ok=True)
+    session.close(preserve=False)

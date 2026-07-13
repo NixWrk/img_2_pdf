@@ -1,10 +1,15 @@
 # Auto Crop Benchmark Sketch Plan
 
+> Historical benchmark plan. Current production policy and acceptance criteria live in
+> [`roadmap.md`](roadmap.md) and [`document_geometry.md`](document_geometry.md). Historical backend
+> decisions are called out explicitly below; they are not current instructions.
+
 ## Goal
 
 Keep one stable crop backend for production use and preserve the benchmark flow as a regression check.
 
-Historical result from the UVDoc evaluation (superseded by the bundled Office Lens backend):
+Historical result from the UVDoc evaluation (later superseded first by bundled Office Lens
+weights, then by the current redistributable OpenCV default):
 
 1. `paddleocr_uvdoc` is the only backend that stayed reliable on the full photo series.
 2. The OpenCV variants are useful as references, but they are not the active production path.
@@ -12,8 +17,8 @@ Historical result from the UVDoc evaluation (superseded by the bundled Office Le
 
 Input: one folder with source photos.
 
-Current output: one production PDF from `office_lens_onnx`, plus optional reference PDFs when
-explicitly requested.
+Current implementation: one `cv_hybrid` PDF by default, plus optional reference PDFs for
+explicitly requested backends. `office_lens_onnx` is available only as an explicit BYOM backend.
 
 ## Scope
 
@@ -22,7 +27,7 @@ This is a validation sketch, not the final production batch pipeline.
 The sketch should:
 
 1. Keep folder order exactly as listed by the existing natural-sort loader.
-2. Use bundled `office_lens_onnx` as the default active backend.
+2. Use redistributable `cv_hybrid` as the default active backend.
 3. Allow explicit opt-in runs for reference backends during diagnostics.
 4. Export one merged PDF per selected backend.
 5. Write clear backend-specific output names.
@@ -43,12 +48,13 @@ Add a CLI command that takes an input folder and output directory, processes the
 Add deterministic tests for backend selection, output naming, processing order, and PDF export orchestration without depending on live model downloads.
 
 5. `chore(config): select the production default crop backend`
-This historical step originally selected UVDoc; the later Office Lens integration replaced it
-with the bundled offline `office_lens_onnx` backend.
+This historical step originally selected UVDoc and was later replaced by bundled Office Lens.
+The current implementation removed those weights, restored `cv_hybrid` as the default, and keeps
+Office Lens as an explicit BYOM adapter.
 
 ## Acceptance Criteria
 
-1. `uniscan benchmark-crop --input <folder> --output <dir>` produces an `office_lens_onnx` PDF by default.
+1. `uniscan benchmark-crop --input <folder> --output <dir>` produces a `cv_hybrid` PDF by default.
 2. The output order matches the folder order from the source directory.
 3. Missing optional backends do not break explicit diagnostic runs.
 4. Tests validate the orchestration layer and backend adapter contract.

@@ -7,7 +7,7 @@ Record Windows version, artifact SHA-256, camera model, and operator in the rele
 - [ ] Extract the ZIP into a new directory on a clean Windows 11 x64 machine.
 - [ ] Run `uniscan.exe doctor` and confirm all non-camera checks are `ok`.
 - [ ] Run `uniscan.exe doctor --camera --camera-index 0` with the target camera connected.
-- [ ] Start `uniscan.exe`; verify Import, Scan, Review, and Export tabs render.
+- [ ] Start `uniscan.exe`; verify Workspace, Camera, Import options, and Export options render.
 
 ## Camera and recovery
 

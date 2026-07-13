@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Callable
@@ -214,22 +216,52 @@ def write_pages_to_dir(
     return output_paths
 
 
-def build_pdf_from_images(image_paths: list[Path], out_pdf: Path, dpi: int) -> None:
-    """Build a merged PDF directly into its output stream."""
+def build_pdf_from_images(
+    image_paths: list[Path],
+    out_pdf: Path,
+    dpi: int,
+    *,
+    cancel_cb: CancelCb | None = None,
+) -> None:
+    """Build a merged PDF at an exact image DPI and publish it atomically."""
+    if not image_paths:
+        raise ValueError("No image paths to export.")
+    dpi = int(dpi)
+    if dpi <= 0:
+        raise ValueError("PDF DPI must be positive.")
+
+    out_pdf = Path(out_pdf)
+    if out_pdf.exists() and out_pdf.is_dir():
+        raise ValueError(f"PDF output path is a directory: {out_pdf}")
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
-    with out_pdf.open("wb") as file:
-        try:
-            img2pdf.convert(
-                [str(p) for p in image_paths],
-                dpi=dpi,
-                outputstream=file,
-            )
-        except TypeError:
-            file.seek(0)
-            file.truncate()
+    descriptor, raw_staged_path = tempfile.mkstemp(
+        prefix=f".{out_pdf.name}.stage-",
+        suffix=out_pdf.suffix or ".pdf",
+        dir=out_pdf.parent,
+    )
+    staged_path = Path(raw_staged_path)
+    try:
+        if cancel_cb is not None and cancel_cb():
+            raise RuntimeError("Cancelled by user.")
+        with os.fdopen(descriptor, "wb") as file:
             layout = img2pdf.get_fixed_dpi_layout_fun((dpi, dpi))
             img2pdf.convert(
                 [str(p) for p in image_paths],
                 layout_fun=layout,
                 outputstream=file,
             )
+            file.flush()
+            os.fsync(file.fileno())
+        if cancel_cb is not None and cancel_cb():
+            raise RuntimeError("Cancelled by user.")
+        os.replace(staged_path, out_pdf)
+    except Exception:
+        # ``os.fdopen`` owns the descriptor after it succeeds.  If it failed,
+        # closing an already-closed descriptor is harmlessly avoided here.
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        if staged_path.exists():
+            staged_path.unlink()
+        raise

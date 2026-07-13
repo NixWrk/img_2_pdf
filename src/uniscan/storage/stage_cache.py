@@ -85,7 +85,11 @@ class ProcessingStageCache:
                 data = np.fromfile(str(image_path), dtype=np.uint8)
                 image = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-                if image is None or metadata.get("schemaVersion") != self.SCHEMA_VERSION:
+                if (
+                    image is None
+                    or not isinstance(metadata, dict)
+                    or metadata.get("schemaVersion") != self.SCHEMA_VERSION
+                ):
                     raise ValueError("invalid cache entry")
                 payload = metadata.get("metadata")
                 if not isinstance(payload, dict):

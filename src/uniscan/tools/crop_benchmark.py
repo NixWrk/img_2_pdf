@@ -9,7 +9,9 @@ from typing import Sequence
 
 from uniscan.core.scanner_adapter import (
     DETECTOR_BACKEND_CAMSCAN,
-    DETECTOR_BACKEND_OFFICE_LENS_ONNX,
+    DETECTOR_BACKEND_CV_HYBRID,
+    DETECTOR_BACKEND_PADDLEOCR_UVDOC,
+    DETECTOR_BACKEND_UVDOC,
     ScanAdapterError,
     probe_detector_backend,
     scan_with_document_detector,
@@ -17,7 +19,7 @@ from uniscan.core.scanner_adapter import (
 from uniscan.export.exporters import export_image_paths_as_pdf
 from uniscan.io.loaders import imwrite_unicode, list_supported_in_folder, load_input_items
 
-DEFAULT_BENCHMARK_BACKENDS = (DETECTOR_BACKEND_OFFICE_LENS_ONNX,)
+DEFAULT_BENCHMARK_BACKENDS = (DETECTOR_BACKEND_CV_HYBRID,)
 
 
 @dataclass(slots=True)
@@ -102,6 +104,8 @@ def _run_single_backend(
                 scanner_root=scanner_root,
                 backends=(backend,),
                 uvdoc_cache_home=uvdoc_cache_home,
+                allow_dewarp_backends=backend
+                in (DETECTOR_BACKEND_UVDOC, DETECTOR_BACKEND_PADDLEOCR_UVDOC),
             )
             working = scan_output.warped if scan_output.warped is not None else image
             if scan_output.detected:

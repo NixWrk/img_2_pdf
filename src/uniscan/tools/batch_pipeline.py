@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
 import uuid
 from collections.abc import Callable, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -28,7 +30,6 @@ from uniscan.core.cleanup import (
 from uniscan.core.dewarp import (
     DEWARP_METHOD_AUTO,
     DEWARP_METHOD_CHOICES,
-    DEWARP_METHOD_PADDLEOCR_UVDOC,
 )
 from uniscan.core.preprocess import (
     DESKEW_METHOD_CHOICES,
@@ -44,9 +45,9 @@ from uniscan.core.scanner_adapter import (
     DETECTOR_BACKEND_OPENCV,
     DETECTOR_BACKEND_OPENCV_HOUGH,
     DETECTOR_BACKEND_OPENCV_MINRECT,
-    DETECTOR_BACKEND_PADDLEOCR_UVDOC,
 )
 from uniscan.export import export_image_paths_as_files, export_image_paths_as_pdf
+from uniscan.export.exporters import _directory_export_lock, _directory_export_lock_path
 from uniscan.io import (
     IMG_EXTS,
     PDF_EXTS,
@@ -58,6 +59,7 @@ from uniscan.storage import ProcessingStageCache
 
 
 LENS_MODE_CHOICES = ("none", "document", "whiteboard", "photo", "b/w")
+IMAGE_FORMAT_CHOICES = ("png", "jpg", "jpeg", "webp", "tif", "tiff")
 DETECTOR_POLICY_CHOICES = (
     "auto",
     "office_lens_onnx",
@@ -65,7 +67,6 @@ DETECTOR_POLICY_CHOICES = (
     "opencv_quad",
     "opencv_hough",
     "opencv_minrect",
-    "paddleocr_uvdoc",
 )
 CancelCb = Callable[[], bool]
 
@@ -76,7 +77,6 @@ _DETECTOR_POLICIES: dict[str, tuple[str, ...]] = {
     "opencv_quad": (DETECTOR_BACKEND_OPENCV,),
     "opencv_hough": (DETECTOR_BACKEND_OPENCV_HOUGH,),
     "opencv_minrect": (DETECTOR_BACKEND_OPENCV_MINRECT,),
-    "paddleocr_uvdoc": (DETECTOR_BACKEND_PADDLEOCR_UVDOC,),
 }
 
 
@@ -97,6 +97,10 @@ class PageRunReport:
     orientation_reason: str | None = None
     deskew_method: str = "none"
     deskew_angle_degrees: float = 0.0
+    deskew_selected_method: str = "none"
+    deskew_confidence: float = 0.0
+    deskew_line_count: int = 0
+    deskew_reason: str | None = None
     dewarp_method: str = "none"
     dewarp_applied: bool = False
     dewarp_selected_method: str = "none"
@@ -178,7 +182,9 @@ def resolve_input_paths(inputs: Sequence[Path], *, output_pdf: Path) -> tuple[Pa
 
         for candidate in candidates:
             candidate_resolved = candidate.resolve()
-            if candidate_resolved == output_resolved or candidate_resolved in seen:
+            if candidate_resolved == output_resolved:
+                raise ValueError("Output PDF cannot also be an input discovered in a folder.")
+            if candidate_resolved in seen:
                 continue
             seen.add(candidate_resolved)
             resolved.append(candidate)
@@ -191,7 +197,7 @@ def resolve_input_paths(inputs: Sequence[Path], *, output_pdf: Path) -> tuple[Pa
 def _resolve_processing(mode: str):
     normalized = mode.strip().lower()
     if normalized == "none":
-        return "None", None
+        return "None", None, None
 
     profiles_by_key = {
         name.lower(): profile
@@ -203,7 +209,7 @@ def _resolve_processing(mode: str):
     profile = profiles_by_key.get(normalized)
     if profile is None:
         raise ValueError(f"Unsupported lens mode: {mode}")
-    return profile.postprocess_name, PREPROCESS_PRESETS[profile.preset_name]
+    return profile.postprocess_name, profile.preset_name, PREPROCESS_PRESETS[profile.preset_name]
 
 
 def _resolve_detector_policy(policy: str) -> tuple[str, ...]:
@@ -222,20 +228,46 @@ def _validate_output_targets(
 ) -> None:
     output_resolved = output_pdf.resolve()
     report_resolved = report_path.resolve()
+    input_resolved = tuple(path.resolve() for path in input_files)
+
+    if output_pdf.exists() and not output_pdf.is_file():
+        raise ValueError("PDF output path exists and is not a file.")
+    if report_path.exists() and not report_path.is_file():
+        raise ValueError("JSON report path exists and is not a file.")
     if output_resolved == report_resolved:
         raise ValueError("PDF output and JSON report must use different paths.")
+    if output_resolved in input_resolved:
+        raise ValueError("PDF output cannot also be an input file.")
+    if report_resolved in input_resolved:
+        raise ValueError("JSON report cannot also be an input file.")
+
+    # A file target used as another target's parent would make publication order
+    # destructive or impossible (for example ``out.pdf/report.json``).
+    if output_resolved.is_relative_to(report_resolved) or report_resolved.is_relative_to(
+        output_resolved
+    ):
+        raise ValueError("PDF output and JSON report cannot contain one another.")
+
     if images_dir is None:
         return
 
     images_resolved = images_dir.resolve()
+    if _is_link_like(images_dir):
+        raise ValueError("Images output path cannot be a link or junction.")
     if images_dir.exists() and not images_dir.is_dir():
         raise ValueError("Images output path exists and is not a directory.")
     if output_resolved.is_relative_to(images_resolved):
         raise ValueError("PDF output cannot be inside the replaceable images directory.")
     if report_resolved.is_relative_to(images_resolved):
         raise ValueError("JSON report cannot be inside the replaceable images directory.")
-    if any(path.resolve().is_relative_to(images_resolved) for path in input_files):
+    if images_resolved.is_relative_to(output_resolved) or images_resolved.is_relative_to(
+        report_resolved
+    ):
+        raise ValueError("Images output directory cannot be nested below a file output path.")
+    if any(path.is_relative_to(images_resolved) for path in input_resolved):
         raise ValueError("Images output directory cannot contain input files.")
+    if images_resolved in input_resolved:
+        raise ValueError("Images output directory cannot also be an input file.")
 
 
 def _new_stage_file(target: Path) -> Path:
@@ -249,54 +281,485 @@ def _new_stage_file(target: Path) -> Path:
     return Path(raw_path)
 
 
+def _is_junction(path: Path) -> bool:
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction is not None and is_junction())
+
+
+def _is_link_like(path: Path) -> bool:
+    return path.is_symlink() or _is_junction(path)
+
+
 def _remove_path(path: Path) -> None:
-    if path.is_dir():
-        shutil.rmtree(path)
-    elif path.exists():
+    if _is_junction(path):
+        path.rmdir()
+    elif path.is_symlink() or path.is_file():
         path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
 
 
-def _publish_staged_targets(targets: Sequence[_StagedTarget]) -> None:
-    """Publish files/directories with rollback if any replacement fails."""
-    published: list[tuple[Path, Path | None]] = []
+_TRANSACTION_VERSION = 1
+_TRANSACTION_SUFFIX = ".uniscan-transaction.json"
+
+
+def _path_exists(path: Path) -> bool:
+    return path.exists() or _is_link_like(path)
+
+
+def _absolute_path(path: Path) -> Path:
+    return Path(os.path.abspath(path))
+
+
+def _path_key(path: Path) -> str:
+    return os.path.normcase(str(_absolute_path(path)))
+
+
+def _cleanup_path_best_effort(path: Path) -> bool:
     try:
-        for item in targets:
-            item.target.parent.mkdir(parents=True, exist_ok=True)
-            backup: Path | None = None
-            if item.target.exists():
-                backup = item.target.with_name(f".{item.target.name}.backup-{uuid.uuid4().hex}")
-                os.replace(item.target, backup)
-            try:
-                os.replace(item.staged, item.target)
-            except Exception:
-                if backup is not None and backup.exists():
-                    os.replace(backup, item.target)
-                raise
-            published.append((item.target, backup))
-    except Exception:
-        for target, backup in reversed(published):
-            _remove_path(target)
-            if backup is not None and backup.exists():
-                os.replace(backup, target)
-        raise
-    else:
-        for _target, backup in published:
-            if backup is not None:
-                _remove_path(backup)
+        if _path_exists(path):
+            _remove_path(path)
+    except OSError:
+        return False
+    return not _path_exists(path)
+
+
+def _fsync_parent(path: Path) -> None:
+    """Best-effort directory flush; Windows does not expose it on every filesystem."""
+    try:
+        descriptor = os.open(path.parent, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
     finally:
+        os.close(descriptor)
+
+
+def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
+    if _is_link_like(path) or (path.exists() and not path.is_file()):
+        raise ValueError(f"Transaction journal path is not a regular file: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_staged = tempfile.mkstemp(
+        prefix=f".{path.name}.stage-",
+        suffix=".json",
+        dir=path.parent,
+    )
+    staged = Path(raw_staged)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(payload, stream, indent=2, ensure_ascii=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(staged, path)
+        _fsync_parent(path)
+    except Exception:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        _cleanup_path_best_effort(staged)
+        raise
+
+
+def _transaction_journal_path(output_pdf: Path) -> Path:
+    output_pdf = _absolute_path(output_pdf)
+    return output_pdf.parent / f".{output_pdf.name}{_TRANSACTION_SUFFIX}"
+
+
+@contextmanager
+def _transaction_lock(journal_path: Path):
+    """Hold a non-blocking inter-process lock for recovery/publication."""
+    lock_path = journal_path.with_name(f"{journal_path.name}.lock")
+    if _is_link_like(lock_path) or (lock_path.exists() and not lock_path.is_file()):
+        raise ValueError(f"Invalid transaction lock path: {lock_path}")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    stream = lock_path.open("a+b")
+    locked = False
+    try:
+        stream.seek(0, os.SEEK_END)
+        if stream.tell() == 0:
+            stream.write(b"\0")
+            stream.flush()
+            os.fsync(stream.fileno())
+        stream.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:  # pragma: no cover - exercised by Linux CI
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except OSError as exc:
+            raise RuntimeError(
+                "Another UniScan process is publishing or recovering these outputs."
+            ) from exc
+        yield
+    finally:
+        if locked:
+            try:
+                stream.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                else:  # pragma: no cover - exercised by Linux CI
+                    import fcntl
+
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        stream.close()
+
+
+def _transaction_target_specs(
+    *,
+    output_pdf: Path,
+    images_dir: Path | None,
+    report_path: Path,
+) -> tuple[tuple[Path, str], ...]:
+    specs: list[tuple[Path, str]] = [(_absolute_path(output_pdf), "file")]
+    if images_dir is not None:
+        specs.append((_absolute_path(images_dir), "directory"))
+    specs.append((_absolute_path(report_path), "file"))
+    return tuple(specs)
+
+
+@contextmanager
+def _transaction_output_locks(
+    journal_path: Path,
+    *,
+    expected_targets: Sequence[tuple[Path, str]],
+):
+    """Serialize shared directories before taking the batch-specific lock.
+
+    A direct image export only takes the directory lock, while two batch runs
+    can use different PDF journals for the same images directory.  Taking every
+    directory lock first, in a stable path order, gives all writers one common
+    lock hierarchy and avoids holding a journal lock while waiting for a shared
+    directory.
+    """
+    directory_targets = {
+        _path_key(path): _absolute_path(path)
+        for path, kind in expected_targets
+        if kind == "directory"
+    }
+    with ExitStack() as stack:
+        for key in sorted(directory_targets):
+            stack.enter_context(_directory_export_lock(directory_targets[key]))
+        stack.enter_context(_transaction_lock(journal_path))
+        yield
+
+
+def _validate_transaction_path_type(path: Path, *, kind: str, role: str) -> None:
+    if not _path_exists(path):
+        return
+    if role == "staged" and _is_link_like(path):
+        raise ValueError(f"Invalid transaction journal: staged path is a link: {path}")
+    if kind == "directory":
+        if _is_link_like(path) or not path.is_dir():
+            raise ValueError(f"Invalid transaction journal directory path: {path}")
+    elif kind == "file":
+        if not (path.is_file() or path.is_symlink()):
+            raise ValueError(f"Invalid transaction journal file path: {path}")
+    else:  # pragma: no cover - guarded by strict journal schema validation
+        raise ValueError(f"Invalid transaction target kind: {kind}")
+
+
+def _validate_transaction_payload(
+    payload: object,
+    *,
+    expected_targets: Sequence[tuple[Path, str]],
+) -> dict[str, object]:
+    if not isinstance(payload, dict) or set(payload) != {
+        "schemaVersion",
+        "transactionId",
+        "state",
+        "entries",
+    }:
+        raise ValueError("Invalid UniScan transaction journal schema.")
+    transaction_id = payload.get("transactionId")
+    entries = payload.get("entries")
+    if (
+        type(payload.get("schemaVersion")) is not int
+        or payload["schemaVersion"] != _TRANSACTION_VERSION
+        or not isinstance(transaction_id, str)
+        or re.fullmatch(r"[0-9a-f]{32}", transaction_id) is None
+        or payload.get("state") not in {"prepared", "committed"}
+        or not isinstance(entries, list)
+        or len(entries) != len(expected_targets)
+    ):
+        raise ValueError("Invalid UniScan transaction journal schema.")
+
+    seen_paths: set[str] = set()
+    for raw_entry, (expected_target, expected_kind) in zip(entries, expected_targets, strict=True):
+        if not isinstance(raw_entry, dict) or set(raw_entry) != {
+            "target",
+            "staged",
+            "backup",
+            "kind",
+            "hadTarget",
+        }:
+            raise ValueError("Invalid UniScan transaction journal entry.")
+        if (
+            not all(isinstance(raw_entry.get(key), str) for key in ("target", "staged", "backup"))
+            or raw_entry.get("kind") != expected_kind
+            or type(raw_entry.get("hadTarget")) is not bool
+        ):
+            raise ValueError("Invalid UniScan transaction journal entry.")
+
+        target = Path(raw_entry["target"])
+        staged = Path(raw_entry["staged"])
+        backup = Path(raw_entry["backup"])
+        if not all(path.is_absolute() for path in (target, staged, backup)):
+            raise ValueError("Invalid UniScan transaction journal: paths must be absolute.")
+        expected_target = _absolute_path(expected_target)
+        if _path_key(target) != _path_key(expected_target):
+            raise ValueError("Transaction journal targets do not match this invocation.")
+        if _path_key(staged.parent) != _path_key(
+            expected_target.parent
+        ) or not staged.name.startswith(f".{expected_target.name}.stage-"):
+            raise ValueError("Invalid UniScan transaction staged path.")
+        expected_backup_name = f".{expected_target.name}.backup-{transaction_id}"
+        if (
+            _path_key(backup.parent) != _path_key(expected_target.parent)
+            or backup.name != expected_backup_name
+        ):
+            raise ValueError("Invalid UniScan transaction backup path.")
+        entry_paths = {_path_key(target), _path_key(staged), _path_key(backup)}
+        if len(entry_paths) != 3 or seen_paths.intersection(entry_paths):
+            raise ValueError("Invalid UniScan transaction journal: duplicate paths.")
+        seen_paths.update(entry_paths)
+
+        _validate_transaction_path_type(target, kind=expected_kind, role="target")
+        _validate_transaction_path_type(staged, kind=expected_kind, role="staged")
+        _validate_transaction_path_type(backup, kind=expected_kind, role="backup")
+        target_exists = _path_exists(target)
+        staged_exists = _path_exists(staged)
+        backup_exists = _path_exists(backup)
+        had_target = raw_entry["hadTarget"]
+        if payload["state"] == "committed":
+            if not target_exists or staged_exists:
+                raise ValueError("Invalid committed UniScan transaction state.")
+        elif had_target:
+            if not target_exists and not backup_exists:
+                raise ValueError("Invalid prepared UniScan transaction state.")
+            if target_exists and staged_exists and backup_exists:
+                raise ValueError("Ambiguous prepared UniScan transaction state.")
+        else:
+            if backup_exists or (target_exists and staged_exists):
+                raise ValueError("Invalid prepared UniScan transaction state.")
+    return payload
+
+
+def _load_transaction_journal(
+    journal_path: Path,
+    *,
+    expected_targets: Sequence[tuple[Path, str]],
+) -> dict[str, object]:
+    if _is_link_like(journal_path) or not journal_path.is_file():
+        raise ValueError("Invalid UniScan transaction journal path.")
+    if journal_path.stat().st_size > 1024 * 1024:
+        raise ValueError("Invalid UniScan transaction journal: file is too large.")
+    try:
+        payload = json.loads(journal_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Invalid UniScan transaction journal.") from exc
+    return _validate_transaction_payload(payload, expected_targets=expected_targets)
+
+
+def _rollback_prepared_transaction(payload: dict[str, object]) -> bool:
+    entries = payload["entries"]
+    assert isinstance(entries, list)
+    cleanup_complete = True
+    for raw_entry in reversed(entries):
+        assert isinstance(raw_entry, dict)
+        target = Path(raw_entry["target"])
+        staged = Path(raw_entry["staged"])
+        backup = Path(raw_entry["backup"])
+        if _path_exists(backup):
+            if _path_exists(target):
+                _remove_path(target)
+            os.replace(backup, target)
+            _fsync_parent(target)
+        elif not raw_entry["hadTarget"] and _path_exists(target):
+            _remove_path(target)
+            _fsync_parent(target)
+        cleanup_complete = _cleanup_path_best_effort(staged) and cleanup_complete
+        cleanup_complete = not _path_exists(backup) and cleanup_complete
+    return cleanup_complete
+
+
+def _recover_batch_transaction(
+    journal_path: Path,
+    *,
+    expected_targets: Sequence[tuple[Path, str]],
+    locks_held: bool = False,
+) -> None:
+    if not locks_held:
+        with _transaction_output_locks(
+            journal_path,
+            expected_targets=expected_targets,
+        ):
+            _recover_batch_transaction(
+                journal_path,
+                expected_targets=expected_targets,
+                locks_held=True,
+            )
+        return
+    if not _path_exists(journal_path):
+        return
+    payload = _load_transaction_journal(journal_path, expected_targets=expected_targets)
+    if payload["state"] == "prepared":
+        cleanup_complete = _rollback_prepared_transaction(payload)
+    else:
+        entries = payload["entries"]
+        assert isinstance(entries, list)
+        cleanup_complete = True
+        for raw_entry in entries:
+            assert isinstance(raw_entry, dict)
+            cleanup_complete = (
+                _cleanup_path_best_effort(Path(raw_entry["backup"])) and cleanup_complete
+            )
+            cleanup_complete = (
+                _cleanup_path_best_effort(Path(raw_entry["staged"])) and cleanup_complete
+            )
+    if not cleanup_complete:
+        raise RuntimeError(
+            "A previous UniScan transaction is committed/recovered, but locked debris "
+            "could not be cleaned; close programs using the output and retry."
+        )
+    if not _cleanup_path_best_effort(journal_path):
+        raise RuntimeError("Recovered transaction journal is locked; retry after closing it.")
+
+
+def _publish_staged_targets(
+    targets: Sequence[_StagedTarget],
+    *,
+    journal_path: Path,
+) -> None:
+    expected_targets = tuple(
+        (
+            _absolute_path(item.target),
+            "directory" if item.staged.is_dir() else "file",
+        )
+        for item in targets
+    )
+    try:
+        with _transaction_output_locks(
+            journal_path,
+            expected_targets=expected_targets,
+        ):
+            _recover_batch_transaction(
+                journal_path,
+                expected_targets=expected_targets,
+                locks_held=True,
+            )
+            _publish_staged_targets_locked(targets, journal_path=journal_path)
+    except Exception:
         for item in targets:
-            if item.staged.exists():
-                _remove_path(item.staged)
+            _cleanup_path_best_effort(item.staged)
+        raise
+
+
+def _publish_staged_targets_locked(
+    targets: Sequence[_StagedTarget],
+    *,
+    journal_path: Path,
+) -> None:
+    """Durably publish a recoverable multi-target transaction."""
+    for item in targets:
+        if not item.staged.exists():
+            raise RuntimeError(f"Staged output is missing: {item.staged}")
+        if item.target.exists() and item.target.is_dir() != item.staged.is_dir():
+            raise ValueError(f"Output target has the wrong type: {item.target}")
+    if _path_exists(journal_path):
+        raise ValueError(f"Unrecovered transaction journal already exists: {journal_path}")
+
+    transaction_id = uuid.uuid4().hex
+    entries: list[dict[str, object]] = []
+    for item in targets:
+        target = _absolute_path(item.target)
+        staged = _absolute_path(item.staged)
+        backup = target.with_name(f".{target.name}.backup-{transaction_id}")
+        if _path_exists(backup):
+            raise ValueError(f"Transaction backup path already exists: {backup}")
+        entries.append(
+            {
+                "target": str(target),
+                "staged": str(staged),
+                "backup": str(backup),
+                "kind": "directory" if staged.is_dir() else "file",
+                "hadTarget": _path_exists(target),
+            }
+        )
+    payload: dict[str, object] = {
+        "schemaVersion": _TRANSACTION_VERSION,
+        "transactionId": transaction_id,
+        "state": "prepared",
+        "entries": entries,
+    }
+    try:
+        _atomic_write_json(journal_path, payload)
+        for entry in entries:
+            target = Path(entry["target"])
+            staged = Path(entry["staged"])
+            backup = Path(entry["backup"])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if entry["hadTarget"]:
+                os.replace(target, backup)
+            os.replace(staged, target)
+            _fsync_parent(target)
+        payload["state"] = "committed"
+        _atomic_write_json(journal_path, payload)
+    except Exception:
+        if _path_exists(journal_path):
+            try:
+                rollback_clean = _rollback_prepared_transaction(payload)
+                if rollback_clean:
+                    _cleanup_path_best_effort(journal_path)
+            except Exception as rollback_exc:
+                raise RuntimeError(
+                    f"Output publication failed and rollback is incomplete: {rollback_exc}"
+                ) from rollback_exc
+        else:
+            for item in targets:
+                _cleanup_path_best_effort(item.staged)
+        raise
+
+    cleanup_complete = True
+    for entry in entries:
+        cleanup_complete = _cleanup_path_best_effort(Path(entry["backup"])) and cleanup_complete
+        cleanup_complete = _cleanup_path_best_effort(Path(entry["staged"])) and cleanup_complete
+    if cleanup_complete:
+        _cleanup_path_best_effort(journal_path)
 
 
 def _report_payload(
     *,
     output_pdf: Path,
+    report_path: Path,
+    images_dir: Path | None,
     image_outputs: Sequence[Path],
+    image_format: str,
+    pdf_dpi: int,
     input_files: Sequence[Path],
     pages: Sequence[PageRunReport],
     detect_document: bool,
     detector_policy: str,
+    detector_backends: Sequence[str],
+    strict_detect: bool,
+    two_page_mode: bool,
+    lens_mode: str,
+    preprocess_preset: str | None,
+    postprocess_name: str,
+    preprocess_settings: PreprocessSettings | None,
     illumination_correction: bool,
     orientation_method: str,
     deskew_method: str,
@@ -312,18 +775,37 @@ def _report_payload(
     despeckle_strength: str,
     lighting_diagnostics: bool,
     stage_cache_enabled: bool,
+    stage_cache_dir: Path | None,
     stage_cache_max_mb: int,
     stage_cache_stats: dict[str, int],
+    uvdoc_cache_home: Path | None,
 ) -> dict[str, object]:
     detected_pages = sum(page.detected for page in pages)
     fallback_pages = sum(page.fallback_reason is not None for page in pages)
+    effective_preprocess = preprocess_settings or PreprocessSettings()
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "outputPdf": str(output_pdf),
+        "reportPath": str(report_path),
+        "imagesDirectory": str(images_dir) if images_dir is not None else None,
         "imageOutputs": [str(path) for path in image_outputs],
+        "imageFormat": image_format,
+        "pdfDpi": pdf_dpi,
         "inputFiles": [str(path) for path in input_files],
         "detectionEnabled": detect_document,
         "detectorPolicy": detector_policy,
+        "detectorBackends": list(detector_backends),
+        "strictDetect": strict_detect,
+        "twoPageMode": two_page_mode,
+        "lensMode": lens_mode,
+        "preprocessPreset": preprocess_preset,
+        "postprocessName": postprocess_name,
+        "preprocessEnabled": preprocess_settings is not None,
+        "contrast": effective_preprocess.contrast,
+        "brightness": effective_preprocess.brightness,
+        "denoise": effective_preprocess.denoise,
+        "threshold": effective_preprocess.threshold,
+        "applyThreshold": effective_preprocess.apply_threshold,
         "illuminationCorrection": illumination_correction,
         "orientationMethod": orientation_method,
         "deskewMethod": deskew_method,
@@ -339,8 +821,10 @@ def _report_payload(
         "despeckleStrength": despeckle_strength,
         "lightingDiagnostics": lighting_diagnostics,
         "stageCacheEnabled": stage_cache_enabled,
+        "stageCacheDir": str(stage_cache_dir) if stage_cache_dir is not None else None,
         "stageCacheMaxMb": stage_cache_max_mb,
         "stageCacheStats": stage_cache_stats,
+        "uvdocCacheHome": str(uvdoc_cache_home) if uvdoc_cache_home is not None else None,
         "totalPages": len(pages),
         "detectedPages": detected_pages,
         "fallbackPages": fallback_pages,
@@ -359,6 +843,10 @@ def _report_payload(
                 "orientationReason": page.orientation_reason,
                 "deskewMethod": page.deskew_method,
                 "deskewAngleDegrees": page.deskew_angle_degrees,
+                "deskewSelectedMethod": page.deskew_selected_method,
+                "deskewConfidence": page.deskew_confidence,
+                "deskewLineCount": page.deskew_line_count,
+                "deskewReason": page.deskew_reason,
                 "dewarpMethod": page.dewarp_method,
                 "dewarpApplied": page.dewarp_applied,
                 "dewarpSelectedMethod": page.dewarp_selected_method,
@@ -406,6 +894,7 @@ def _stage_outputs(
     report_path: Path,
     report_payload: dict[str, object],
     dpi: int,
+    cancel_cb: CancelCb | None,
 ) -> tuple[list[_StagedTarget], tuple[Path, ...]]:
     """Prepare every output beside its target and clean all stages on failure."""
     targets: list[_StagedTarget] = []
@@ -413,7 +902,12 @@ def _stage_outputs(
     try:
         staged_pdf = _new_stage_file(output_pdf)
         targets.append(_StagedTarget(staged=staged_pdf, target=output_pdf))
-        export_image_paths_as_pdf(staged_page_paths, out_pdf=staged_pdf, dpi=dpi)
+        export_image_paths_as_pdf(
+            staged_page_paths,
+            out_pdf=staged_pdf,
+            dpi=dpi,
+            cancel_cb=cancel_cb,
+        )
 
         if images_dir is not None:
             images_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -421,21 +915,39 @@ def _stage_outputs(
                 tempfile.mkdtemp(prefix=f".{images_dir.name}.stage-", dir=images_dir.parent)
             )
             targets.append(_StagedTarget(staged=staged_images_dir, target=images_dir))
-            staged_images = export_image_paths_as_files(
-                staged_page_paths,
-                output_dir=staged_images_dir,
-                ext=image_format,
-                base_name="page",
-            )
+            if images_dir.exists():
+                # The images directory may contain user-owned neighbours.  Seed
+                # the transaction stage from the live directory, then let the
+                # ownership-aware exporter replace only files from its manifest.
+                shutil.copytree(
+                    images_dir,
+                    staged_images_dir,
+                    dirs_exist_ok=True,
+                    symlinks=True,
+                )
+            staging_lock = _directory_export_lock_path(staged_images_dir)
+            try:
+                staged_images = export_image_paths_as_files(
+                    staged_page_paths,
+                    output_dir=staged_images_dir,
+                    ext=image_format,
+                    base_name="page",
+                    cancel_cb=cancel_cb,
+                )
+            finally:
+                _cleanup_path_best_effort(staging_lock)
             final_image_paths = tuple(images_dir / path.name for path in staged_images)
 
         report_payload["imageOutputs"] = [str(path) for path in final_image_paths]
+        if cancel_cb is not None and cancel_cb():
+            raise RuntimeError("Cancelled by user.")
         staged_report = _new_stage_file(report_path)
         targets.append(_StagedTarget(staged=staged_report, target=report_path))
-        staged_report.write_text(
-            json.dumps(report_payload, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        with staged_report.open("w", encoding="utf-8", newline="\n") as stream:
+            json.dump(report_payload, stream, indent=2, ensure_ascii=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
         return targets, final_image_paths
     except Exception:
         for item in targets:
@@ -482,12 +994,26 @@ def run_batch_pipeline(
         raise ValueError("PDF DPI must be >= 72.")
     if strict_detect and not detect_document:
         raise ValueError("strict_detect cannot be used when document detection is disabled.")
+    image_format = image_format.strip().lower().lstrip(".")
+    lens_mode = lens_mode.strip().lower()
+    detector_policy = detector_policy.strip().lower()
     orientation_method = orientation_method.strip().lower()
     deskew_method = deskew_method.strip().lower()
     dewarp_method = dewarp_method.strip().lower()
     page_layout = page_layout.strip().lower()
     binarization_method = binarization_method.strip().lower()
     despeckle_strength = despeckle_strength.strip().lower()
+    if image_format not in IMAGE_FORMAT_CHOICES:
+        raise ValueError(f"Unsupported image format: {image_format}")
+    if lens_mode not in LENS_MODE_CHOICES:
+        raise ValueError(f"Unsupported lens mode: {lens_mode}")
+    if detector_policy == "paddleocr_uvdoc":
+        raise ValueError(
+            "UVDoc is a dewarp method, not a boundary detector; "
+            "use dewarp_method='paddleocr_uvdoc'."
+        )
+    if detector_policy not in DETECTOR_POLICY_CHOICES:
+        raise ValueError(f"Unsupported detector policy: {detector_policy}")
     if orientation_method not in ORIENTATION_METHOD_CHOICES:
         raise ValueError(f"Unsupported orientation method: {orientation_method}")
     if deskew_method not in DESKEW_METHOD_CHOICES:
@@ -523,8 +1049,18 @@ def run_batch_pipeline(
         images_dir=images_dir,
         input_files=input_files,
     )
+    transaction_journal = _transaction_journal_path(output_pdf)
+    transaction_targets = _transaction_target_specs(
+        output_pdf=output_pdf,
+        images_dir=images_dir,
+        report_path=report_path,
+    )
+    _recover_batch_transaction(
+        transaction_journal,
+        expected_targets=transaction_targets,
+    )
 
-    postprocess_name, preprocess_settings = _resolve_processing(lens_mode)
+    postprocess_name, preprocess_preset, preprocess_settings = _resolve_processing(lens_mode)
     if preprocess_settings is not None:
         preprocess_settings = replace(
             preprocess_settings,
@@ -592,10 +1128,6 @@ def run_batch_pipeline(
                         orientation_method=orientation_method,
                         deskew_method=deskew_method,
                         dewarp_method=dewarp_method,
-                        dewarp_already_applied=(
-                            dewarp_method == DEWARP_METHOD_PADDLEOCR_UVDOC
-                            and page.backend == DETECTOR_BACKEND_PADDLEOCR_UVDOC
-                        ),
                         uvdoc_cache_home=uvdoc_cache_home,
                         auto_dewarp_uvdoc=auto_dewarp_uvdoc,
                         postprocess_name=postprocess_name,
@@ -637,6 +1169,10 @@ def run_batch_pipeline(
                         orientation_reason=orientation_diagnostics.reason,
                         deskew_method=deskew_method,
                         deskew_angle_degrees=round(float(deskew_angle), 3),
+                        deskew_selected_method=processing_diagnostics.deskew_selected_method,
+                        deskew_confidence=processing_diagnostics.deskew_confidence,
+                        deskew_line_count=processing_diagnostics.deskew_line_count,
+                        deskew_reason=processing_diagnostics.deskew_reason,
                         dewarp_method=dewarp_method,
                         dewarp_applied=dewarp_diagnostics.applied,
                         dewarp_selected_method=dewarp_diagnostics.selected_method,
@@ -686,11 +1222,22 @@ def run_batch_pipeline(
 
         report_payload = _report_payload(
             output_pdf=output_pdf,
+            report_path=report_path,
+            images_dir=images_dir,
             image_outputs=(),
+            image_format=image_format,
+            pdf_dpi=dpi,
             input_files=input_files,
             pages=page_reports,
             detect_document=bool(detect_document),
             detector_policy="disabled" if not detect_document else detector_policy,
+            detector_backends=detector_backends if detect_document else (),
+            strict_detect=bool(strict_detect),
+            two_page_mode=bool(two_page_mode),
+            lens_mode=lens_mode,
+            preprocess_preset=preprocess_preset,
+            postprocess_name=postprocess_name,
+            preprocess_settings=preprocess_settings,
             illumination_correction=bool(illumination_correction),
             orientation_method=orientation_method,
             deskew_method=deskew_method,
@@ -706,6 +1253,7 @@ def run_batch_pipeline(
             despeckle_strength=despeckle_strength,
             lighting_diagnostics=bool(lighting_diagnostics),
             stage_cache_enabled=stage_cache is not None,
+            stage_cache_dir=Path(stage_cache_dir) if stage_cache_dir is not None else None,
             stage_cache_max_mb=int(stage_cache_max_mb),
             stage_cache_stats=(
                 {
@@ -717,6 +1265,7 @@ def run_batch_pipeline(
                 if stage_cache is not None
                 else {"hits": 0, "misses": 0, "writes": 0, "evictions": 0}
             ),
+            uvdoc_cache_home=(Path(uvdoc_cache_home) if uvdoc_cache_home is not None else None),
         )
         staged_targets, final_image_paths = _stage_outputs(
             staged_page_paths=staged_page_paths,
@@ -726,8 +1275,17 @@ def run_batch_pipeline(
             report_path=report_path,
             report_payload=report_payload,
             dpi=dpi,
+            cancel_cb=cancel_cb,
         )
-        _publish_staged_targets(staged_targets)
+        if cancel_cb is not None and cancel_cb():
+            for item in staged_targets:
+                if item.staged.exists():
+                    _remove_path(item.staged)
+            raise RuntimeError("Cancelled by user.")
+        _publish_staged_targets(
+            staged_targets,
+            journal_path=transaction_journal,
+        )
 
     detected_pages = sum(page.detected for page in page_reports)
     fallback_pages = sum(page.fallback_reason is not None for page in page_reports)

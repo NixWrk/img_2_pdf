@@ -7,13 +7,16 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   windows-artifact:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          # The verifier must see the annotated tag object, not only its commit.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v6
         with:
@@ -25,6 +28,13 @@ jobs:
         run: |
           python -m venv .venv
           .\.venv\Scripts\python.exe -m pip install -e ".[dev,release]"
+
+      - name: Verify tag and version
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: .\.venv\Scripts\python.exe scripts\verify_release_version.py --tag "$env:RELEASE_TAG"
 
       - name: Build and smoke-test portable artifact
         shell: pwsh
@@ -39,11 +49,23 @@ jobs:
             artifacts/*.sha256
           if-no-files-found: error
 
-      - name: Publish tagged GitHub release
-        if: github.ref_type == 'tag'
+  draft-release:
+    if: github.ref_type == 'tag'
+    needs: windows-artifact
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: uniscan-windows-x64
+          path: artifacts
+
+      - name: Create non-public release draft
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           $Assets = Get-ChildItem artifacts\*.zip, artifacts\*.sha256 | ForEach-Object FullName
-          gh release create "${{ github.ref_name }}" @Assets --verify-tag --generate-notes
+          gh release create "$env:RELEASE_TAG" @Assets --verify-tag --generate-notes --draft --prerelease

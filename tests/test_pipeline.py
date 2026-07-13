@@ -77,20 +77,15 @@ def test_process_loaded_items_two_page_mode_splits_at_gutter() -> None:
     assert pages[1].name.endswith("[R]")
 
 
-def test_build_pdf_writes_to_stream_and_truncates_before_compatibility_fallback(
-    tmp_path, monkeypatch
-) -> None:
+def test_build_pdf_uses_fixed_dpi_layout_and_atomically_publishes(tmp_path, monkeypatch) -> None:
     output = tmp_path / "output.pdf"
+    output.write_bytes(b"previous")
     calls: list[dict[str, object]] = []
 
     def fake_convert(paths: list[str], **kwargs) -> None:
         assert paths == [str(Path("page.png"))]
         calls.append(kwargs)
-        stream = kwargs["outputstream"]
-        if "dpi" in kwargs:
-            stream.write(b"partial")
-            raise TypeError("legacy dpi API")
-        stream.write(b"%PDF-streamed")
+        kwargs["outputstream"].write(b"%PDF-streamed")
 
     monkeypatch.setattr("uniscan.core.pipeline.img2pdf.convert", fake_convert)
     monkeypatch.setattr(
@@ -101,5 +96,27 @@ def test_build_pdf_writes_to_stream_and_truncates_before_compatibility_fallback(
     build_pdf_from_images([Path("page.png")], output, 240)
 
     assert output.read_bytes() == b"%PDF-streamed"
-    assert calls[0]["dpi"] == 240
-    assert calls[1]["layout_fun"] == ("layout", (240, 240))
+    assert len(calls) == 1
+    assert calls[0]["layout_fun"] == ("layout", (240, 240))
+    assert "dpi" not in calls[0]
+
+
+def test_build_pdf_failure_preserves_existing_target(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "output.pdf"
+    output.write_bytes(b"previous")
+
+    def fail_convert(*_args, **kwargs) -> None:
+        kwargs["outputstream"].write(b"partial")
+        raise RuntimeError("forced")
+
+    monkeypatch.setattr("uniscan.core.pipeline.img2pdf.convert", fail_convert)
+
+    try:
+        build_pdf_from_images([Path("page.png")], output, 300)
+    except RuntimeError as exc:
+        assert str(exc) == "forced"
+    else:
+        raise AssertionError("Expected RuntimeError")
+
+    assert output.read_bytes() == b"previous"
+    assert not list(tmp_path.glob(".output.pdf.stage-*"))

@@ -26,6 +26,8 @@ All notable changes to UniScan are documented here. The project follows Semantic
 - Atomic bounded lossless stage cache with pixel/options/upstream fingerprints, dependency-aware
   invalidation, corrupt-entry fallback, GUI persistence/clear action, optional CLI persistence, and
   hit/miss/write/eviction diagnostics.
+- Fail-closed release metadata/x64 checks, dependency-license compatibility and frozen-payload
+  audit with runtime notices, native GUI smoke, and draft-only tagged releases.
 
 - Independent boundary, deskew, and local-dewarp stages with per-page JSON diagnostics.
 - Offline text-line dewarp for curved or wavy pages, with confidence-based no-op fallback.
@@ -39,6 +41,35 @@ All notable changes to UniScan are documented here. The project follows Semantic
   estimator before applying automatic rotation correction.
 - Dewarp remains automatic-first while allowing correction of the generated model through control
   points; OCR remains out of scope.
+- Switched PDF rendering from AGPL/commercial PyMuPDF to permissively licensed `pypdfium2`.
+- Made `cv_hybrid` the redistributable default boundary detector; Office Lens remains an optional
+  bring-your-own-model adapter and UVDoc is only a dewarp stage.
+- Portable builds now carry a dedicated end-user README and only Windows x64 TkDND payloads.
+
+### Fixed
+
+- Prevented report/output collisions from overwriting inputs or replacing directories with files.
+- Corrected PDF DPI/page dimensions and made direct PDF/image exports atomic, cancellable, and free
+  of stale pages.
+- Fixed symmetric 45-degree quad ordering, full-frame OpenCV false positives, deskew clipping,
+  negative-brightness inversion, disjoint Office Lens candidate selection, and redundant inference.
+- Preserved 16-bit tonal range, composited alpha on white, imported every TIFF frame, and made image
+  persistence atomic; oversized PDF renders now fail instead of changing physical page size.
+- Kept Whiteboard color, removed double B/W thresholding, aligned Wolf GUI/CLI defaults, and added
+  complete deskew/reproduction diagnostics to batch reports.
+- Unified full-resolution GUI preview/apply processing, exported durable per-page applied pixels,
+  honored cancellation, cleared stale replacement metadata, and made partial session recovery
+  transactional without pruning quarantined source pages.
+- Replaced wildcard backup cleanup with exact journal-owned, cross-process-locked recovery for
+  image directories, so similarly named user files and folders are never treated as UniScan debris.
+- Passed release tags to PowerShell as data, kept dependency-only license audits portable across
+  CI operating systems, and pinned every metadata override to a reviewed dependency version.
+- Invalidated persistent stage-cache entries produced by the previous processing algorithms.
+
+### Removed
+
+- Removed extracted Office Lens weights/metadata from the current tree and every built artifact;
+  public mirrors still require the separately documented Git-history purge.
 
 ## [0.1.0] - 2026-07-10
 

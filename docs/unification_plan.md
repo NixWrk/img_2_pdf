@@ -1,7 +1,8 @@
 ﻿# UniScan PC Plan (Pre-OCR Layer)
 
-> Historical plan: current priorities and acceptance criteria live in
-> [`roadmap.md`](roadmap.md). Checkboxes below describe the earlier unification effort.
+> Historical snapshot: current priorities, architecture, feature status, and acceptance criteria
+> live in [`roadmap.md`](roadmap.md). Every checkbox and “Current Status” statement below describes
+> the earlier unification effort and must not be used as current product documentation.
 
 ## Product Goal
 
@@ -12,7 +13,7 @@ Deliver a PC-first Office Lens analogue for document preparation:
 3. Memory-conscious handling of large batches (disk-backed pages and file-by-file processing).
 4. Stable merged PDF and image export for downstream OCR systems.
 
-## Current Status
+## Status at the time of this plan
 
 1. Unified package and launcher are active.
 2. Camera capture, import, page review, and export are active.

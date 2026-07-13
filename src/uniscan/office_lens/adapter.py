@@ -7,7 +7,8 @@ from typing import Any, Literal
 
 import cv2
 import numpy as np
-import onnxruntime as ort
+
+from uniscan.core.geometry import order_quad_points
 
 try:
     from PIL import Image, ImageOps
@@ -17,14 +18,43 @@ except ImportError:  # pragma: no cover - OpenCV fallback is enough for runtime 
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
-_DEFAULT_MODEL_DIR = PACKAGE_DIR / "models"
-MODEL_DIR = Path(os.environ.get("UNISCAN_OFFICE_LENS_MODEL_DIR", str(_DEFAULT_MODEL_DIR)))
+_MODEL_DIR_ENV = os.environ.get("UNISCAN_OFFICE_LENS_MODEL_DIR")
+# The extracted weights are intentionally not distributed.  These exported
+# paths remain useful to diagnostics, but construction resolves the environment
+# again so applications may configure BYOM after importing this module.
+MODEL_DIR = Path(_MODEL_DIR_ENV).expanduser() if _MODEL_DIR_ENV else PACKAGE_DIR / "models"
 QUAD_MODEL = MODEL_DIR / "mnv2_ep42_wb_quant.ort"
 CLASSIFIER_MODEL = MODEL_DIR / "triclass_doc_classifier.ort"
 
 CLASSIFIER_LABELS = ("Document", "Photo", "Whiteboard")
 PROCESSING_MODES = ("document", "photo", "whiteboard")
 RequestedMode = Literal["auto", "document", "photo", "whiteboard"]
+
+
+def _load_onnxruntime():
+    try:
+        import onnxruntime
+    except ImportError as exc:  # pragma: no cover - depends on optional install
+        raise RuntimeError(
+            "Office Lens ONNX requires the optional 'office-lens' extra (onnxruntime)."
+        ) from exc
+    return onnxruntime
+
+
+def _resolve_model_path(explicit: str | Path | None, filename: str) -> Path:
+    if explicit is not None:
+        path = Path(explicit).expanduser()
+    else:
+        configured_dir = os.environ.get("UNISCAN_OFFICE_LENS_MODEL_DIR")
+        if not configured_dir:
+            raise RuntimeError(
+                "Office Lens models are not bundled. Set UNISCAN_OFFICE_LENS_MODEL_DIR "
+                "to a directory containing licensed model files."
+            )
+        path = Path(configured_dir).expanduser() / filename
+    if not path.is_file():
+        raise FileNotFoundError(f"Office Lens model file is missing: {path}")
+    return path
 
 
 @dataclass(frozen=True)
@@ -97,18 +127,7 @@ def preprocess_classifier(image_rgb: np.ndarray) -> np.ndarray:
 
 
 def _order_quad(points: np.ndarray) -> np.ndarray:
-    pts = points.astype(np.float32)
-    sums = pts.sum(axis=1)
-    diffs = np.diff(pts, axis=1).reshape(-1)
-    return np.array(
-        [
-            pts[np.argmin(sums)],
-            pts[np.argmin(diffs)],
-            pts[np.argmax(sums)],
-            pts[np.argmax(diffs)],
-        ],
-        dtype=np.float32,
-    )
+    return order_quad_points(points)
 
 
 def _clamp_quad(quad: np.ndarray, image_width: int, image_height: int) -> np.ndarray:
@@ -319,7 +338,9 @@ def choose_quad(
 
     area_ratio = image_area_quad / mask_area if mask_area > 0 else 0.0
     overlap = _quad_iou(mask_quad, image_quad)
-    if overlap >= 0.15 or 0.35 <= area_ratio <= 1.3:
+    # Similar area alone is not evidence that both detectors found the same
+    # object: two disjoint rectangles can have an area ratio of exactly 1.0.
+    if overlap >= 0.15 and 0.35 <= area_ratio <= 1.3:
         return _clamp_quad(image_quad, image_width, image_height)
     return _clamp_quad(mask_quad, image_width, image_height)
 
@@ -537,25 +558,44 @@ def warp_document_rgb(
 class OfficeLensOnnx:
     def __init__(
         self,
-        quad_model: str | Path = QUAD_MODEL,
-        classifier_model: str | Path = CLASSIFIER_MODEL,
+        quad_model: str | Path | None = None,
+        classifier_model: str | Path | None = None,
         providers: list[str] | None = None,
     ) -> None:
         selected_providers = providers or ["CPUExecutionProvider"]
-        self.quad_session = ort.InferenceSession(str(quad_model), providers=selected_providers)
-        self.classifier_session = ort.InferenceSession(
-            str(classifier_model), providers=selected_providers
+        self._runtime = _load_onnxruntime()
+        self._providers = selected_providers
+        resolved_quad_model = _resolve_model_path(quad_model, QUAD_MODEL.name)
+        self._classifier_model = classifier_model
+        self.quad_session = self._runtime.InferenceSession(
+            str(resolved_quad_model), providers=selected_providers
         )
         self.quad_input = self.quad_session.get_inputs()[0].name
         self.quad_output = self.quad_session.get_outputs()[0].name
-        self.classifier_input = self.classifier_session.get_inputs()[0].name
-        self.classifier_output = self.classifier_session.get_outputs()[0].name
+        self.classifier_session = None
+        self.classifier_input: str | None = None
+        self.classifier_output: str | None = None
+
+    def _ensure_classifier_session(self):
+        if self.classifier_session is None:
+            classifier_model = _resolve_model_path(
+                self._classifier_model,
+                CLASSIFIER_MODEL.name,
+            )
+            self.classifier_session = self._runtime.InferenceSession(
+                str(classifier_model),
+                providers=self._providers,
+            )
+            self.classifier_input = self.classifier_session.get_inputs()[0].name
+            self.classifier_output = self.classifier_session.get_outputs()[0].name
+        return self.classifier_session
 
     def classify(self, image_rgb: np.ndarray) -> Classification:
+        session = self._ensure_classifier_session()
+        assert self.classifier_input is not None
+        assert self.classifier_output is not None
         tensor = preprocess_classifier(image_rgb)
-        scores = self.classifier_session.run(
-            [self.classifier_output], {self.classifier_input: tensor}
-        )[0][0]
+        scores = session.run([self.classifier_output], {self.classifier_input: tensor})[0][0]
         score_map = {label: float(scores[index]) for index, label in enumerate(CLASSIFIER_LABELS)}
         return Classification(label=max(score_map, key=score_map.get), scores=score_map)
 
@@ -576,7 +616,11 @@ class OfficeLensOnnx:
         mode: RequestedMode = "auto",
         padding_percent: float = 0.0,
     ) -> PipelineResult:
-        classification = self.classify(image_rgb)
+        classification = (
+            self.classify(image_rgb)
+            if mode == "auto"
+            else Classification(label=str(mode).title(), scores={})
+        )
         mask_result = self.predict_quad_mask(image_rgb)
         resolved_mode = mode_from_classification(classification.label) if mode == "auto" else mode
 

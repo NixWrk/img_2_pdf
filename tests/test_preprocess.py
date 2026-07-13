@@ -9,6 +9,7 @@ from uniscan.core.preprocess import (
     LENS_MODE_PROFILES,
     PREPROCESS_PRESETS,
     PreprocessSettings,
+    SkewEstimate,
     apply_enhancements,
     correct_illumination,
     deskew_document,
@@ -43,6 +44,9 @@ def test_resolve_lens_mode_profile_handles_custom() -> None:
     assert profile is not None
     assert profile.preset_name == "Document"
     assert profile.postprocess_name == "Grayscale"
+    whiteboard = resolve_lens_mode_profile("Whiteboard")
+    assert whiteboard is not None
+    assert whiteboard.postprocess_name == "None"
 
 
 def test_infer_lens_mode_returns_custom_for_non_profile_combo() -> None:
@@ -68,6 +72,18 @@ def test_apply_enhancements_threshold_returns_binary() -> None:
     assert out.ndim == 2
     unique = set(np.unique(out).tolist())
     assert unique.issubset({0, 255})
+
+
+def test_negative_brightness_clips_instead_of_inverting_dark_tones() -> None:
+    image = np.array([[0, 40, 80, 120]], dtype=np.uint8)
+
+    out = apply_enhancements(
+        image,
+        PreprocessSettings(contrast=1.0, brightness=-80),
+    )
+
+    np.testing.assert_array_equal(out, np.array([[0, 0, 0, 40]], dtype=np.uint8))
+    assert np.all(np.diff(out.astype(np.int16), axis=1) >= 0)
 
 
 def test_correct_illumination_reduces_brightness_gradient() -> None:
@@ -116,8 +132,35 @@ def test_deskew_document_returns_angle_for_rotated_content() -> None:
     )
 
     fixed, angle = deskew_document(rotated)
-    assert fixed.shape == rotated.shape
+    assert fixed.shape[0] >= rotated.shape[0]
+    assert fixed.shape[1] >= rotated.shape[1]
     assert abs(angle) > 1.0
+
+
+def test_deskew_expands_canvas_to_preserve_tight_corner_content(monkeypatch) -> None:
+    image = np.full((100, 160, 3), 255, dtype=np.uint8)
+    image[2:22, 2:22] = 0
+    image[2:22, -22:-2] = 0
+    image[-22:-2, 2:22] = 0
+    image[-22:-2, -22:-2] = 0
+    dark_pixels_before = int(np.count_nonzero(np.all(image < 64, axis=2)))
+
+    monkeypatch.setattr(
+        "uniscan.core.preprocess.estimate_document_skew",
+        lambda *_args, **_kwargs: SkewEstimate(
+            angle_degrees=20.0,
+            method="hybrid",
+            confidence=1.0,
+            selected_method="hough",
+        ),
+    )
+
+    fixed, angle = deskew_document(image)
+
+    dark_pixels_after = int(np.count_nonzero(np.all(fixed < 64, axis=2)))
+    assert angle == 20.0
+    assert fixed.shape[:2] == (149, 185)
+    assert dark_pixels_after >= dark_pixels_before * 0.9
 
 
 def test_hough_deskew_estimates_rotated_text_lines() -> None:

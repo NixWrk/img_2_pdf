@@ -7,6 +7,7 @@ import numpy as np
 
 from uniscan.cli import main
 from uniscan.core.scanner_adapter import (
+    DETECTOR_BACKEND_CV_HYBRID,
     DETECTOR_BACKEND_OPENCV,
     DETECTOR_BACKEND_OFFICE_LENS_ONNX,
     DETECTOR_BACKEND_PADDLEOCR_UVDOC,
@@ -30,15 +31,15 @@ def test_run_crop_benchmark_preserves_natural_input_order(tmp_path, monkeypatch)
     _write_image(input_dir / "page10.png", 90)
     _write_image(input_dir / "page2.png", 30)
 
-    seen_means: list[tuple[str, int]] = []
+    seen_means: list[tuple[str, int, bool]] = []
     exported: dict[str, list[str]] = {}
 
     def fake_probe(*_args, **_kwargs) -> None:
         return None
 
-    def fake_scan(image, *, backends, **_kwargs):
+    def fake_scan(image, *, backends, allow_dewarp_backends, **_kwargs):
         backend = backends[0]
-        seen_means.append((backend, int(image.mean())))
+        seen_means.append((backend, int(image.mean()), allow_dewarp_backends))
         return ScanOutput(
             warped=image,
             contour=None,
@@ -63,11 +64,11 @@ def test_run_crop_benchmark_preserves_natural_input_order(tmp_path, monkeypatch)
         pdf_dpi=220,
     )
 
-    assert [(backend, mean) for backend, mean in seen_means] == [
-        (DETECTOR_BACKEND_OPENCV, 30),
-        (DETECTOR_BACKEND_OPENCV, 90),
-        (DETECTOR_BACKEND_PADDLEOCR_UVDOC, 30),
-        (DETECTOR_BACKEND_PADDLEOCR_UVDOC, 90),
+    assert seen_means == [
+        (DETECTOR_BACKEND_OPENCV, 30, False),
+        (DETECTOR_BACKEND_OPENCV, 90, False),
+        (DETECTOR_BACKEND_PADDLEOCR_UVDOC, 30, True),
+        (DETECTOR_BACKEND_PADDLEOCR_UVDOC, 90, True),
     ]
     assert [result.backend for result in results] == [
         DETECTOR_BACKEND_OPENCV,
@@ -82,7 +83,7 @@ def test_run_crop_benchmark_preserves_natural_input_order(tmp_path, monkeypatch)
     }
 
 
-def test_run_crop_benchmark_defaults_to_office_lens_onnx(tmp_path, monkeypatch) -> None:
+def test_run_crop_benchmark_defaults_to_cv_hybrid(tmp_path, monkeypatch) -> None:
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "out"
     input_dir.mkdir()
@@ -117,8 +118,8 @@ def test_run_crop_benchmark_defaults_to_office_lens_onnx(tmp_path, monkeypatch) 
         output_dir=output_dir,
     )
 
-    assert seen_backends == [DETECTOR_BACKEND_OFFICE_LENS_ONNX]
-    assert [result.backend for result in results] == [DETECTOR_BACKEND_OFFICE_LENS_ONNX]
+    assert seen_backends == [DETECTOR_BACKEND_CV_HYBRID]
+    assert [result.backend for result in results] == [DETECTOR_BACKEND_CV_HYBRID]
 
 
 def test_run_crop_benchmark_keeps_other_backends_when_one_is_unavailable(

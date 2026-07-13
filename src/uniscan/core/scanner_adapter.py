@@ -24,11 +24,7 @@ DETECTOR_BACKEND_OPENCV_MINRECT = "opencv_minrect"
 DETECTOR_BACKEND_UVDOC = "uvdoc"
 DETECTOR_BACKEND_PADDLEOCR_UVDOC = "paddleocr_uvdoc"
 DETECTOR_BACKEND_OFFICE_LENS_ONNX = "office_lens_onnx"
-DEFAULT_ACTIVE_DOCUMENT_BACKENDS = (
-    DETECTOR_BACKEND_OFFICE_LENS_ONNX,
-    DETECTOR_BACKEND_PADDLEOCR_UVDOC,
-    DETECTOR_BACKEND_CV_HYBRID,
-)
+DEFAULT_ACTIVE_DOCUMENT_BACKENDS = (DETECTOR_BACKEND_CV_HYBRID,)
 
 
 class ScanAdapterError(RuntimeError):
@@ -100,11 +96,13 @@ def _load_uvdoc_model(cache_home_str: str | None = None) -> Any:
 def _load_office_lens_model() -> Any:
     try:
         from uniscan.office_lens import OfficeLensOnnx
-    except Exception as exc:  # pragma: no cover - import depends on optional runtime deps
+
+        return OfficeLensOnnx()
+    except Exception as exc:  # pragma: no cover - import depends on optional runtime/models
         raise ScanAdapterError(
-            "Cannot import Office Lens ONNX adapter. Install onnxruntime first."
+            "Cannot initialize Office Lens ONNX. Install the 'office-lens' extra and set "
+            "UNISCAN_OFFICE_LENS_MODEL_DIR to licensed model files."
         ) from exc
-    return OfficeLensOnnx()
 
 
 def _image_bgr_to_rgb(image: np.ndarray) -> np.ndarray:
@@ -169,6 +167,18 @@ def _contour_score(contour: np.ndarray, image_area: float) -> float:
     return (coverage * 10.0) + fill_ratio
 
 
+def _is_image_frame(contour: np.ndarray, image_shape: tuple[int, int]) -> bool:
+    """Reject threshold-map borders masquerading as a full-page quadrilateral."""
+    height, width = image_shape
+    normalized = np.asarray(contour, dtype=np.float32).reshape(-1, 2)
+    x, y, box_width, box_height = cv2.boundingRect(normalized.astype(np.int32))
+    coverage = abs(float(cv2.contourArea(normalized))) / max(1.0, float(width * height))
+    touches_every_edge = (
+        x <= 1 and y <= 1 and x + box_width >= width - 1 and y + box_height >= height - 1
+    )
+    return bool(coverage >= 0.9 and touches_every_edge)
+
+
 def _find_quad_contour(image: np.ndarray) -> np.ndarray | None:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
     image_area = float(gray.shape[0] * gray.shape[1])
@@ -189,33 +199,34 @@ def _find_quad_contour(image: np.ndarray) -> np.ndarray | None:
             approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
             if len(approx) != 4 or not cv2.isContourConvex(approx):
                 continue
+            if _is_image_frame(approx, gray.shape[:2]):
+                continue
             score = _contour_score(approx, image_area)
             if score > best_score:
                 best_score = score
                 best_quad = approx.reshape(4, 2).astype(np.float32)
-
-        if best_quad is not None:
-            break
 
     if best_quad is not None:
         return order_quad_points(best_quad)
 
     best_rect: np.ndarray | None = None
     best_rect_score = -1.0
-    contours, _hierarchy = cv2.findContours(
-        candidate_maps[0], cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
-    )
-    for contour in contours:
-        area = float(cv2.contourArea(contour))
-        if area < min_area:
-            continue
-        rect = cv2.minAreaRect(contour)
-        points = cv2.boxPoints(rect)
-        points = order_quad_points(points.astype(np.float32))
-        score = _contour_score(points.reshape(-1, 1, 2), image_area)
-        if score > best_rect_score:
-            best_rect_score = score
-            best_rect = points
+    for candidate_map in candidate_maps:
+        contours, _hierarchy = cv2.findContours(
+            candidate_map, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
+        )
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area < min_area:
+                continue
+            rect = cv2.minAreaRect(contour)
+            points = order_quad_points(cv2.boxPoints(rect).astype(np.float32))
+            if _is_image_frame(points, gray.shape[:2]):
+                continue
+            score = _contour_score(points.reshape(-1, 1, 2), image_area)
+            if score > best_rect_score:
+                best_rect_score = score
+                best_rect = points
     return best_rect
 
 
@@ -237,6 +248,8 @@ def _find_minrect_contour(image: np.ndarray) -> np.ndarray | None:
             hull = cv2.convexHull(contour)
             rect = cv2.minAreaRect(hull)
             points = order_quad_points(cv2.boxPoints(rect).astype(np.float32))
+            if _is_image_frame(points, gray.shape[:2]):
+                continue
             score = _contour_score(points.reshape(-1, 1, 2), image_area)
             if score > best_score:
                 best_score = score
@@ -357,11 +370,24 @@ def _select_best_contour(image: np.ndarray, *contours: np.ndarray | None) -> np.
         if contour is None:
             continue
         normalized = order_quad_points(np.asarray(contour, dtype=np.float32))
+        if _is_image_frame(normalized, gray.shape[:2]):
+            continue
         score = _contour_score(normalized.reshape(-1, 1, 2), image_area)
         if score > best_score:
             best_score = score
             best_contour = normalized
     return best_contour
+
+
+def _find_hybrid_contour(image: np.ndarray) -> np.ndarray | None:
+    """Prefer a real four-edge quad, then fall back to weaker estimators."""
+    quad = _find_quad_contour(image)
+    if quad is not None:
+        return quad
+    hough = _find_hough_quad_contour(image)
+    if hough is not None:
+        return hough
+    return _find_minrect_contour(image)
 
 
 def _contour_detector_output(
@@ -431,12 +457,7 @@ def _opencv_hybrid_document_detector(image: np.ndarray) -> ScanOutput:
     return _contour_detector_output(
         image,
         backend=DETECTOR_BACKEND_CV_HYBRID,
-        contour_finder=lambda resized: _select_best_contour(
-            resized,
-            _find_quad_contour(resized),
-            _find_hough_quad_contour(resized),
-            _find_minrect_contour(resized),
-        ),
+        contour_finder=_find_hybrid_contour,
     )
 
 
@@ -473,23 +494,25 @@ def _camscan_document_detector(
 
 def _office_lens_document_detector(image: np.ndarray) -> ScanOutput:
     runner = _load_office_lens_model()
-    result = runner.process_image(_image_bgr_to_rgb(image), mode="auto")
-    quad = result.mask_result.quad
-    if result.warped is None or quad is None:
+    # Boundary detection only needs the quad session.  Running classification
+    # and enhancement here was expensive and its enhanced output was discarded.
+    mask_result = runner.predict_quad_mask(_image_bgr_to_rgb(image))
+    quad = mask_result.quad
+    if quad is None:
         return ScanOutput(
             warped=image,
             contour=None,
             backend=None,
             detected=False,
-            raw_result=result,
+            raw_result=mask_result,
         )
 
     return ScanOutput(
-        warped=_image_rgb_to_bgr(result.warped),
+        warped=warp_perspective_from_points(image, quad),
         contour=quad.astype(np.float32),
         backend=DETECTOR_BACKEND_OFFICE_LENS_ONNX,
         detected=True,
-        raw_result=result,
+        raw_result=mask_result,
     )
 
 
@@ -569,11 +592,14 @@ def scan_with_document_detector(
     scanner_root: Path | None = None,
     backends: tuple[str, ...] | None = None,
     uvdoc_cache_home: Path | None = None,
+    allow_dewarp_backends: bool = False,
 ) -> ScanOutput:
     """
     Run document detector and return normalized output.
 
-    If detection is disabled, returns the input image as warped.
+    If detection is disabled, returns the input image as warped. UVDoc is a
+    geometric dewarp model rather than a boundary detector and is skipped by
+    default; opt in only for dedicated legacy/benchmark calls.
     """
     if not enabled:
         return ScanOutput(warped=image, contour=None, backend=None, detected=False, raw_result=None)
@@ -582,6 +608,13 @@ def scan_with_document_detector(
     errors: list[str] = []
 
     for backend in selected_backends:
+        if backend in (DETECTOR_BACKEND_UVDOC, DETECTOR_BACKEND_PADDLEOCR_UVDOC) and not (
+            allow_dewarp_backends
+        ):
+            errors.append(
+                f"{backend}: skipped during boundary detection; use it as a dewarp method"
+            )
+            continue
         try:
             if backend == DETECTOR_BACKEND_OFFICE_LENS_ONNX:
                 result = _office_lens_document_detector(image)
@@ -607,6 +640,10 @@ def scan_with_document_detector(
 
         if result.detected:
             return result
+        if isinstance(result.raw_result, dict):
+            reasons = ", ".join(f"{key}={value}" for key, value in result.raw_result.items())
+            if reasons:
+                errors.append(f"{backend}: {reasons}")
 
     return ScanOutput(
         warped=image,

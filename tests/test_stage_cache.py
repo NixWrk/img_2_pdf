@@ -61,6 +61,19 @@ def test_stage_cache_discards_corrupt_metadata(tmp_path) -> None:
     assert not metadata_path.exists()
 
 
+def test_stage_cache_discards_valid_json_with_wrong_shape(tmp_path) -> None:
+    cache = ProcessingStageCache(tmp_path / "cache", max_bytes=1024 * 1024)
+    image = np.full((40, 50), 200, dtype=np.uint8)
+    key = cache.stage_key("a" * 64, "cleanup", {"method": "otsu"})
+    cache.put(key, image, {"valid": True})
+    metadata_path = cache.root_dir / f"{key}.json"
+    metadata_path.write_text("[]", encoding="utf-8")
+
+    assert cache.get(key) is None
+    assert not (cache.root_dir / f"{key}.png").exists()
+    assert not metadata_path.exists()
+
+
 def test_stage_cache_rejects_invalid_limits(tmp_path) -> None:
     with pytest.raises(ValueError, match="1 MiB"):
         ProcessingStageCache(tmp_path / "small", max_bytes=100)

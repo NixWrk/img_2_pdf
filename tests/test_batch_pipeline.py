@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 
 import cv2
-import fitz
 import numpy as np
+import pypdfium2 as pdfium
 import pytest
 
 from uniscan.cli import main
@@ -21,12 +21,42 @@ def _write_image(path: Path, value: int) -> None:
 
 
 def _write_pdf(path: Path, page_count: int) -> None:
-    document = fitz.open()
+    document = pdfium.PdfDocument.new()
     try:
-        for index in range(page_count):
+        for _index in range(page_count):
             page = document.new_page(width=100, height=100)
-            page.insert_text((10, 40), f"Page {index + 1}")
+            page.close()
         document.save(str(path))
+    finally:
+        document.close()
+
+
+def _write_sized_pdf(path: Path, *, width: float, height: float) -> None:
+    document = pdfium.PdfDocument.new()
+    try:
+        page = document.new_page(width=width, height=height)
+        page.close()
+        document.save(str(path))
+    finally:
+        document.close()
+
+
+def _pdf_page_size(path: Path) -> tuple[float, float]:
+    document = pdfium.PdfDocument(str(path))
+    try:
+        page = document[0]
+        try:
+            return page.get_size()
+        finally:
+            page.close()
+    finally:
+        document.close()
+
+
+def _pdf_page_count(path: Path) -> int:
+    document = pdfium.PdfDocument(str(path))
+    try:
+        return len(document)
     finally:
         document.close()
 
@@ -120,6 +150,112 @@ def test_run_batch_pipeline_writes_pdf_and_images(tmp_path) -> None:
     assert report["orientationMethod"] == "none"
     assert report["deskewMethod"] == "none"
     assert report["dewarpMethod"] == "none"
+
+
+def test_batch_images_export_preserves_unrelated_neighbours(tmp_path) -> None:
+    source = tmp_path / "source.png"
+    _write_image(source, 90)
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    notes = images_dir / "notes.txt"
+    notes.write_text("personal notes", encoding="utf-8")
+
+    result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "result.pdf",
+        images_dir=images_dir,
+        detect_document=False,
+        lens_mode="none",
+    )
+
+    assert result.image_outputs[0].is_file()
+    assert notes.read_text(encoding="utf-8") == "personal notes"
+    assert (images_dir / ".uniscan-export-manifest.json").is_file()
+
+
+def test_report_records_complete_effective_processing_configuration(tmp_path) -> None:
+    source = tmp_path / "source.png"
+    _write_image(source, 100)
+
+    result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "configured.pdf",
+        images_dir=tmp_path / "configured-pages",
+        image_format="jpg",
+        pdf_dpi=200,
+        detect_document=False,
+        two_page_mode=True,
+        lens_mode="document",
+    )
+
+    report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    assert report["schemaVersion"] == 2
+    assert report["pdfDpi"] == 200
+    assert report["imageFormat"] == "jpg"
+    assert report["imagesDirectory"] == str(tmp_path / "configured-pages")
+    assert report["strictDetect"] is False
+    assert report["twoPageMode"] is True
+    assert report["lensMode"] == "document"
+    assert report["preprocessPreset"] == "Document"
+    assert report["postprocessName"] == "Grayscale"
+    assert report["preprocessEnabled"] is True
+    assert report["contrast"] == 1.25
+    assert report["brightness"] == 10
+    assert report["denoise"] == 4
+    assert report["threshold"] == 170
+    assert report["applyThreshold"] is False
+    assert report["detectorBackends"] == []
+
+
+@pytest.mark.parametrize("dpi", (72, 300))
+def test_pdf_input_roundtrip_preserves_physical_page_size(tmp_path, dpi: int) -> None:
+    source = tmp_path / f"source-{dpi}.pdf"
+    _write_sized_pdf(source, width=144.0, height=288.0)
+
+    result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / f"roundtrip-{dpi}.pdf",
+        pdf_dpi=dpi,
+        detect_document=False,
+        lens_mode="none",
+    )
+
+    width, height = _pdf_page_size(result.output_pdf)
+    assert width == pytest.approx(144.0, abs=0.25)
+    assert height == pytest.approx(288.0, abs=0.25)
+
+
+@pytest.mark.parametrize(
+    ("layout", "dpi", "expected_width", "expected_height"),
+    (
+        ("a4", 72, 595.28, 841.89),
+        ("a4", 300, 595.28, 841.89),
+        ("letter", 72, 612.0, 792.0),
+        ("letter", 300, 612.0, 792.0),
+    ),
+)
+def test_standard_layout_pdf_has_correct_physical_page_size(
+    tmp_path,
+    layout: str,
+    dpi: int,
+    expected_width: float,
+    expected_height: float,
+) -> None:
+    source = tmp_path / f"source-{layout}-{dpi}.png"
+    _write_image(source, 100)
+
+    result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / f"{layout}-{dpi}.pdf",
+        pdf_dpi=dpi,
+        detect_document=False,
+        lens_mode="none",
+        page_layout=layout,
+    )
+
+    width, height = _pdf_page_size(result.output_pdf)
+    assert width == pytest.approx(expected_width, abs=0.5)
+    assert height == pytest.approx(expected_height, abs=0.5)
 
 
 def test_run_batch_pipeline_applies_and_reports_textline_dewarp(tmp_path) -> None:
@@ -317,6 +453,34 @@ def test_run_batch_pipeline_applies_and_reports_orientation(tmp_path) -> None:
     assert report["pages"][0]["orientationAngleDegrees"] == 270
 
 
+def test_run_batch_pipeline_reports_hybrid_deskew_fallback_evidence(tmp_path) -> None:
+    source = tmp_path / "no-lines.png"
+    _write_image(source, 255)
+
+    result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "deskew-evidence.pdf",
+        detect_document=False,
+        lens_mode="none",
+        deskew_method="hybrid",
+    )
+
+    page = result.pages[0]
+    assert page.deskew_method == "hybrid"
+    assert page.deskew_selected_method == "min_area"
+    assert page.deskew_confidence == 0.0
+    assert page.deskew_line_count == 0
+    assert page.deskew_reason == "hough_no_lines;min_area_selected"
+
+    report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    report_page = report["pages"][0]
+    assert report_page["deskewMethod"] == "hybrid"
+    assert report_page["deskewSelectedMethod"] == "min_area"
+    assert report_page["deskewConfidence"] == 0.0
+    assert report_page["deskewLineCount"] == 0
+    assert report_page["deskewReason"] == "hough_no_lines;min_area_selected"
+
+
 def test_run_batch_pipeline_rejects_unknown_geometry_methods(tmp_path) -> None:
     source = tmp_path / "source.png"
     _write_image(source, 90)
@@ -366,6 +530,13 @@ def test_run_batch_pipeline_rejects_unknown_geometry_methods(tmp_path) -> None:
             stage_cache_max_mb=0,
         )
 
+    with pytest.raises(ValueError, match="UVDoc is a dewarp method"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=tmp_path / "uvdoc-detector.pdf",
+            detector_policy="paddleocr_uvdoc",
+        )
+
 
 def test_cli_convert_runs_end_to_end(tmp_path, capsys) -> None:
     input_dir = tmp_path / "input"
@@ -406,6 +577,18 @@ def test_output_pdf_cannot_be_explicit_input(tmp_path) -> None:
         raise AssertionError("Expected ValueError")
 
 
+def test_output_pdf_cannot_be_an_input_discovered_in_folder(tmp_path) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    output_pdf = input_dir / "result.pdf"
+    _write_pdf(output_pdf, page_count=1)
+
+    with pytest.raises(ValueError, match="input discovered in a folder"):
+        resolve_input_paths([input_dir], output_pdf=output_pdf)
+
+    assert _pdf_page_count(output_pdf) == 1
+
+
 def test_output_targets_cannot_overlap_replaceable_images_directory(tmp_path) -> None:
     source = tmp_path / "source.png"
     _write_image(source, 90)
@@ -424,6 +607,82 @@ def test_output_targets_cannot_overlap_replaceable_images_directory(tmp_path) ->
             inputs=[source],
             output_pdf=tmp_path / "same.pdf",
             report_path=tmp_path / "same.pdf",
+            detect_document=False,
+        )
+
+
+def test_report_cannot_replace_an_input_file(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "source.png"
+    _write_image(source, 90)
+    original = source.read_bytes()
+
+    def processing_must_not_start(*_args, **_kwargs):
+        raise AssertionError("target validation must run before input processing")
+
+    monkeypatch.setattr("uniscan.tools.batch_pipeline.iter_input_items", processing_must_not_start)
+
+    with pytest.raises(ValueError, match="JSON report cannot also be an input"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=tmp_path / "document.pdf",
+            report_path=source,
+            detect_document=False,
+        )
+
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("target_kind", ("pdf", "report", "images"))
+def test_outputs_cannot_replace_targets_of_the_wrong_type(tmp_path, target_kind: str) -> None:
+    source = tmp_path / "source.png"
+    _write_image(source, 90)
+    wrong_target = tmp_path / ("wrong.pdf" if target_kind == "pdf" else "wrong")
+
+    if target_kind in {"pdf", "report"}:
+        wrong_target.mkdir()
+        (wrong_target / "keep.txt").write_text("keep", encoding="utf-8")
+    else:
+        wrong_target.write_text("keep", encoding="utf-8")
+
+    kwargs = {
+        "inputs": [source],
+        "output_pdf": wrong_target if target_kind == "pdf" else tmp_path / "document.pdf",
+        "detect_document": False,
+    }
+    if target_kind == "report":
+        kwargs["report_path"] = wrong_target
+    elif target_kind == "images":
+        kwargs["images_dir"] = wrong_target
+
+    with pytest.raises(ValueError, match="exists and is not"):
+        run_batch_pipeline(**kwargs)
+
+    if target_kind in {"pdf", "report"}:
+        assert (wrong_target / "keep.txt").read_text(encoding="utf-8") == "keep"
+    else:
+        assert wrong_target.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.parametrize(
+    ("report_path", "images_dir", "message"),
+    (
+        (Path("document.pdf/report.json"), None, "cannot contain one another"),
+        (None, Path("document.pdf/images"), "nested below a file output"),
+    ),
+)
+def test_file_targets_cannot_be_ancestors_of_other_outputs(
+    tmp_path, report_path: Path | None, images_dir: Path | None, message: str
+) -> None:
+    source = tmp_path / "source.png"
+    _write_image(source, 90)
+    output_pdf = tmp_path / "document.pdf"
+
+    with pytest.raises(ValueError, match=message):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=output_pdf,
+            report_path=(tmp_path / report_path) if report_path is not None else None,
+            images_dir=(tmp_path / images_dir) if images_dir is not None else None,
             detect_document=False,
         )
 
@@ -610,3 +869,310 @@ def test_cancellation_preserves_existing_pdf(tmp_path) -> None:
         )
 
     assert output_pdf.read_bytes() == b"existing"
+
+
+def test_interrupted_multi_target_publish_is_rolled_back_on_next_run(tmp_path, monkeypatch) -> None:
+    from uniscan.tools import batch_pipeline
+
+    source = tmp_path / "source.png"
+    _write_image(source, 90)
+    output_pdf = tmp_path / "result.pdf"
+    report_path = tmp_path / "result.report.json"
+    images_dir = tmp_path / "images"
+    output_pdf.write_bytes(b"old-pdf")
+    report_path.write_bytes(b"old-report")
+    images_dir.mkdir()
+    (images_dir / "notes.txt").write_text("old-images", encoding="utf-8")
+
+    staged_pdf = tmp_path / ".result.pdf.stage-crash"
+    staged_pdf.write_bytes(b"new-pdf")
+    staged_images = tmp_path / ".images.stage-crash"
+    staged_images.mkdir()
+    (staged_images / "page_00001.png").write_bytes(b"new-image")
+    staged_report = tmp_path / ".result.report.json.stage-crash"
+    staged_report.write_bytes(b"new-report")
+    targets = [
+        batch_pipeline._StagedTarget(staged=staged_pdf, target=output_pdf),
+        batch_pipeline._StagedTarget(staged=staged_images, target=images_dir),
+        batch_pipeline._StagedTarget(staged=staged_report, target=report_path),
+    ]
+    journal = batch_pipeline._transaction_journal_path(output_pdf)
+    real_replace = batch_pipeline.os.replace
+
+    def crash_during_images_publish(source_path, target_path) -> None:
+        if Path(source_path) == staged_images and Path(target_path) == images_dir:
+            raise KeyboardInterrupt("simulated process termination")
+        real_replace(source_path, target_path)
+
+    monkeypatch.setattr(batch_pipeline.os, "replace", crash_during_images_publish)
+    with pytest.raises(KeyboardInterrupt, match="simulated process termination"):
+        batch_pipeline._publish_staged_targets(targets, journal_path=journal)
+    monkeypatch.setattr(batch_pipeline.os, "replace", real_replace)
+
+    assert journal.is_file()
+    expected_targets = batch_pipeline._transaction_target_specs(
+        output_pdf=output_pdf,
+        images_dir=images_dir,
+        report_path=report_path,
+    )
+    from uniscan.export import exporters
+
+    with exporters._directory_export_lock(images_dir):
+        with pytest.raises(RuntimeError, match="Another UniScan process"):
+            batch_pipeline._recover_batch_transaction(
+                journal,
+                expected_targets=expected_targets,
+            )
+
+    # Recovery must fail before touching any member of the partial transaction.
+    assert output_pdf.read_bytes() == b"new-pdf"
+    assert not images_dir.exists()
+    assert report_path.read_bytes() == b"old-report"
+    assert journal.is_file()
+
+    with pytest.raises(RuntimeError, match="Cancelled by user"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=output_pdf,
+            images_dir=images_dir,
+            report_path=report_path,
+            detect_document=False,
+            lens_mode="none",
+            cancel_cb=lambda: True,
+        )
+
+    assert output_pdf.read_bytes() == b"old-pdf"
+    assert report_path.read_bytes() == b"old-report"
+    assert (images_dir / "notes.txt").read_text(encoding="utf-8") == "old-images"
+    assert not journal.exists()
+    assert not list(tmp_path.glob(".*.backup-*"))
+
+
+def test_invalid_transaction_journal_paths_fail_closed_before_processing(tmp_path) -> None:
+    from uniscan.tools import batch_pipeline
+
+    source = tmp_path / "source.png"
+    _write_image(source, 90)
+    output_pdf = tmp_path / "result.pdf"
+    report_path = tmp_path / "result.report.json"
+    victim = tmp_path / "victim.pdf"
+    victim.write_bytes(b"personal")
+    transaction_id = "a" * 32
+    journal = batch_pipeline._transaction_journal_path(output_pdf)
+    payload = {
+        "schemaVersion": 1,
+        "transactionId": transaction_id,
+        "state": "prepared",
+        "entries": [
+            {
+                "target": str(victim.resolve()),
+                "staged": str(tmp_path / ".victim.pdf.stage-malicious"),
+                "backup": str(tmp_path / f".victim.pdf.backup-{transaction_id}"),
+                "kind": "file",
+                "hadTarget": True,
+            },
+            {
+                "target": str(report_path.resolve()),
+                "staged": str(tmp_path / ".result.report.json.stage-malicious"),
+                "backup": str(tmp_path / f".result.report.json.backup-{transaction_id}"),
+                "kind": "file",
+                "hadTarget": False,
+            },
+        ],
+    }
+    journal.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="targets do not match"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=output_pdf,
+            report_path=report_path,
+            detect_document=False,
+        )
+
+    assert victim.read_bytes() == b"personal"
+    assert journal.exists()
+    assert not output_pdf.exists()
+
+
+def test_committed_transaction_journal_recovery_keeps_published_outputs(
+    tmp_path, monkeypatch
+) -> None:
+    from uniscan.tools import batch_pipeline
+
+    output_pdf = tmp_path / "result.pdf"
+    report_path = tmp_path / "result.report.json"
+    output_pdf.write_bytes(b"old-pdf")
+    report_path.write_bytes(b"old-report")
+    staged_pdf = tmp_path / ".result.pdf.stage-committed"
+    staged_report = tmp_path / ".result.report.json.stage-committed"
+    staged_pdf.write_bytes(b"new-pdf")
+    staged_report.write_bytes(b"new-report")
+    targets = [
+        batch_pipeline._StagedTarget(staged=staged_pdf, target=output_pdf),
+        batch_pipeline._StagedTarget(staged=staged_report, target=report_path),
+    ]
+    journal = batch_pipeline._transaction_journal_path(output_pdf)
+    real_cleanup = batch_pipeline._cleanup_path_best_effort
+
+    def leave_committed_journal(path: Path) -> None:
+        if path == journal:
+            return
+        real_cleanup(path)
+
+    monkeypatch.setattr(batch_pipeline, "_cleanup_path_best_effort", leave_committed_journal)
+    batch_pipeline._publish_staged_targets(targets, journal_path=journal)
+    monkeypatch.setattr(batch_pipeline, "_cleanup_path_best_effort", real_cleanup)
+
+    assert journal.is_file()
+    assert json.loads(journal.read_text(encoding="utf-8"))["state"] == "committed"
+    batch_pipeline._recover_batch_transaction(
+        journal,
+        expected_targets=batch_pipeline._transaction_target_specs(
+            output_pdf=output_pdf,
+            images_dir=None,
+            report_path=report_path,
+        ),
+    )
+
+    assert output_pdf.read_bytes() == b"new-pdf"
+    assert report_path.read_bytes() == b"new-report"
+    assert not journal.exists()
+
+
+def test_active_transaction_lock_fails_safely(tmp_path) -> None:
+    from uniscan.tools import batch_pipeline
+
+    output_pdf = tmp_path / "result.pdf"
+    report_path = tmp_path / "result.report.json"
+    journal = batch_pipeline._transaction_journal_path(output_pdf)
+    expected_targets = batch_pipeline._transaction_target_specs(
+        output_pdf=output_pdf,
+        images_dir=None,
+        report_path=report_path,
+    )
+
+    with batch_pipeline._transaction_lock(journal):
+        with pytest.raises(RuntimeError, match="Another UniScan process"):
+            batch_pipeline._recover_batch_transaction(
+                journal,
+                expected_targets=expected_targets,
+            )
+
+
+def test_batches_with_different_pdf_journals_lock_shared_images_directory(tmp_path) -> None:
+    from uniscan.tools import batch_pipeline
+
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    keep = images_dir / "keep.txt"
+    keep.write_text("live-images", encoding="utf-8")
+
+    first_pdf = tmp_path / "first.pdf"
+    first_report = tmp_path / "first.report.json"
+    first_journal = batch_pipeline._transaction_journal_path(first_pdf)
+    first_targets = batch_pipeline._transaction_target_specs(
+        output_pdf=first_pdf,
+        images_dir=images_dir,
+        report_path=first_report,
+    )
+
+    second_pdf = tmp_path / "second.pdf"
+    second_report = tmp_path / "second.report.json"
+    second_pdf.write_bytes(b"old-pdf")
+    second_report.write_bytes(b"old-report")
+    staged_pdf = tmp_path / ".second.pdf.stage-concurrent"
+    staged_report = tmp_path / ".second.report.json.stage-concurrent"
+    staged_images = tmp_path / ".images.stage-concurrent"
+    staged_pdf.write_bytes(b"new-pdf")
+    staged_report.write_bytes(b"new-report")
+    staged_images.mkdir()
+    (staged_images / "page_00001.png").write_bytes(b"new-image")
+    second_staged_targets = [
+        batch_pipeline._StagedTarget(staged=staged_pdf, target=second_pdf),
+        batch_pipeline._StagedTarget(staged=staged_images, target=images_dir),
+        batch_pipeline._StagedTarget(staged=staged_report, target=second_report),
+    ]
+    second_journal = batch_pipeline._transaction_journal_path(second_pdf)
+
+    with batch_pipeline._transaction_output_locks(
+        first_journal,
+        expected_targets=first_targets,
+    ):
+        with pytest.raises(RuntimeError, match="Another UniScan process"):
+            batch_pipeline._publish_staged_targets(
+                second_staged_targets,
+                journal_path=second_journal,
+            )
+
+    assert second_pdf.read_bytes() == b"old-pdf"
+    assert second_report.read_bytes() == b"old-report"
+    assert keep.read_text(encoding="utf-8") == "live-images"
+    assert not second_journal.exists()
+    assert not staged_pdf.exists()
+    assert not staged_report.exists()
+    assert not staged_images.exists()
+
+
+def test_batch_backup_cleanup_failure_does_not_turn_commit_into_failure(
+    tmp_path, monkeypatch
+) -> None:
+    from uniscan.tools import batch_pipeline
+
+    source = tmp_path / "source.png"
+    _write_image(source, 90)
+    output_pdf = tmp_path / "result.pdf"
+    report_path = tmp_path / "result.report.json"
+    images_dir = tmp_path / "images"
+    output_pdf.write_bytes(b"old-pdf")
+    report_path.write_bytes(b"old-report")
+    images_dir.mkdir()
+    (images_dir / "notes.txt").write_text("personal", encoding="utf-8")
+    real_remove = batch_pipeline._remove_path
+
+    def locked_backup(path: Path) -> None:
+        if ".backup-" in path.name:
+            raise PermissionError("locked by scanner")
+        real_remove(path)
+
+    monkeypatch.setattr(batch_pipeline, "_remove_path", locked_backup)
+
+    result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=output_pdf,
+        images_dir=images_dir,
+        report_path=report_path,
+        detect_document=False,
+        lens_mode="none",
+    )
+
+    assert result.output_pdf.read_bytes().startswith(b"%PDF")
+    assert json.loads(result.report_path.read_text(encoding="utf-8"))["totalPages"] == 1
+    assert (images_dir / "notes.txt").read_text(encoding="utf-8") == "personal"
+    assert len(list(tmp_path.glob(".*.backup-*"))) == 3
+    journal = batch_pipeline._transaction_journal_path(output_pdf)
+    assert json.loads(journal.read_text(encoding="utf-8"))["state"] == "committed"
+
+    with pytest.raises(RuntimeError, match="locked debris"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=output_pdf,
+            images_dir=images_dir,
+            report_path=report_path,
+            detect_document=False,
+            lens_mode="none",
+        )
+
+    monkeypatch.setattr(batch_pipeline, "_remove_path", real_remove)
+    with pytest.raises(RuntimeError, match="Cancelled by user"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=output_pdf,
+            images_dir=images_dir,
+            report_path=report_path,
+            detect_document=False,
+            lens_mode="none",
+            cancel_cb=lambda: True,
+        )
+    assert not journal.exists()
+    assert not list(tmp_path.glob(".*.backup-*"))

@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from uniscan.session import CaptureSession
 from uniscan.storage import PageStore
@@ -62,6 +63,7 @@ def test_entry_original_image_setter_writes_to_disk(tmp_path) -> None:
     assert int(reloaded[0, 0, 0]) == 200
     preview = entry.preview_original_image
     assert preview.shape == replacement.shape
+    assert int(entry.current_image[0, 0, 0]) == 200
     assert entry.dewarp_control_points is None
     session.close()
 
@@ -95,6 +97,69 @@ def test_replace_entry_image_updates_content_and_name(tmp_path) -> None:
     assert entry.name == "new_name"
     assert int(entry.original_image[0, 0, 0]) == 140
     assert int(entry.current_image[0, 0, 0]) == 220
+    session.close()
+
+
+def test_replace_entry_image_clears_stale_detection_metadata(tmp_path) -> None:
+    session = CaptureSession(store=PageStore(root_dir=tmp_path))
+    entry = session.add_image_with_contour(
+        name="detected",
+        raw_image=_img(10),
+        warped_image=_img(20),
+        contour=np.float32([[0, 0], [11, 0], [11, 9], [0, 9]]),
+        backend="old-detector",
+    )
+
+    assert session.replace_entry_image(
+        entry.entry_id,
+        raw_image=_img(30),
+        original_image=_img(30),
+    )
+
+    assert entry.detected_contour is None
+    assert entry.detected_backend is None
+    session.close()
+
+
+def test_replace_entry_image_rolls_back_a_partial_multi_asset_failure(
+    tmp_path, monkeypatch
+) -> None:
+    store = PageStore(root_dir=tmp_path)
+    session = CaptureSession(store=store)
+    old_contour = np.float32([[0, 0], [11, 0], [11, 9], [0, 9]])
+    entry = session.add_image_with_contour(
+        name="old",
+        raw_image=_img(10),
+        warped_image=_img(20),
+        contour=old_contour,
+        backend="old-detector",
+    )
+    real_atomic_write = store._atomic_image_write
+    failures_left = 1
+
+    def fail_once(path, image, *, kind):
+        nonlocal failures_left
+        if failures_left and path.name == "preview_original.jpg":
+            failures_left -= 1
+            raise RuntimeError("simulated preview failure")
+        return real_atomic_write(path, image, kind=kind)
+
+    monkeypatch.setattr(store, "_atomic_image_write", fail_once)
+    with pytest.raises(RuntimeError, match="simulated preview failure"):
+        session.replace_entry_image(
+            entry.entry_id,
+            name="new",
+            raw_image=_img(100),
+            original_image=_img(110),
+            current_image=_img(120),
+        )
+
+    assert entry.name == "old"
+    assert int(entry.raw_image[0, 0, 0]) == 10
+    assert int(entry.original_image[0, 0, 0]) == 20
+    assert int(entry.current_image[0, 0, 0]) == 20
+    assert entry.detected_backend == "old-detector"
+    np.testing.assert_array_equal(entry.detected_contour, old_contour)
     session.close()
 
 

@@ -12,15 +12,53 @@ def order_quad_points(points: np.ndarray) -> np.ndarray:
 
     Input shape: (4, 2).
     """
-    pts = np.array(points, dtype=np.float32).reshape(4, 2)
-    sums = pts.sum(axis=1)
-    diffs = np.diff(pts, axis=1).reshape(4)
+    pts = np.asarray(points, dtype=np.float32).reshape(4, 2)
+    if not np.isfinite(pts).all():
+        raise ValueError("Quad points must contain only finite coordinates.")
+    if np.unique(pts, axis=0).shape[0] != 4:
+        raise ValueError("Quad points must contain four distinct coordinates.")
+    hull = cv2.convexHull(pts).reshape(-1, 2)
+    if hull.shape[0] != 4:
+        raise ValueError("Quad points must form a convex four-corner polygon.")
 
-    tl = pts[np.argmin(sums)]
-    br = pts[np.argmax(sums)]
-    tr = pts[np.argmin(diffs)]
-    bl = pts[np.argmax(diffs)]
-    return np.array([tl, tr, br, bl], dtype=np.float32)
+    # The traditional sum/difference shortcut selects the same point twice for
+    # symmetric 45-degree quads.  Ordering around the centroid preserves every
+    # vertex.  Start at the best top-left candidate; y/x break exact sum ties,
+    # which makes a diamond start at its top point rather than duplicating it.
+    center = pts.mean(axis=0)
+    angles = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
+    cyclic = pts[np.argsort(angles)]
+    start = min(
+        range(4),
+        key=lambda index: (
+            float(cyclic[index].sum()),
+            float(cyclic[index, 1]),
+            float(cyclic[index, 0]),
+        ),
+    )
+    ordered = np.roll(cyclic, -start, axis=0)
+
+    # A valid perspective transform needs a non-degenerate convex quad.  The
+    # angular order gives positive signed area in image coordinates.
+    x = ordered[:, 0]
+    y = ordered[:, 1]
+    edges = np.roll(ordered, -1, axis=0) - ordered
+    crosses = np.array(
+        [
+            edges[index, 0] * edges[(index + 1) % 4, 1]
+            - edges[index, 1] * edges[(index + 1) % 4, 0]
+            for index in range(4)
+        ],
+        dtype=np.float32,
+    )
+    if np.any(np.abs(crosses) < 1e-3) or not (np.all(crosses > 0) or np.all(crosses < 0)):
+        raise ValueError("Quad points must form a strictly convex polygon.")
+    signed_area = 0.5 * float(np.sum(x * np.roll(y, -1) - y * np.roll(x, -1)))
+    if abs(signed_area) < 1e-3:
+        raise ValueError("Quad points must form a non-degenerate polygon.")
+    if signed_area < 0:
+        ordered = ordered[[0, 3, 2, 1]]
+    return ordered.astype(np.float32, copy=False)
 
 
 def warp_perspective_from_points(image: np.ndarray, points: np.ndarray) -> np.ndarray:

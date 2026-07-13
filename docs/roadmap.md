@@ -11,10 +11,11 @@ UniScan is a local, pre-OCR document preparation application for personal use:
 acquire/import -> find page -> orient -> deskew -> dewarp -> clean -> review -> PDF/images
 ```
 
-Text recognition, searchable-PDF assembly, cloud processing, license-inventory automation, and
-Authenticode signing are not current product requirements. A geometry or orientation model may
-classify an image, but it must not recognize or store text. Manual control points remain available
-as a correction layer over automatic dewarping.
+Text recognition, searchable-PDF assembly, and cloud processing are not current product
+requirements. Dependency-license compatibility and Authenticode signing are release gates rather
+than runtime features. A geometry or orientation model may classify an image, but it must not recognize
+or store text. Manual control points remain available as a correction layer over automatic
+dewarping.
 
 Every processing stage must:
 
@@ -30,8 +31,8 @@ New code and model weights must have explicit compatible terms.
 
 ## Current baseline
 
-The repository already has camera/image/PDF input, Office Lens ONNX and OpenCV page detection,
-perspective correction, selectable deskew, offline text-line dewarp, optional PaddleOCR UVDoc,
+The repository already has camera/image/PDF input, OpenCV page detection, an optional BYOM Office
+Lens adapter, perspective correction, selectable deskew, offline text-line dewarp, optional PaddleOCR UVDoc,
 editable persisted dewarp points, enhancement presets, split-page support, session recovery,
 atomic PDF/image export, structured CLI reports, CI, a portable Windows build, and a deterministic
 crop benchmark.
@@ -117,16 +118,17 @@ dependency-aware disk cache are implemented for batch CLI and GUI preview/apply.
 per-page overrides remain next.
 
 1. Introduce a GUI-independent page-processing request/result model.
-2. Route GUI preview, GUI export, and headless conversion through the same ordered stages and
-   diagnostics schema.
+2. Route GUI preview/apply and headless conversion through the same ordered stages and diagnostics
+   schema; GUI export publishes each page's immutable last-applied generation.
 3. Persist every per-page override: boundary, orientation, deskew, dewarp model, cleanup, content
    box, layout, and output mode.
 4. [x] Add stage fingerprints and a bounded disk cache. Editing a late cleanup stage must not rerun
    page detection or dewarp; changing page geometry must invalidate downstream stages.
 5. Add bounded worker-pool processing with deterministic output order and cancellation.
 
-Exit criteria: identical inputs/settings produce equivalent pixels in preview, GUI export, and
-CLI; repeated previews reuse valid stages; cancellation leaves no partial published output.
+Exit criteria: identical inputs/settings produce equivalent pixels in full preview, Apply, and
+CLI; GUI export preserves the applied pixels across restart; repeated previews reuse valid stages;
+cancellation leaves no partial published output.
 
 Planned commits:
 
@@ -194,7 +196,8 @@ Goal: prove the result works on the user's actual documents and Windows machine.
    rights are unavailable; retain the synthetic corpus in CI.
 2. Track per-category geometry/cleanup quality, latency, fallback, clipping, and peak memory.
 3. Run the manual camera/import/review/export checklist on a clean Windows 11 machine.
-4. Verify the portable ZIP, bundled ONNX models, session recovery, and uninstall/removal path.
+4. Verify the portable ZIP, optional-model exclusion/BYOM diagnostics, session recovery, and
+   uninstall/removal path.
 5. Document known failure modes and which manual correction is appropriate.
 
 Exit criteria: the portable build completes the real personal workflow and benchmark regressions
@@ -204,10 +207,13 @@ are visible before a release is accepted.
 
 - OCR, searchable PDF, language packs, and text-based orientation.
 - Cloud APIs and hosted processing.
-- Public installer, Authenticode signing, SBOM, dependency-license inventory, vulnerability
-  attestations, and release provenance.
+- A public installer, store distribution, SBOM, vulnerability attestations, and reproducible
+  release provenance. The existing dependency-license compatibility check remains mandatory for
+  every portable build. Authenticode is optional for a local personal artifact, but mandatory
+  before publishing a Windows executable or portable ZIP.
 - ScanTailor project import/export compatibility.
 - Manual mesh construction; editable automatic-model control points remain supported.
 
 These items can be reconsidered if UniScan becomes a distributed product or another user needs
-the artifacts. They must not block the personal-use processing and GUI roadmap above.
+the artifacts. They must not block local personal-use processing or unsigned local builds; the
+draft public-release workflow must remain unpublished until its distribution gates pass.

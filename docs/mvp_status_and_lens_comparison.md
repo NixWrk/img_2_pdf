@@ -19,41 +19,42 @@ processed images or a plain merged PDF.
 | Module | Responsibility |
 |---|---|
 | `core/pipeline.py` | Detect, warp, split, and postprocess loaded pages |
-| `core/scanner_adapter.py` | Office Lens / UVDoc / OpenCV / legacy backend cascade |
+| `core/scanner_adapter.py` | OpenCV boundary detection plus optional BYOM backends |
 | `core/preprocess.py` | Lens modes, cleanup presets, and deskew |
 | `core/spread.py` | Gutter-based two-page split with midpoint fallback |
 | `io/loaders.py` | Natural-order image loading and DPI-safe PDF rendering |
 | `tools/batch_pipeline.py` | Headless files/folders/PDF → processed images + merged PDF |
 | `session` + `storage` | Ordered, disk-backed GUI pages |
-| `ui/app.py` | Import → Scan → Review → Export desktop flow |
-| `office_lens` | Bundled ONNX classifier and quadrilateral detector |
+| `ui/app.py` | Workspace/Camera/Import options/Export options desktop flow |
+| `office_lens` | Optional BYOM ONNX classifier and quadrilateral adapter |
 
-The default document detector cascade is:
+The production boundary-detector policy is:
 
-1. `office_lens_onnx` (bundled and offline),
-2. `paddleocr_uvdoc` (optional),
-3. `cv_hybrid` (OpenCV fallback).
+1. `cv_hybrid` (offline OpenCV default),
+2. `office_lens_onnx` only when explicitly selected and externally licensed models are configured.
 
-Additional individually selectable backends remain available to the benchmark.
+PaddleOCR UVDoc is an optional dewarp stage, not a boundary detector. Additional OpenCV backends
+remain individually selectable for diagnostics and benchmarks.
 
 ## Implemented capabilities
 
 - Camera preview/capture and mixed image/PDF import.
 - Live OpenCV boundary overlay.
-- Office Lens ONNX document classification and quad detection.
+- Optional Office Lens ONNX document classification and quad detection with user-supplied models.
 - Perspective correction and manual four-corner editing.
 - Accurate gutter-based two-page split.
 - Rotate, deskew, Document/Whiteboard/Photo/B&W modes, and tuning controls.
 - Ordered disk-backed sessions with page replace, delete, and reorder.
 - Merged PDF and PNG/JPEG/WEBP/TIFF export.
 - Headless `convert` flow for automation.
+- Drag-and-drop, clipboard import, and recoverable session restore.
 - Deterministic unit/integration coverage, including an end-to-end CLI conversion test.
 
 ## Known limitations
 
 - No auto-capture based on frame stability.
-- No glare/shadow removal or text-based orientation detection.
-- No drag-and-drop, clipboard import, or session restore.
+- Lighting diagnostics and opt-in correction are available; robust glare removal remains limited.
+- Orientation is geometry-based because OCR/text recognition is intentionally outside the project.
 - No Office/OneNote/cloud export.
 - OCR is intentionally handled in separate repositories.
 - The GUI remains Windows-first; the headless pipeline is the portable automation surface.
@@ -63,7 +64,7 @@ Additional individually selectable backends remain available to the benchmark.
 | Capability | UniScan status |
 |---|---|
 | Document/Whiteboard/Photo/B&W modes | Implemented; no Business Card mode |
-| Boundary detection and perspective warp | Implemented with bundled ONNX + fallbacks |
+| Boundary detection and perspective warp | Implemented with OpenCV default and optional BYOM ONNX |
 | Live boundary feedback | Implemented with OpenCV worker/smoothing |
 | Multi-page review/reorder/replace | Implemented |
 | Accurate book-spread split | Implemented |
@@ -72,5 +73,5 @@ Additional individually selectable backends remain available to the benchmark.
 | Auto-capture, glare removal, annotations | Not implemented |
 | OCR and Office formats | Out of scope |
 
-This file describes the current code. Future work is tracked separately in
-`docs/unification_plan.md`.
+This file describes the current code. Future work and acceptance criteria are tracked in
+[`roadmap.md`](roadmap.md); `unification_plan.md` is a historical snapshot only.

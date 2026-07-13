@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import cv2
 import numpy as np
@@ -56,6 +56,8 @@ class SkewEstimate:
     method: str
     confidence: float
     line_count: int = 0
+    selected_method: str | None = None
+    reason: str = "estimated"
 
 
 PREPROCESS_PRESETS: dict[str, PreprocessSettings] = {
@@ -81,7 +83,9 @@ PREPROCESS_PRESETS: dict[str, PreprocessSettings] = {
 
 LENS_MODE_PROFILES: dict[str, LensModeProfile] = {
     "Document": LensModeProfile(preset_name="Document", postprocess_name="Grayscale"),
-    "Whiteboard": LensModeProfile(preset_name="Whiteboard", postprocess_name="Grayscale"),
+    # Marker colour is meaningful whiteboard content; the cleanup preset adjusts
+    # luminance/contrast without forcing a lossy grayscale conversion.
+    "Whiteboard": LensModeProfile(preset_name="Whiteboard", postprocess_name="None"),
     "Photo": LensModeProfile(preset_name="Photo", postprocess_name="None"),
     "B/W": LensModeProfile(preset_name="B/W High Contrast", postprocess_name="Black and White"),
 }
@@ -152,7 +156,10 @@ def apply_enhancements_with_diagnostics(
                 searchWindowSize=21,
             )
 
-    out = cv2.convertScaleAbs(out, alpha=float(settings.contrast), beta=int(settings.brightness))
+    # convertScaleAbs() takes an absolute value after applying beta.  Negative
+    # brightness therefore inverted dark tones instead of clipping them to 0.
+    adjusted = out.astype(np.float32) * float(settings.contrast) + int(settings.brightness)
+    out = np.clip(np.rint(adjusted), 0, 255).astype(np.uint8)
 
     binarization = settings.binarization_method
     if binarization == BINARIZATION_NONE and settings.apply_threshold:
@@ -192,7 +199,13 @@ def _min_area_skew(gray: np.ndarray, *, max_angle: float) -> SkewEstimate:
     foreground = cv2.bitwise_not(threshold)
     coords = np.column_stack(np.where(foreground > 0))
     if coords.size == 0:
-        return SkewEstimate(0.0, DESKEW_METHOD_MIN_AREA, 0.0)
+        return SkewEstimate(
+            0.0,
+            DESKEW_METHOD_MIN_AREA,
+            0.0,
+            selected_method=DESKEW_METHOD_MIN_AREA,
+            reason="no_foreground",
+        )
 
     rect = cv2.minAreaRect(coords[:, ::-1].astype(np.float32))
     angle = float(rect[-1])
@@ -201,10 +214,21 @@ def _min_area_skew(gray: np.ndarray, *, max_angle: float) -> SkewEstimate:
     elif angle > 45.0:
         angle -= 90.0
     if abs(angle) > max_angle:
-        return SkewEstimate(0.0, DESKEW_METHOD_MIN_AREA, 0.0)
+        return SkewEstimate(
+            0.0,
+            DESKEW_METHOD_MIN_AREA,
+            0.0,
+            selected_method=DESKEW_METHOD_MIN_AREA,
+            reason="angle_out_of_range",
+        )
     foreground_ratio = float(np.count_nonzero(foreground)) / max(1, foreground.size)
     confidence = min(1.0, foreground_ratio / 0.08)
-    return SkewEstimate(angle, DESKEW_METHOD_MIN_AREA, confidence)
+    return SkewEstimate(
+        angle,
+        DESKEW_METHOD_MIN_AREA,
+        confidence,
+        selected_method=DESKEW_METHOD_MIN_AREA,
+    )
 
 
 def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
@@ -239,7 +263,13 @@ def _hough_skew(gray: np.ndarray, *, max_angle: float) -> SkewEstimate:
         maxLineGap=max(8, int(width * 0.025)),
     )
     if lines is None:
-        return SkewEstimate(0.0, DESKEW_METHOD_HOUGH, 0.0)
+        return SkewEstimate(
+            0.0,
+            DESKEW_METHOD_HOUGH,
+            0.0,
+            selected_method=DESKEW_METHOD_HOUGH,
+            reason="no_lines",
+        )
 
     angles: list[float] = []
     lengths: list[float] = []
@@ -259,7 +289,14 @@ def _hough_skew(gray: np.ndarray, *, max_angle: float) -> SkewEstimate:
             lengths.append(length)
 
     if len(angles) < 3:
-        return SkewEstimate(0.0, DESKEW_METHOD_HOUGH, 0.0, line_count=len(angles))
+        return SkewEstimate(
+            0.0,
+            DESKEW_METHOD_HOUGH,
+            0.0,
+            line_count=len(angles),
+            selected_method=DESKEW_METHOD_HOUGH,
+            reason="insufficient_lines",
+        )
     angle_arr = np.asarray(angles, dtype=np.float64)
     length_arr = np.asarray(lengths, dtype=np.float64)
     estimate = _weighted_median(angle_arr, length_arr)
@@ -271,6 +308,7 @@ def _hough_skew(gray: np.ndarray, *, max_angle: float) -> SkewEstimate:
         DESKEW_METHOD_HOUGH,
         coverage * agreement,
         line_count=len(angles),
+        selected_method=DESKEW_METHOD_HOUGH,
     )
 
 
@@ -284,8 +322,22 @@ def estimate_document_skew(
     normalized = method.strip().lower()
     if normalized not in DESKEW_METHOD_CHOICES:
         raise ValueError(f"Unsupported deskew method: {method}")
-    if normalized == DESKEW_METHOD_NONE or image.size == 0:
-        return SkewEstimate(0.0, normalized, 1.0)
+    if normalized == DESKEW_METHOD_NONE:
+        return SkewEstimate(
+            0.0,
+            normalized,
+            1.0,
+            selected_method=DESKEW_METHOD_NONE,
+            reason="disabled",
+        )
+    if image.size == 0:
+        return SkewEstimate(
+            0.0,
+            normalized,
+            0.0,
+            selected_method=normalized,
+            reason="empty_image",
+        )
     gray = _deskew_gray(image)
     if normalized == DESKEW_METHOD_MIN_AREA:
         return _min_area_skew(gray, max_angle=max_angle)
@@ -299,6 +351,8 @@ def estimate_document_skew(
             DESKEW_METHOD_HYBRID,
             hough.confidence,
             hough.line_count,
+            selected_method=DESKEW_METHOD_HOUGH,
+            reason="hough_selected",
         )
     min_area = _min_area_skew(gray, max_angle=max_angle)
     return SkewEstimate(
@@ -306,7 +360,41 @@ def estimate_document_skew(
         DESKEW_METHOD_HYBRID,
         min_area.confidence,
         hough.line_count,
+        selected_method=DESKEW_METHOD_MIN_AREA,
+        reason=f"hough_{hough.reason};min_area_selected",
     )
+
+
+def deskew_document_with_diagnostics(
+    image: np.ndarray,
+    *,
+    method: str = DESKEW_METHOD_HYBRID,
+    max_angle: float = 20.0,
+) -> tuple[np.ndarray, SkewEstimate]:
+    """Deskew without clipping content and return the full estimate evidence."""
+    estimate = estimate_document_skew(image, method=method, max_angle=max_angle)
+    angle = estimate.angle_degrees
+    if abs(angle) < 0.05:
+        reason = estimate.reason if angle == 0.0 else "angle_below_threshold"
+        return image, replace(estimate, angle_degrees=0.0, reason=reason)
+
+    height, width = image.shape[:2]
+    center = (width / 2.0, height / 2.0)
+    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    cosine = abs(float(matrix[0, 0]))
+    sine = abs(float(matrix[0, 1]))
+    output_width = max(1, int(np.ceil(width * cosine + height * sine)))
+    output_height = max(1, int(np.ceil(height * cosine + width * sine)))
+    matrix[0, 2] += output_width / 2.0 - center[0]
+    matrix[1, 2] += output_height / 2.0 - center[1]
+    rotated = cv2.warpAffine(
+        image,
+        matrix,
+        (output_width, output_height),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+    return rotated, estimate
 
 
 def deskew_document(
@@ -320,19 +408,9 @@ def deskew_document(
 
     Returns `(deskewed_image, applied_angle_degrees)`.
     """
-    estimate = estimate_document_skew(image, method=method, max_angle=max_angle)
-    angle = estimate.angle_degrees
-    if abs(angle) < 0.05:
-        return image, 0.0
-
-    h, w = image.shape[:2]
-    center = (w / 2.0, h / 2.0)
-    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
-    rotated = cv2.warpAffine(
+    rotated, estimate = deskew_document_with_diagnostics(
         image,
-        matrix,
-        (w, h),
-        flags=cv2.INTER_CUBIC,
-        borderMode=cv2.BORDER_REPLICATE,
+        method=method,
+        max_angle=max_angle,
     )
-    return rotated, float(angle)
+    return rotated, float(estimate.angle_degrees)

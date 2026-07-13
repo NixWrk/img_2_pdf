@@ -1,4 +1,4 @@
-"""Verify that a built wheel contains and can load the production model assets."""
+"""Verify that a built wheel contains production code and no unlicensed model assets."""
 
 from __future__ import annotations
 
@@ -12,8 +12,16 @@ from pathlib import Path
 
 REQUIRED_SUFFIXES = {
     "uniscan/tools/batch_pipeline.py",
-    "uniscan/office_lens/models/mnv2_ep42_wb_quant.ort",
-    "uniscan/office_lens/models/triclass_doc_classifier.ort",
+    "uniscan/office_lens/models/README.md",
+}
+FORBIDDEN_MODEL_SUFFIXES = {
+    ".onnx",
+    ".ort",
+    ".pdmodel",
+    ".pdparams",
+    ".pt",
+    ".pth",
+    ".safetensors",
 }
 
 
@@ -30,6 +38,14 @@ def verify_wheel(directory: Path) -> Path:
         missing = sorted(REQUIRED_SUFFIXES - names)
         if missing:
             raise RuntimeError(f"Wheel is missing required files: {', '.join(missing)}")
+        forbidden_models = sorted(
+            name for name in names if Path(name).suffix.lower() in FORBIDDEN_MODEL_SUFFIXES
+        )
+        if forbidden_models:
+            raise RuntimeError(
+                f"Wheel contains model weights without redistribution approval: "
+                f"{', '.join(forbidden_models)}"
+            )
         entry_points = [name for name in names if name.endswith(".dist-info/entry_points.txt")]
         if len(entry_points) != 1:
             raise RuntimeError("Wheel must contain exactly one entry_points.txt")
@@ -45,8 +61,8 @@ def verify_wheel(directory: Path) -> Path:
                 for module_name in tuple(sys.modules):
                     if module_name == "uniscan" or module_name.startswith("uniscan."):
                         del sys.modules[module_name]
-                package = importlib.import_module("uniscan.office_lens")
-                package.OfficeLensOnnx()
+                importlib.import_module("uniscan")
+                importlib.import_module("uniscan.core.scanner_adapter")
             finally:
                 sys.path.remove(tmp)
 

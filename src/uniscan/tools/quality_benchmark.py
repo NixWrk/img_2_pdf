@@ -14,14 +14,16 @@ import numpy as np
 
 from uniscan.core.geometry import order_quad_points
 from uniscan.core.scanner_adapter import (
-    DETECTOR_BACKEND_OFFICE_LENS_ONNX,
+    DETECTOR_BACKEND_CV_HYBRID,
+    DETECTOR_BACKEND_PADDLEOCR_UVDOC,
+    DETECTOR_BACKEND_UVDOC,
     ScanAdapterError,
     probe_detector_backend,
     scan_with_document_detector,
 )
 from uniscan.io.loaders import imread_unicode
 
-DEFAULT_QUALITY_BACKENDS = (DETECTOR_BACKEND_OFFICE_LENS_ONNX,)
+DEFAULT_QUALITY_BACKENDS = (DETECTOR_BACKEND_CV_HYBRID,)
 
 
 @dataclass(slots=True, frozen=True)
@@ -122,6 +124,8 @@ def _run_backend(
             scanner_root=scanner_root,
             backends=(backend,),
             uvdoc_cache_home=uvdoc_cache_home,
+            allow_dewarp_backends=backend
+            in (DETECTOR_BACKEND_UVDOC, DETECTOR_BACKEND_PADDLEOCR_UVDOC),
         )
         latency_ms = (time.perf_counter() - started) * 1000.0
         error_px: float | None = None

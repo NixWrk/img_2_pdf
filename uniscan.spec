@@ -4,9 +4,14 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
 datas = collect_data_files(
-    "uniscan.office_lens",
-    includes=["models/*", "model_metadata/*"],
-) + collect_data_files("tkinterdnd2")
+    "tkinterdnd2",
+    includes=[
+        "tkdnd/win-x64/*.dll",
+        "tkdnd/win-x64/*.tcl",
+        "tkdnd/win-x64-tcl9/*.dll",
+        "tkdnd/win-x64-tcl9/*.tcl",
+    ],
+)
 hiddenimports = collect_submodules("tkinterdnd2")
 
 a = Analysis(
@@ -15,10 +20,10 @@ a = Analysis(
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[],
+    hookspath=["scripts/pyinstaller_hooks"],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=["fitz", "onnxruntime", "pymupdf"],
     noarchive=False,
     optimize=0,
 )

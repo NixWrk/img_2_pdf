@@ -26,7 +26,7 @@ if not exist "%VENV_PY%" (
 )
 
 if "%NEEDS_INSTALL%"=="0" (
-  "%VENV_PY%" -c "import cv2, customtkinter, fitz, img2pdf, onnxruntime, uniscan" >nul 2>nul
+  "%VENV_PY%" -c "import cv2, customtkinter, img2pdf, numpy, PIL, pypdfium2, tkinterdnd2, uniscan" >nul 2>nul
   if errorlevel 1 set "NEEDS_INSTALL=1"
 )
 

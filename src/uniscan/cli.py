@@ -41,10 +41,15 @@ def main(argv: list[str] | None = None) -> int:
 
     doctor_parser = subparsers.add_parser(
         "doctor",
-        help="Check runtime dependencies, bundled models, storage, and optionally a camera.",
+        help="Check required runtime, optional models, storage, and optionally a camera.",
     )
     doctor_parser.add_argument("--camera", action="store_true", help="Open and read camera 0.")
     doctor_parser.add_argument("--camera-index", type=int, default=0)
+    doctor_parser.add_argument(
+        "--gui-runtime",
+        action="store_true",
+        help="Create a real Tk/TkDND root to verify native GUI payloads.",
+    )
     doctor_parser.add_argument("--json", action="store_true", help="Write machine-readable JSON.")
 
     convert_parser = subparsers.add_parser(
@@ -221,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
         "--backends",
         nargs="+",
         default=None,
-        help="Backend names to run. Defaults to office_lens_onnx.",
+        help="Backend names to run. Defaults to cv_hybrid.",
     )
     benchmark_parser.add_argument(
         "--scanner-root",
@@ -293,7 +298,11 @@ def main(argv: list[str] | None = None) -> int:
         print(__version__)
         return 0
     if args.command == "doctor":
-        report = run_diagnostics(check_camera=args.camera, camera_index=args.camera_index)
+        report = run_diagnostics(
+            check_camera=args.camera,
+            check_gui_runtime=args.gui_runtime,
+            camera_index=args.camera_index,
+        )
         print(diagnostics_json(report) if args.json else format_diagnostics(report))
         return 0 if report.ok else 1
     if args.command == "convert":

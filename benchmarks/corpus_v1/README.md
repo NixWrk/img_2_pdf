@@ -16,6 +16,7 @@ uniscan benchmark-quality --input benchmarks/corpus_v1 --output quality-report.j
   --baseline benchmarks/corpus_v1/baseline.json
 ```
 
-The baseline requires all five scenes to crop successfully with no fallback and a mean corner
-error below 5% of the image diagonal. Its latency ceiling is intentionally loose enough for
-shared CI runners; latency remains visible in every report for trend analysis.
+The redistributable `cv_hybrid` baseline requires all five scenes to crop successfully with no
+fallback and a mean corner error below 1% of the image diagonal. Its latency ceiling is
+intentionally loose enough for shared CI runners; latency remains visible in every report for
+trend analysis.

@@ -11,15 +11,23 @@ From a 64-bit Windows PowerShell with the development `.venv` present:
 .\scripts\build_windows.ps1
 ```
 
-The script installs the release extra, runs lint/tests, builds `dist\uniscan`, runs frozen
-`--version` and `doctor --json` smoke checks, then writes:
+The script verifies that `.venv` is a `win-amd64` interpreter, installs the development and release
+extras, runs lint/tests/quality baselines, builds `dist\uniscan`, generates the third-party license
+compatibility/frozen-payload inventory with Python/Tcl/Tk notices, and runs frozen
+CLI/PDF/GUI-runtime smoke checks before writing:
 
-- `artifacts\uniscan-<version>-windows-x64.zip`
-- `artifacts\uniscan-<version>-windows-x64.zip.sha256`
+- tagged CI: `artifacts\uniscan-<version>-windows-x64.zip` plus `.sha256`;
+- local/manual build: `artifacts\uniscan-<version>-dev-<commit>[-dirty]-windows-x64.zip` plus
+  `.sha256`, so an unreleased build cannot overwrite a versioned release artifact.
 
-The package contains the ONNX models and Tk drag-and-drop runtime. Git tag `v*` builds the same
-artifact in GitHub Actions and publishes it with its checksum. The ZIP also carries the UniScan
-license, readme, changelog, and Windows/manual-smoke documentation.
+The package contains only Windows x64 Tk drag-and-drop binaries; optional Office Lens ONNX weights
+are not redistributed. The ZIP also carries the UniScan license, a portable-specific readme,
+changelog, required dependency and bundled-runtime notices, and Windows/manual-smoke documentation.
+
+A Git tag must exactly equal `v<source-version>`, and the matching changelog section must be cut
+before CI accepts it. A tag creates a **draft prerelease**, not a public release. Signing, clean
+machine/manual-camera evidence, checksum verification, and artifact review must be completed before
+a maintainer publishes that draft.
 
 ## Install and run on a clean machine
 
@@ -28,9 +36,9 @@ license, readme, changelog, and Windows/manual-smoke documentation.
 3. Run `uniscan\uniscan.exe doctor`.
 4. Run `uniscan\uniscan.exe` for the GUI or use `uniscan\uniscan.exe convert ...` for CLI work.
 
-Windows may show a SmartScreen warning because the current preview artifact is unsigned.
-Treat this artifact as an internal preview until the signing and dependency-license gates in the
-release checklist are completed.
+Windows may show a SmartScreen warning because a locally built preview artifact is unsigned. Treat
+it as internal until every gate in the release checklist is complete. CI deliberately cannot
+publish a tagged build automatically.
 
 ## Uninstall
 
@@ -39,9 +47,8 @@ as well, delete `%LOCALAPPDATA%\UniScan`. No other system state is installed.
 
 ## Signing decision
 
-Current decision: internal/test artifacts remain unsigned. Authenticode signing is required
-before public distribution because an unsigned camera application produces avoidable SmartScreen
-friction and offers no publisher identity. Before the first public release, obtain an
-organization-backed code-signing certificate, protect the signing key in an approved CI signing
-service, sign `uniscan.exe`, and verify the signature before creating the ZIP. The release job
-must not receive an exportable private key.
+Internal/test artifacts may remain unsigned. Authenticode signing is required before public
+distribution because an unsigned camera application produces avoidable SmartScreen friction and
+offers no publisher identity. Obtain an organization-backed code-signing certificate, protect the
+key in an approved CI signing service, sign `uniscan.exe`, and verify its chain and timestamp before
+publishing the release draft. The release job must not receive an exportable private key.

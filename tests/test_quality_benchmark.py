@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import cv2
 import numpy as np
 
 from uniscan.cli import main
 from uniscan.core.scanner_adapter import ScanOutput
+from uniscan.core.scanner_adapter import DETECTOR_BACKEND_CV_HYBRID
 from uniscan.tools.quality_benchmark import (
     run_quality_benchmark,
     validate_quality_baseline,
@@ -74,6 +76,24 @@ def test_quality_benchmark_measures_corners_and_writes_report(tmp_path, monkeypa
     assert payload["corpusVersion"] == "test-1"
     assert payload["backends"][0]["cropSuccessRate"] == 1.0
     assert payload["backends"][0]["pages"][0]["cornerErrorPx"] < 2.0
+
+
+def test_cv_hybrid_meets_canonical_crop_ground_truth(tmp_path) -> None:
+    corpus = Path(__file__).resolve().parents[1] / "benchmarks" / "corpus_v1"
+
+    report = run_quality_benchmark(
+        corpus_dir=corpus,
+        output_path=tmp_path / "cv-hybrid.json",
+        backends=(DETECTOR_BACKEND_CV_HYBRID,),
+        corner_tolerance_ratio=0.08,
+    )
+
+    result = report.backends[0]
+    assert result.total_pages == 5
+    assert result.crop_success_rate == 1.0
+    assert result.fallback_rate == 0.0
+    assert result.mean_corner_error_ratio is not None
+    assert result.mean_corner_error_ratio < 0.01
 
 
 def test_quality_baseline_reports_regressions(tmp_path, monkeypatch) -> None:

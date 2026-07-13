@@ -10,6 +10,8 @@ import tempfile
 import zlib
 from pathlib import Path
 
+import pypdfium2 as pdfium
+
 
 def _run(executable: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -37,6 +39,20 @@ def _write_test_png(path: Path) -> None:
     )
 
 
+def _first_page_size(path: Path) -> tuple[float, float]:
+    document = pdfium.PdfDocument(path)
+    try:
+        if len(document) != 1:
+            raise RuntimeError(f"expected one page in {path}, found {len(document)}")
+        page = document[0]
+        try:
+            return tuple(float(value) for value in page.get_size())
+        finally:
+            page.close()
+    finally:
+        document.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv[1:]
     if len(args) != 1:
@@ -60,6 +76,23 @@ def main(argv: list[str] | None = None) -> int:
     if doctor.returncode != 0 or not report.get("ok"):
         print(json.dumps(report, indent=2), file=sys.stderr)
         return 1
+    gui_runtime = _run(executable, "doctor", "--gui-runtime", "--json")
+    try:
+        gui_report = json.loads(gui_runtime.stdout)
+    except json.JSONDecodeError:
+        print(
+            gui_runtime.stderr or gui_runtime.stdout or "GUI doctor did not return JSON",
+            file=sys.stderr,
+        )
+        return 1
+    if gui_runtime.returncode != 0 or not gui_report.get("ok"):
+        print(json.dumps(gui_report, indent=2), file=sys.stderr)
+        return 1
+
+    help_result = _run(executable, "--help")
+    if help_result.returncode != 0 or "benchmark-geometry" not in help_result.stdout:
+        print(help_result.stderr or "frozen CLI is missing current commands", file=sys.stderr)
+        return 1
 
     with tempfile.TemporaryDirectory(prefix="uniscan_frozen_smoke_") as directory:
         root = Path(directory)
@@ -76,6 +109,8 @@ def main(argv: list[str] | None = None) -> int:
             "--no-detect",
             "--mode",
             "none",
+            "--pdf-dpi",
+            "72",
         )
         report_path = output.with_suffix(".pdf.report.json")
         if convert.returncode != 0 or not output.is_file() or not report_path.is_file():
@@ -84,6 +119,10 @@ def main(argv: list[str] | None = None) -> int:
         run_report = json.loads(report_path.read_text(encoding="utf-8"))
         if run_report.get("totalPages") != 1 or not output.read_bytes().startswith(b"%PDF"):
             print("conversion smoke produced invalid outputs", file=sys.stderr)
+            return 1
+        output_size = _first_page_size(output)
+        if any(abs(value - 16.0) > 0.25 for value in output_size):
+            print(f"conversion smoke produced wrong PDF page size: {output_size}", file=sys.stderr)
             return 1
         roundtrip = root / "roundtrip.pdf"
         pdf_import = _run(
@@ -102,6 +141,15 @@ def main(argv: list[str] | None = None) -> int:
         if pdf_import.returncode != 0 or not roundtrip.read_bytes().startswith(b"%PDF"):
             print(
                 pdf_import.stderr or pdf_import.stdout or "PDF import smoke failed", file=sys.stderr
+            )
+            return 1
+        roundtrip_size = _first_page_size(roundtrip)
+        if any(
+            abs(actual - expected) > 0.25 for actual, expected in zip(roundtrip_size, output_size)
+        ):
+            print(
+                f"PDF roundtrip changed physical size: {output_size} -> {roundtrip_size}",
+                file=sys.stderr,
             )
             return 1
     print(f"Frozen UniScan {version.stdout.strip()}: diagnostics OK")

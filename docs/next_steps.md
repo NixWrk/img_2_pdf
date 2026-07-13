@@ -10,18 +10,19 @@ geometry, clean images, and export images or a plain merged PDF.
 
 - Milestone 1 is implemented: headless PDF streaming, atomic output sets, detector policy,
   structured reports, licensing, formatting, and binary cleanup.
-- Milestone 2 is implemented: Windows/Linux CI, wheel/model verification, deterministic camera
+- Milestone 2 is implemented: Windows/Linux CI, wheel/model-exclusion verification, deterministic camera
   tests, 65% total coverage, and 81% non-GUI coverage.
 - Milestone 3 software work is implemented: crash recovery, cancellation coverage,
   drag-and-drop, clipboard import, and a manual smoke checklist. Real-camera sign-off remains an
   external release gate.
 - Milestone 4 is implemented: EXIF orientation, opt-in illumination correction, a generated MIT
-  corpus, and enforced Office Lens crop/corner/latency/fallback thresholds.
+  corpus, and enforced OpenCV crop/corner/latency/fallback thresholds.
 - Milestone 5 engineering is implemented: startup diagnostics, versioned portable Windows ZIP,
   frozen-runtime smoke tests, release automation, changelog, install/uninstall docs, and a
   signing decision. Clean-machine and public Authenticode sign-off remain release gates.
 
-The next engineering roadmap is maintained in [`follow_up_plan.md`](follow_up_plan.md).
+The current engineering roadmap is maintained in [`roadmap.md`](roadmap.md). The older
+`follow_up_plan.md` is retained only as a superseded planning snapshot.
 
 ## Milestone 1 — Pipeline hardening (P0)
 
@@ -66,7 +67,8 @@ passes.
 
 - Test Python 3.11 and the newest supported Python on Windows and Linux headless runners.
 - Run `ruff check`, `ruff format --check`, `pytest`, `pip check`, and wheel build/contents checks.
-- Verify that both bundled ONNX models can create inference sessions from the built wheel.
+- Historical target, withdrawn: bundling extracted ONNX weights. Current wheel verification instead
+  rejects `.ort` files and tests the optional BYOM adapter with fake sessions.
 
 Done when every pull request receives reproducible lint, test, inference-smoke, and packaging
 results.
@@ -99,12 +101,13 @@ at least one real camera.
 - Track crop success, corner error, latency, and fallback rate instead of relying only on visual
   comparison.
 
-Done when quality changes are supported by before/after metrics and do not regress the bundled
-Office Lens baseline.
+Done when quality changes are supported by before/after metrics and do not regress the committed
+redistributable OpenCV baseline.
 
 ## Milestone 5 — Windows release (P2)
 
-- Produce a versioned Windows artifact with the ONNX models included.
+- Historical target, withdrawn: include extracted ONNX weights. Current artifacts exclude them and
+  document the optional BYOM path.
 - Add startup diagnostics for missing camera/runtime capabilities.
 - Add changelog, release checklist, clean-machine install test, and uninstall instructions.
 - Decide whether code signing is required before public distribution.

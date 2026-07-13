@@ -27,7 +27,7 @@ jobs:
           cache: pip
 
       - name: Install project
-        run: python -m pip install -e ".[dev]"
+        run: python -m pip install -e ".[dev,release]"
 
       - name: Check dependencies
         run: python -m pip check
@@ -53,10 +53,13 @@ jobs:
       - name: Enforce non-GUI coverage
         run: python -m coverage report --omit=src/uniscan/ui/app.py --fail-under=80
 
+      - name: Verify dependency license compatibility
+        run: python scripts/collect_third_party_licenses.py .license-audit
+
       - name: Build wheel
         run: python -m pip wheel --no-deps . --wheel-dir dist
 
-      - name: Verify wheel contents and ONNX sessions
+      - name: Verify wheel contents and model policy
         run: python scripts/verify_wheel.py dist
 
       - name: Upload Windows wheel

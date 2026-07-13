@@ -7,7 +7,9 @@ import numpy as np
 import pytest
 
 from uniscan.office_lens.adapter import (
+    CLASSIFIER_MODEL,
     OfficeLensOnnx,
+    QUAD_MODEL,
     _expand_quad,
     _quad_area,
     _quad_image_score,
@@ -37,6 +39,43 @@ def _scene() -> tuple[np.ndarray, np.ndarray]:
     return image, quad
 
 
+class _TensorInfo:
+    name = "input"
+
+
+class _FakeSession:
+    def __init__(self, path: str, providers) -> None:
+        self.path = path
+        self.providers = providers
+
+    def get_inputs(self):
+        return [_TensorInfo()]
+
+    def get_outputs(self):
+        return [_TensorInfo()]
+
+    def run(self, _outputs, _inputs):
+        if self.path.endswith(QUAD_MODEL.name):
+            mask = np.zeros((1, 256, 256, 1), dtype=np.float32)
+            cv2.rectangle(mask[0, :, :, 0], (25, 25), (230, 230), 0.9, -1)
+            return [mask]
+        return [np.array([[0.8, 0.1, 0.1]], dtype=np.float32)]
+
+
+class _FakeRuntime:
+    InferenceSession = _FakeSession
+
+
+def _configure_fake_byom(tmp_path, monkeypatch) -> None:
+    (tmp_path / QUAD_MODEL.name).write_bytes(b"user supplied quad")
+    (tmp_path / CLASSIFIER_MODEL.name).write_bytes(b"user supplied classifier")
+    monkeypatch.setenv("UNISCAN_OFFICE_LENS_MODEL_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "uniscan.office_lens.adapter._load_onnxruntime",
+        lambda: _FakeRuntime(),
+    )
+
+
 def test_quad_helpers_cover_selection_and_error_cases() -> None:
     image, quad = _scene()
     shifted = quad + np.float32([3, 2])
@@ -52,6 +91,13 @@ def test_quad_helpers_cover_selection_and_error_cases() -> None:
     assert np.array_equal(choose_quad(None, quad, 240, 180), quad)
     assert np.array_equal(choose_quad(quad, None, 240, 180), quad)
     assert choose_quad(quad, shifted, 240, 180) is not None
+
+    disjoint = np.float32([[5, 5], [80, 5], [80, 80], [5, 80]])
+    same_area_elsewhere = disjoint + np.float32([120, 90])
+    np.testing.assert_array_equal(
+        choose_quad(disjoint, same_area_elsewhere, 240, 180),
+        disjoint,
+    )
 
 
 def test_mask_and_image_detectors_find_synthetic_document() -> None:
@@ -90,7 +136,8 @@ def test_enhancement_modes_and_perspective_warp() -> None:
     assert min(size) > 100
 
 
-def test_real_model_file_flow_reports_and_saves_all_outputs(tmp_path) -> None:
+def test_byom_file_flow_reports_and_saves_all_outputs(tmp_path, monkeypatch) -> None:
+    _configure_fake_byom(tmp_path, monkeypatch)
     source = tmp_path / "scene.png"
     rgb, quad = _scene()
     cv2.imwrite(str(source), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
@@ -111,7 +158,8 @@ def test_real_model_file_flow_reports_and_saves_all_outputs(tmp_path) -> None:
     assert width > 100 and height > 100
 
 
-def test_overlay_without_quad_and_office_lens_cli(tmp_path, capsys) -> None:
+def test_overlay_without_quad_and_office_lens_cli(tmp_path, capsys, monkeypatch) -> None:
+    _configure_fake_byom(tmp_path, monkeypatch)
     source = tmp_path / "scene.png"
     image, _quad = _scene()
     cv2.imwrite(str(source), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))

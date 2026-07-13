@@ -11,20 +11,17 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-import onnxruntime as ort
-
 from uniscan.io.camera_service import CaptureFactory, CameraService, _opencv_capture_factory
-from uniscan.office_lens import CLASSIFIER_MODEL, QUAD_MODEL
+from uniscan.office_lens import CLASSIFIER_MODEL, MODEL_DIR, QUAD_MODEL
 
 
 RUNTIME_MODULES = (
     "cv2",
     "customtkinter",
-    "fitz",
     "img2pdf",
     "numpy",
-    "onnxruntime",
     "PIL",
+    "pypdfium2",
     "tkinterdnd2",
 )
 
@@ -67,19 +64,46 @@ def _module_checks(module_names: Sequence[str]) -> list[DiagnosticCheck]:
     return checks
 
 
-def _model_check(name: str, path: Path) -> DiagnosticCheck:
-    if not path.is_file():
-        return DiagnosticCheck(name, False, f"missing: {path}")
+def _optional_office_lens_check() -> DiagnosticCheck:
+    """Report BYOM Office Lens availability without failing core diagnostics."""
+    missing = [path for path in (QUAD_MODEL, CLASSIFIER_MODEL) if not path.is_file()]
+    if missing:
+        return DiagnosticCheck(
+            "optional:office-lens",
+            True,
+            "disabled; install licensed models and the 'office-lens' extra to enable it",
+        )
     try:
-        ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+        import onnxruntime as ort
+
+        for path in (QUAD_MODEL, CLASSIFIER_MODEL):
+            ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
     except Exception as exc:
-        return DiagnosticCheck(name, False, f"cannot load {path}: {exc}")
-    return DiagnosticCheck(name, True, f"{path} ({path.stat().st_size} bytes)")
+        return DiagnosticCheck("optional:office-lens", False, str(exc))
+    return DiagnosticCheck("optional:office-lens", True, f"licensed models loaded from {MODEL_DIR}")
+
+
+def _gui_runtime_check() -> DiagnosticCheck:
+    """Create a real TkDND root so frozen native payload failures are observable."""
+    root = None
+    try:
+        from tkinterdnd2 import TkinterDnD
+
+        root = TkinterDnD.Tk()
+        root.withdraw()
+        root.update_idletasks()
+        return DiagnosticCheck("gui-runtime", True, "Tk and native TkDND initialized")
+    except Exception as exc:
+        return DiagnosticCheck("gui-runtime", False, str(exc))
+    finally:
+        if root is not None:
+            root.destroy()
 
 
 def run_diagnostics(
     *,
     check_camera: bool = False,
+    check_gui_runtime: bool = False,
     camera_index: int = 0,
     capture_factory: CaptureFactory = _opencv_capture_factory,
 ) -> DiagnosticReport:
@@ -91,8 +115,9 @@ def run_diagnostics(
         )
     ]
     checks.extend(_module_checks(RUNTIME_MODULES))
-    checks.append(_model_check("model:quad", QUAD_MODEL))
-    checks.append(_model_check("model:classifier", CLASSIFIER_MODEL))
+    checks.append(_optional_office_lens_check())
+    if check_gui_runtime:
+        checks.append(_gui_runtime_check())
 
     try:
         with tempfile.TemporaryDirectory(prefix="uniscan_doctor_") as directory:

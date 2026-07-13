@@ -110,8 +110,13 @@ class CaptureEntry:
 
     @original_image.setter
     def original_image(self, image: np.ndarray) -> None:
-        self.store.write_image(self.paths.original, image)
-        self.store.write_preview(self.paths.preview_original, image)
+        self.paths = self.store.replace_page_set(
+            self.entry_id,
+            original_image=image,
+            # Until downstream processing publishes its own generation, the
+            # safe current representation is the new original itself.
+            current_image=image,
+        )
         self.dewarp_control_points = None
 
     @property
@@ -120,9 +125,10 @@ class CaptureEntry:
 
     @current_image.setter
     def current_image(self, image: np.ndarray) -> None:
-        self.store.write_image(self.paths.current, image)
-        self.store.write_preview(self.paths.preview_current, image)
-        self.store.write_thumbnail(self.paths.thumb, image)
+        self.paths = self.store.replace_page_set(
+            self.entry_id,
+            current_image=image,
+        )
 
     @property
     def preview_original_image(self) -> np.ndarray:
@@ -138,8 +144,10 @@ class CaptureEntry:
 
     def replace_raw(self, raw_image: np.ndarray) -> None:
         """Replace the immutable raw source (used when retaking or replacing a page)."""
-        self.store.write_image(self.paths.raw, raw_image)
-        self.store.write_preview(self.paths.preview_raw, raw_image)
+        self.paths = self.store.replace_page_set(
+            self.entry_id,
+            raw_image=raw_image,
+        )
 
     def set_dewarp_control_points(
         self,
@@ -157,6 +165,8 @@ class CaptureSession:
     def __init__(self, store: PageStore | None = None) -> None:
         self.store = store or PageStore()
         self._entries: list[CaptureEntry] = []
+        self._quarantined_entries: list[dict[str, object]] = []
+        self.restore_warnings: list[str] = []
 
     @property
     def entries(self) -> list[CaptureEntry]:
@@ -165,9 +175,22 @@ class CaptureSession:
     def __len__(self) -> int:
         return len(self._entries)
 
+    @property
+    def quarantined_entry_ids(self) -> tuple[str, ...]:
+        return tuple(
+            str(item["entryId"])
+            for item in self._quarantined_entries
+            if isinstance(item.get("entryId"), str)
+        )
+
+    @property
+    def has_recoverable_state(self) -> bool:
+        """Whether autosave must retain live or quarantined page assets."""
+        return bool(self._entries or self._quarantined_entries)
+
     def clear(self) -> None:
-        for entry in self._entries:
-            self.store.remove_page(entry.entry_id)
+        # Keep assets until the next manifest checkpoint.  If the process dies
+        # before that checkpoint, the previous manifest remains fully restorable.
         self._entries.clear()
 
     def add_entry(self, entry: CaptureEntry) -> None:
@@ -233,9 +256,7 @@ class CaptureSession:
         before = len(self._entries)
         kept: list[CaptureEntry] = []
         for entry in self._entries:
-            if entry.selected:
-                self.store.remove_page(entry.entry_id)
-            else:
+            if not entry.selected:
                 kept.append(entry)
         self._entries = kept
         return before - len(self._entries)
@@ -244,7 +265,6 @@ class CaptureSession:
         index = self._find_index(entry_id)
         if index is None:
             return False
-        self.store.remove_page(entry_id)
         del self._entries[index]
         return True
 
@@ -272,15 +292,19 @@ class CaptureSession:
             return False
 
         entry = self._entries[index]
-        if raw_image is not None:
-            entry.replace_raw(raw_image)
-        entry.original_image = original_image
-        entry.current_image = original_image if current_image is None else current_image
+        entry.paths = self.store.replace_page_set(
+            entry.entry_id,
+            raw_image=raw_image,
+            original_image=original_image,
+            current_image=original_image if current_image is None else current_image,
+        )
+        entry.dewarp_control_points = None
         if name is not None and name.strip():
             entry.name = name.strip()
-        if contour is not None or backend is not None:
-            entry.detected_contour = contour
-            entry.detected_backend = backend
+        # Replacement is authoritative.  A detector miss must clear metadata
+        # from the previous source instead of retaining a stale overlay/backend.
+        entry.detected_contour = contour
+        entry.detected_backend = backend
         return True
 
     def selected_entries(self) -> list[CaptureEntry]:
@@ -312,23 +336,50 @@ class CaptureSession:
                 }
                 for entry in self._entries
             ],
+            # Skipped pages remain referenced until an explicit session discard.
+            # A future restore can recover them if their assets are repaired.
+            "quarantinedEntries": self._quarantined_entries,
         }
         descriptor, raw_stage = tempfile.mkstemp(
             prefix=f".{manifest_path.name}.stage-",
             suffix=".json",
             dir=manifest_path.parent,
         )
-        os.close(descriptor)
         stage = Path(raw_stage)
         try:
-            stage.write_text(
-                json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+                json.dump(payload, stream, indent=2, ensure_ascii=False)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
             os.replace(stage, manifest_path)
+            try:
+                parent_descriptor = os.open(manifest_path.parent, os.O_RDONLY)
+            except OSError:
+                pass
+            else:
+                try:
+                    os.fsync(parent_descriptor)
+                except OSError:
+                    pass
+                finally:
+                    os.close(parent_descriptor)
+        except Exception:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            raise
         finally:
             if stage.exists():
                 stage.unlink()
+        # Delete removed page directories only after the durable manifest no
+        # longer references them.  A crash on either side is recoverable.
+        protected_ids = {
+            *[entry.entry_id for entry in self._entries],
+            *self.quarantined_entry_ids,
+        }
+        self.store.prune_pages(protected_ids)
         return manifest_path
 
     @classmethod
@@ -346,6 +397,9 @@ class CaptureSession:
             raise ValueError(f"Cannot read session manifest: {manifest_path}") from exc
         if payload.get("schemaVersion") != 1 or not isinstance(payload.get("entries"), list):
             raise ValueError(f"Unsupported session manifest: {manifest_path}")
+        quarantined_entries = payload.get("quarantinedEntries", [])
+        if not isinstance(quarantined_entries, list):
+            raise ValueError(f"Invalid quarantined entries in manifest: {manifest_path}")
 
         session_dir_raw = payload.get("sessionDir")
         if not isinstance(session_dir_raw, str):
@@ -358,38 +412,73 @@ class CaptureSession:
 
         store = PageStore.from_session_dir(session_dir)
         session = cls(store=store)
-        for item in payload["entries"]:
-            if not isinstance(item, dict):
-                raise ValueError("Invalid session entry in manifest.")
-            entry_id = str(item.get("entryId", ""))
-            if re.fullmatch(r"[0-9a-f]{32}", entry_id) is None:
-                raise ValueError(f"Invalid session entry id: {entry_id}")
-            paths = store.paths_for_entry(entry_id)
-            required = (paths.raw, paths.original, paths.current)
-            if not all(path.is_file() for path in required):
-                raise ValueError(f"Session page assets are incomplete: {entry_id}")
-            contour_raw = item.get("detectedContour")
-            contour = np.asarray(contour_raw, dtype=np.float32) if contour_raw is not None else None
-            if contour is not None and (contour.shape != (4, 2) or not np.isfinite(contour).all()):
-                raise ValueError(f"Invalid detected contour for session entry: {entry_id}")
-            control_points_raw = item.get("dewarpControlPoints")
+        seen_ids: set[str] = set()
+        restore_items = [*payload["entries"], *quarantined_entries]
+        for position, item in enumerate(restore_items, start=1):
+            entry_id = "unknown"
+            can_quarantine = False
             try:
+                if not isinstance(item, dict):
+                    raise ValueError("entry metadata is not an object")
+                entry_id = str(item.get("entryId", ""))
+                if re.fullmatch(r"[0-9a-f]{32}", entry_id) is None:
+                    raise ValueError("invalid entry id")
+                if entry_id in seen_ids:
+                    raise ValueError("duplicate entry id")
+                # Claim the id before touching its assets.  A malformed duplicate
+                # must never be allowed to shadow or delete the first page.
+                seen_ids.add(entry_id)
+                can_quarantine = True
+                # Raw and original are authoritative.  Current and all display
+                # derivatives are disposable and can be rebuilt after a crash.
+                paths, current_rebuilt = store.repair_page_assets(entry_id)
+                contour_raw = item.get("detectedContour")
+                contour = (
+                    np.asarray(contour_raw, dtype=np.float32) if contour_raw is not None else None
+                )
+                if contour is not None and (
+                    contour.shape != (4, 2) or not np.isfinite(contour).all()
+                ):
+                    raise ValueError("invalid detected contour")
+                control_points_raw = item.get("dewarpControlPoints")
                 control_points = (
                     normalize_control_points(control_points_raw)
                     if control_points_raw is not None
                     else None
                 )
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"Invalid dewarp control points for session entry: {entry_id}"
-                ) from exc
+                backend_raw = item.get("detectedBackend")
+                if backend_raw is not None and not isinstance(backend_raw, str):
+                    raise ValueError("invalid detected backend")
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                if not can_quarantine and entry_id not in seen_ids:
+                    # Without a valid UUID there is no safe way to associate
+                    # this manifest record with a page directory.  Abort the
+                    # restore instead of returning a partial session whose next
+                    # autosave could prune the unknown source assets.
+                    raise ValueError(
+                        f"Cannot safely associate session page {position} with its assets."
+                    ) from exc
+                session.restore_warnings.append(
+                    f"Skipped session page {position} ({entry_id}): {exc}"
+                )
+                if can_quarantine:
+                    # Keep the durable reference across the next autosave.  The
+                    # page can be retried on a later launch and is deleted only
+                    # by an explicit session discard.
+                    session._quarantined_entries.append(dict(item))
+                continue
+
+            if current_rebuilt:
+                session.restore_warnings.append(
+                    f"Recovered session page {position} ({entry_id}) from its original image."
+                )
             session.add_entry(
                 CaptureEntry(
                     name=str(item.get("name", entry_id)),
                     store=store,
                     paths=paths,
                     detected_contour=contour,
-                    detected_backend=item.get("detectedBackend"),
+                    detected_backend=backend_raw,
                     dewarp_control_points=control_points,
                     selected=bool(item.get("selected", False)),
                     entry_id=entry_id,

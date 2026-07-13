@@ -10,6 +10,7 @@ import time
 import numpy as np
 
 from .cleanup import (
+    BINARIZATION_NONE,
     DESPECKLE_NONE,
     DespeckleDiagnostics,
     LightingDiagnostics,
@@ -28,16 +29,17 @@ from .orientation import (
     OrientationDiagnostics,
     orient_document,
 )
-from .postprocess import POSTPROCESSING_OPTIONS
+from .postprocess import POSTPROCESSING_OPTIONS, grayscale
 from .preprocess import (
     DESKEW_METHOD_NONE,
     PreprocessSettings,
     apply_enhancements_with_diagnostics,
-    deskew_document,
+    deskew_document_with_diagnostics,
 )
 from uniscan.storage.stage_cache import ProcessingStageCache
 
 CancelCb = Callable[[], bool]
+PROCESSING_ALGORITHM_VERSION = 2
 
 
 @dataclass(slots=True)
@@ -69,6 +71,10 @@ class PageProcessingDiagnostics:
     orientation: OrientationDiagnostics
     deskew_method: str
     deskew_angle_degrees: float
+    deskew_selected_method: str
+    deskew_confidence: float
+    deskew_line_count: int
+    deskew_reason: str
     dewarp: DewarpDiagnostics
     despeckle: DespeckleDiagnostics
     layout: PageLayoutDiagnostics
@@ -111,7 +117,11 @@ def _run_stage(
 ):
     cache = request.stage_cache
     key = (
-        cache.stage_key(upstream_key, stage, {"version": 1, **options})
+        cache.stage_key(
+            upstream_key,
+            stage,
+            {"version": PROCESSING_ALGORITHM_VERSION, **options},
+        )
         if cache is not None
         else upstream_key
     )
@@ -150,6 +160,8 @@ def process_document_page(
     """Run orientation, deskew, dewarp, cleanup, and layout in the canonical order."""
     if image.size == 0:
         raise ValueError("Cannot process an empty page image.")
+    if request.dewarp_already_applied and request.dewarp_method == DEWARP_METHOD_NONE:
+        raise ValueError("dewarp_already_applied is incompatible with dewarp_method='none'.")
     durations: dict[str, float] = {}
     cache_hits: list[str] = []
     cache = request.stage_cache
@@ -172,14 +184,20 @@ def process_document_page(
         cache_hits=cache_hits,
     )
     _cancelled(request)
+
+    def deskew_stage():
+        output, estimate = deskew_document_with_diagnostics(
+            oriented,
+            method=request.deskew_method,
+        )
+        return output, asdict(estimate)
+
     deskewed, deskew_payload, upstream_key = _run_stage(
         stage="deskew",
         image=oriented,
         upstream_key=upstream_key,
-        options={"method": request.deskew_method},
-        operation=lambda: (lambda result: (result[0], {"angle": float(result[1])}))(
-            deskew_document(oriented, method=request.deskew_method)
-        ),
+        options={"method": request.deskew_method, "diagnostics_version": 2},
+        operation=deskew_stage,
         encode_diagnostics=lambda payload: payload,
         decode_diagnostics=lambda payload: payload,
         cacheable=request.deskew_method != DESKEW_METHOD_NONE,
@@ -187,7 +205,7 @@ def process_document_page(
         durations=durations,
         cache_hits=cache_hits,
     )
-    deskew_angle = float(deskew_payload["angle"])
+    deskew_angle = float(deskew_payload["angle_degrees"])
     _cancelled(request)
     if request.dewarp_already_applied:
         dewarped = deskewed
@@ -238,7 +256,18 @@ def process_document_page(
     postprocess = POSTPROCESSING_OPTIONS[request.postprocess_name]
 
     def cleanup_stage():
-        postprocessed = postprocess(dewarped)
+        settings = request.preprocess_settings
+        will_binarize = settings is not None and (
+            settings.apply_threshold or settings.binarization_method != BINARIZATION_NONE
+        )
+        # Black-and-white postprocess already applies an adaptive threshold.
+        # If the cleanup settings request a binarizer, start from grayscale so
+        # fixed/Otsu/Sauvola/Wolf is applied exactly once.
+        postprocessed = (
+            grayscale(dewarped)
+            if request.postprocess_name == "Black and White" and will_binarize
+            else postprocess(dewarped)
+        )
         if request.preprocess_settings is None:
             return postprocessed, DespeckleDiagnostics(
                 strength=DESPECKLE_NONE,
@@ -303,6 +332,12 @@ def process_document_page(
             orientation=orientation,
             deskew_method=request.deskew_method,
             deskew_angle_degrees=round(float(deskew_angle), 3),
+            deskew_selected_method=str(
+                deskew_payload.get("selected_method") or request.deskew_method
+            ),
+            deskew_confidence=round(float(deskew_payload.get("confidence", 0.0)), 3),
+            deskew_line_count=int(deskew_payload.get("line_count", 0)),
+            deskew_reason=str(deskew_payload.get("reason", "unknown")),
             dewarp=dewarp,
             despeckle=despeckle,
             layout=layout,

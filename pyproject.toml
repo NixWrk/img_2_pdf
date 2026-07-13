@@ -1,25 +1,25 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "uniscan"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Unified document scanner (camera + files/folder + PDF) toolkit."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
-  { name = "img_2_pdf contributors" }
+  { name = "UniScan contributors" }
 ]
 dependencies = [
   "opencv-python>=4.8",
   "numpy>=1.26",
   "pillow>=10.0",
   "img2pdf>=0.5",
-  "pymupdf>=1.24",
+  "pypdfium2>=4.30",
   "customtkinter>=5.2",
-  "onnxruntime>=1.18",
   "tkinterdnd2>=0.6.2",
 ]
 
@@ -32,6 +32,9 @@ dev = [
 release = [
   "pyinstaller>=6.21,<7",
 ]
+office-lens = [
+  "onnxruntime>=1.18",
+]
 
 [project.scripts]
 uniscan = "uniscan.cli:main"
@@ -40,11 +43,14 @@ uniscan-office-lens = "uniscan.office_lens.cli:main"
 [tool.setuptools]
 package-dir = {"" = "src"}
 
+[tool.setuptools.dynamic]
+version = { attr = "uniscan.__version__" }
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"uniscan.office_lens" = ["models/*.ort", "model_metadata/*.json"]
+"uniscan.office_lens" = ["models/README.md"]
 
 [tool.ruff]
 line-length = 100
