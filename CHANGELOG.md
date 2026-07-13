@@ -21,7 +21,7 @@ All notable changes to UniScan are documented here. The project follows Semantic
   dewarp safety, and latency.
 - Independent content-box detection and optional A4/Letter page layout with consistent margins
   and alignment.
-- Dependency-free Otsu, Sauvola, and Wolf binarization; isolated-speck removal that protects nearby
+- Built-in Otsu, Sauvola, and Wolf binarization; isolated-speck removal that protects nearby
   punctuation; and separate shadow, glare, and clipped-pixel diagnostics.
 - Batch CLI and JSON reporting for binarization parameters, despeckle safety counts, and optional
   lighting evidence.
@@ -48,7 +48,7 @@ All notable changes to UniScan are documented here. The project follows Semantic
   runs in a cancellable worker and commits page generations transactionally with stale-revision
   and rollback checks.
 - Runtime diagnostics now distinguish the required Office Lens quad model from the optional
-  classifier used only by uto cleanup mode.
+  classifier used only by `auto` cleanup mode.
 - GUI processing now exposes page-wave removal, and Page tools allows choosing the deskew
   estimator before applying automatic rotation correction.
 - Dewarp remains automatic-first while allowing correction of the generated model through control
@@ -65,7 +65,7 @@ All notable changes to UniScan are documented here. The project follows Semantic
 - Added cancellation checkpoints around native processing, cache, rendering, staging, and
   publication; excluded unidentified UVDoc generations from persistent downstream cache hits.
 - Prevented concurrent UniScan writers from losing PDF, report, or neighbouring image updates;
-  rejected link-like and multiply linked lock/target paths before mutation and made recovery use
+  rejected link-like targets and multiply linked lock paths before mutation, and made recovery use
   canonical output identities.
 - Restored compatibility with the minimum supported pypdfium2 API, bounded exact PDF render
   allocations, and reported each spread page's own duration instead of cumulative elapsed time.

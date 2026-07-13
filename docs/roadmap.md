@@ -31,20 +31,22 @@ New code and model weights must have explicit compatible terms.
 
 ## Current baseline
 
-The repository already has camera/image/PDF input, OpenCV page detection, an optional BYOM Office
-Lens adapter, perspective correction, selectable deskew, offline text-line dewarp, optional PaddleOCR UVDoc,
-editable persisted dewarp points, enhancement presets, split-page support, session recovery,
-atomic PDF/image export, structured CLI reports, CI, a portable Windows build, and a deterministic
-crop benchmark.
+The repository already has camera/image/streamed-PDF input, bounded decoding, OpenCV page
+detection, an optional BYOM Office Lens adapter, perspective correction, orientation, selectable
+deskew, validated text-line dewarp, optional PaddleOCR UVDoc, content boxes, A4/Letter layout,
+cleanup and lighting diagnostics, persisted dewarp points and applied recipes, split-page support,
+single-writer session recovery, atomic cross-process PDF/image/report publication, structured CLI
+reports, CI, a portable Windows build, and deterministic crop/geometry benchmarks.
 
 ## Execution status
 
 - [x] Phase 1 — automatic geometry and its regression corpus.
-- [ ] Phase 2 — ScanTailor-style content boxes, page layout, and cleanup.
-- [ ] Phase 3 — one processing controller and stage cache.
+- [x] Phase 2 — core content boxes, page layout, cleanup, and diagnostics.
+- [ ] Phase 3 — controller, cache, and applied recipe are complete; bounded worker pool remains.
 - [ ] Phase 4 — exception-focused review GUI.
-- [ ] Phase 5 — acquisition and performance.
-- [ ] Phase 6 — session lifecycle and reliability.
+- [ ] Phase 5 — streamed GUI PDF import is complete; large-job/UI virtualization work remains.
+- [ ] Phase 6 — schema migration, fingerprint validation, and single-writer locking are complete;
+  explicit project lifecycle, retention, and presets remain.
 - [ ] Phase 7 — real-document validation and personal release.
 
 ## Phase 1 — automatic geometry
@@ -58,7 +60,8 @@ Goal: make the geometry path automatic and measurable before adding more cleanup
 2. Add `dewarp=auto`.
    - Estimate the offline text-line model first.
    - Validate the candidate against the unmodified page.
-   - Use UVDoc only when explicitly installed/enabled; never download a model unexpectedly.
+   - Initialize UVDoc only when explicitly installed/enabled; its upstream runtime may populate
+     the selected model cache on first use.
    - Reject a candidate that worsens geometry or creates excessive blank/clipped borders.
 3. Record geometry evidence per page:
    - orientation angle/confidence/reason;
@@ -94,7 +97,8 @@ Goal: improve the document itself after geometry is correct.
    - conservative despeckle with strength levels;
    - shadow normalization and glare-area detection as separate operations.
 
-Implementation note: Otsu/Sauvola/Wolf, conservative isolated-speck removal, and non-destructive
+Implementation status: content boxes, A4/Letter layout, margins/alignment,
+Otsu/Sauvola/Wolf, conservative isolated-speck removal, and non-destructive
 shadow/glare/clipped-pixel diagnostics are implemented in core, batch report, CLI, and GUI.
 4. Add picture/fill protection masks only if real examples show that automatic cleanup damages
    photographs, stamps, diagrams, or handwriting. Do not add OCR-driven zones.
@@ -113,15 +117,15 @@ Planned commits:
 
 Goal: remove processing-policy duplication and make previews trustworthy.
 
-Implementation status: the shared request/result controller, canonical stage ordering, and bounded
-dependency-aware disk cache are implemented for batch CLI and GUI preview/apply. Persistent
-per-page overrides remain next.
+Implementation status: the shared request/result controller, canonical stage ordering, bounded
+dependency-aware disk cache, and versioned per-page applied recipe/diagnostics are implemented for
+batch CLI and GUI preview/apply. GUI export preserves the exact committed pixels and verifies their
+fingerprint after session restore. A bounded multi-page worker pool remains.
 
-1. Introduce a GUI-independent page-processing request/result model.
-2. Route GUI preview/apply and headless conversion through the same ordered stages and diagnostics
+1. [x] Introduce a GUI-independent page-processing request/result model.
+2. [x] Route GUI preview/apply and headless conversion through the same ordered stages and diagnostics
    schema; GUI export publishes each page's immutable last-applied generation.
-3. Persist every per-page override: boundary, orientation, deskew, dewarp model, cleanup, content
-   box, layout, and output mode.
+3. [x] Persist the applied processing recipe/evidence plus manual boundary and dewarp metadata.
 4. [x] Add stage fingerprints and a bounded disk cache. Editing a late cleanup stage must not rerun
    page detection or dewarp; changing page geometry must invalidate downstream stages.
 5. Add bounded worker-pool processing with deterministic output order and cancellation.
@@ -164,7 +168,7 @@ Planned commits:
 
 Goal: keep large jobs and cameras responsive.
 
-1. Stream GUI PDF import through the same page iterator used by CLI.
+1. [x] Stream GUI PDF import through the same page iterator used by CLI and stage pages on disk.
 2. Add 100/500-page memory and cancellation regression tests.
 3. Virtualize thumbnail decode/rendering and prefetch only nearby pages.
 4. Measure stage timings and optimize only demonstrated bottlenecks.
@@ -179,7 +183,8 @@ failures identify the unavailable capability rather than an opaque backend prope
 Goal: make long personal projects recoverable and predictable.
 
 1. Add explicit New/Open/Save As/Discard recovery actions.
-2. Version manifest migrations and quarantine corrupt sessions.
+2. [x] Version manifest migrations, quarantine corrupt pages, validate committed-image
+   fingerprints, and prevent multiple GUI writers from sharing one autosave state.
 3. Add visible bounded retention for abandoned session directories and stage caches.
 4. Test recovery across released manifest versions and failure during every processing stage.
 5. Add output naming templates and reusable export presets.
