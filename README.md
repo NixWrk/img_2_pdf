@@ -229,6 +229,10 @@ then share `PageProcessingRequest -> process_document_page() -> PageProcessingRe
 4. cleanup/postprocess;
 5. content-box detection and optional A4/Letter layout.
 
+`--orientation auto` uses conservative non-OCR layout evidence. For a camera series whose physical
+rotation is known, use `--orientation 90`, `180`, or `270` to force that clockwise correction and
+avoid inherently ambiguous 180-degree text-direction guesses.
+
 `--dewarp textline` uses the built-in text-line geometry estimator and needs no optional model
 runtime. `--dewarp auto` is a conservative policy when explicitly selected: it tries text-line
 dewarp, measures whether geometry improved, and rejects harmful candidates. UVDoc is not considered

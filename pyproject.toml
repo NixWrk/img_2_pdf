@@ -14,12 +14,12 @@ authors = [
   { name = "UniScan contributors" }
 ]
 dependencies = [
-  "opencv-python>=4.8",
+  "opencv-python>=4.8,<5",
   "numpy>=1.26",
   "pillow>=10.0",
   "img2pdf>=0.5",
-  "pypdfium2>=4.30",
-  "customtkinter>=5.2",
+  "pypdfium2>=4.30,<5.12",
+  "customtkinter>=5.2,<6",
   "tkinterdnd2>=0.6.2",
 ]
 
@@ -31,6 +31,7 @@ dev = [
 ]
 release = [
   "pyinstaller>=6.21,<7",
+  "setuptools>=77",
 ]
 office-lens = [
   "onnxruntime>=1.18",

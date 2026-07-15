@@ -347,7 +347,7 @@ def _iter_image_frames(
     max_pixels: int = DEFAULT_MAX_INPUT_PIXELS,
     cancel_cb: CancelCb | None = None,
 ) -> Iterator[LoadedItem]:
-    """Yield every frame from an image container (notably multi-page TIFF)."""
+    """Yield TIFF pages, or the primary frame for ordinary raster inputs."""
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", Image.DecompressionBombWarning)
@@ -362,7 +362,13 @@ def _iter_image_frames(
         ) from exc
 
     with source:
-        frame_count = int(getattr(source, "n_frames", 1))
+        # JPEG files from some cameras are exposed by Pillow as MPO containers:
+        # frame 0 is the photograph and later frames are embedded previews. The
+        # public input contract treats JPG/JPEG as one page and only TIFF as a
+        # multi-page raster format.
+        frame_count = (
+            int(getattr(source, "n_frames", 1)) if path.suffix.lower() in {".tif", ".tiff"} else 1
+        )
         for frame_index in range(frame_count):
             if cancel_cb is not None and cancel_cb():
                 raise RuntimeError("Cancelled by user.")

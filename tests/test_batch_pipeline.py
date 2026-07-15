@@ -154,6 +154,22 @@ def test_run_batch_pipeline_writes_pdf_and_images(tmp_path) -> None:
     assert not list(tmp_path.glob(".*.stage-*.uniscan-output.lock"))
 
 
+def test_batch_pipeline_reports_completed_input_progress(tmp_path) -> None:
+    source = tmp_path / "source.png"
+    _write_image(source, 90)
+    progress = []
+
+    run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "result.pdf",
+        detect_document=False,
+        lens_mode="none",
+        on_progress=lambda current, total, name: progress.append((current, total, name)),
+    )
+
+    assert progress == [(1, 1, "source.png")]
+
+
 def test_batch_holds_final_images_lock_while_cloning_and_staging(tmp_path, monkeypatch) -> None:
     from uniscan.tools import batch_pipeline
 

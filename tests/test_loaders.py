@@ -102,6 +102,20 @@ def test_load_input_items_yields_every_multipage_tiff_frame(tmp_path) -> None:
     assert [round(float(image.mean())) for _name, image in items] == [30, 210]
 
 
+def test_jpeg_with_embedded_mpo_preview_yields_only_primary_frame(tmp_path) -> None:
+    path = tmp_path / "camera.jpg"
+    primary = Image.fromarray(np.full((24, 32, 3), 30, dtype=np.uint8))
+    preview = Image.fromarray(np.full((8, 12, 3), 210, dtype=np.uint8))
+    primary.save(path, format="MPO", save_all=True, append_images=[preview])
+
+    items = load_input_items([path], pdf_dpi=72)
+
+    assert len(items) == 1
+    assert items[0][0] == "camera.jpg"
+    assert items[0][1].shape == (24, 32, 3)
+    assert round(float(items[0][1].mean())) == 30
+
+
 def test_raster_input_fails_closed_above_configured_pixel_limit(tmp_path) -> None:
     path = tmp_path / "large-for-test.png"
     Image.fromarray(np.zeros((24, 32), dtype=np.uint8)).save(path)

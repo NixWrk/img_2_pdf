@@ -79,6 +79,7 @@ DETECTOR_POLICY_CHOICES = (
     "opencv_minrect",
 )
 CancelCb = Callable[[], bool]
+ProgressCb = Callable[[int, int, str], None]
 
 _DETECTOR_POLICIES: dict[str, tuple[str, ...]] = {
     "auto": DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
@@ -963,6 +964,7 @@ def run_batch_pipeline(
     stage_cache_dir: Path | None = None,
     stage_cache_max_mb: int = 512,
     uvdoc_cache_home: Path | None = None,
+    on_progress: ProgressCb | None = None,
     cancel_cb: CancelCb | None = None,
 ) -> BatchPipelineResult:
     """Run the complete streaming pre-OCR pipeline and atomically publish its outputs."""
@@ -1105,6 +1107,7 @@ def run_batch_pipeline(
             input_files,
             pdf_dpi=input_dpi,
             max_input_pixels=max_input_pixels,
+            on_progress=on_progress,
             cancel_cb=cancel_cb,
         ):
             if cancel_cb is not None and cancel_cb():

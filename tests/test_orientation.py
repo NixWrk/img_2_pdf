@@ -68,6 +68,29 @@ def test_orient_document_restores_sideways_page() -> None:
     assert np.array_equal(corrected, upright)
 
 
+@pytest.mark.parametrize("angle", (90, 180, 270))
+def test_orient_document_supports_explicit_right_angle_rotation(angle) -> None:
+    source = _text_page()
+
+    rotated, diagnostics = orient_document(source, method=str(angle))
+
+    assert diagnostics.applied is True
+    assert diagnostics.angle_degrees == angle
+    assert diagnostics.confidence == 1.0
+    assert diagnostics.reason == "forced"
+    assert np.array_equal(
+        rotated,
+        cv2.rotate(
+            source,
+            {
+                90: cv2.ROTATE_90_CLOCKWISE,
+                180: cv2.ROTATE_180,
+                270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+            }[angle],
+        ),
+    )
+
+
 def test_orientation_is_noop_for_ambiguous_and_disabled_images() -> None:
     ambiguous = np.full((300, 220, 3), 255, dtype=np.uint8)
     cv2.rectangle(ambiguous, (40, 70), (180, 230), (0, 0, 0), 3)

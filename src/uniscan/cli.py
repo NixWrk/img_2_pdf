@@ -149,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
         "--orientation",
         choices=ORIENTATION_METHOD_CHOICES,
         default="none",
-        help="Correct 0/90/180/270 page orientation without OCR.",
+        help="Auto-detect or force a clockwise 90/180/270 page rotation.",
     )
     convert_parser.add_argument(
         "--deskew",
@@ -363,6 +363,10 @@ def main(argv: list[str] | None = None) -> int:
                 stage_cache_dir=args.stage_cache_dir,
                 stage_cache_max_mb=args.stage_cache_max_mb,
                 uvdoc_cache_home=args.uvdoc_cache,
+                on_progress=lambda current, total, name: print(
+                    f"Processed input {current}/{total}: {name}",
+                    flush=True,
+                ),
             )
         except (OSError, RuntimeError, ValueError) as exc:
             print(f"uniscan: error: {exc}", file=sys.stderr)

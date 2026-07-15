@@ -9,7 +9,13 @@ import numpy as np
 
 ORIENTATION_METHOD_NONE = "none"
 ORIENTATION_METHOD_AUTO = "auto"
-ORIENTATION_METHOD_CHOICES = (ORIENTATION_METHOD_NONE, ORIENTATION_METHOD_AUTO)
+ORIENTATION_METHOD_CHOICES = (
+    ORIENTATION_METHOD_NONE,
+    ORIENTATION_METHOD_AUTO,
+    "90",
+    "180",
+    "270",
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -271,6 +277,15 @@ def orient_document(
             method=normalized,
             applied=False,
             reason="disabled",
+        )
+    if normalized in {"90", "180", "270"}:
+        angle = int(normalized)
+        return _rotate_right_angle(image, angle), OrientationDiagnostics(
+            method=normalized,
+            applied=True,
+            angle_degrees=angle,
+            confidence=1.0,
+            reason="forced",
         )
 
     diagnostics = estimate_page_orientation(image)
