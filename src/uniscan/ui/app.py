@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import queue
 import re
 import shutil
@@ -68,6 +70,9 @@ from uniscan.io.loaders import (
     list_supported_in_folder,
 )
 from uniscan.session import (
+    CROP_STATE_APPLIED,
+    CROP_STATE_NONE,
+    CROP_STATE_PROPOSED,
     CommittedPageProcessing,
     SessionInUseError,
     UnsafeSessionLockError,
@@ -84,7 +89,7 @@ from uniscan.ui.import_sources import (
     paths_from_tk_drop,
 )
 from uniscan.ui.live_detect import DEFAULT_LIVE_BACKEND, LIVE_BACKEND_CHOICES, LiveContourDetector
-from uniscan.ui.overlays import draw_quad_overlay
+from uniscan.ui.overlays import draw_quad_overlay, scale_contour
 
 PREVIEW_WAIT_MS = 66
 REVIEW_PREVIEW_DEBOUNCE_MS = 120
@@ -142,7 +147,6 @@ class _ExportPageSnapshot:
 class _StagedImportPage:
     name: str
     raw_path: Path
-    warped_path: Path
     contour: np.ndarray | None
     backend: str | None
     fallback_reason: str | None
@@ -270,9 +274,7 @@ def _show_canvas_magnifier(
     coordinates = np.arange(lens_size, dtype=np.float32) - (lens_size - 1) / 2
     grid_x, grid_y = np.meshgrid(coordinates, coordinates)
     radius = lens_size / 2 - 2
-    alpha = np.clip((radius - np.hypot(grid_x, grid_y)) * 255.0, 0.0, 255.0).astype(
-        np.uint8
-    )
+    alpha = np.clip((radius - np.hypot(grid_x, grid_y)) * 255.0, 0.0, 255.0).astype(np.uint8)
     rgba = np.dstack((rgb, alpha))
     photo = ImageTk.PhotoImage(Image.fromarray(rgba))
     center_x = float(canvas_x)
@@ -388,6 +390,91 @@ def _detection_summary(results: list[PageResult]) -> str:
     return _detection_summary_counts(len(results), fallback)
 
 
+def _entry_crop_state(entry) -> str:
+    state = getattr(entry, "crop_state", None)
+    if state in {CROP_STATE_NONE, CROP_STATE_PROPOSED, CROP_STATE_APPLIED}:
+        return state
+    # Compatibility for lightweight test doubles and pre-v5 in-memory entries.
+    return (
+        CROP_STATE_APPLIED
+        if entry.detected_contour is not None or entry.detected_backend is not None
+        else CROP_STATE_NONE
+    )
+
+
+def _entry_has_crop_proposal(entry) -> bool:
+    """Return whether an entry has detected corners that are still unapplied."""
+    return _entry_crop_state(entry) == CROP_STATE_PROPOSED and entry.detected_contour is not None
+
+
+def _entry_needs_crop_review(entry) -> bool:
+    """Return whether no usable crop proposal/status exists for an entry."""
+    return _entry_crop_state(entry) == CROP_STATE_NONE
+
+
+IMPORT_PREFERENCES_SCHEMA = 1
+DEFAULT_IMPORT_PDF_DPI = 300
+
+
+def _load_import_preferences(path: Path) -> tuple[int, bool]:
+    """Load import preferences fail-soft; malformed data restores safe defaults."""
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return DEFAULT_IMPORT_PDF_DPI, False
+    if not isinstance(payload, dict) or payload.get("schemaVersion") != IMPORT_PREFERENCES_SCHEMA:
+        return DEFAULT_IMPORT_PDF_DPI, False
+    dpi = payload.get("pdfDpi")
+    split_spreads = payload.get("splitSpreads")
+    if type(dpi) is not int or not 72 <= dpi <= 2400 or type(split_spreads) is not bool:
+        return DEFAULT_IMPORT_PDF_DPI, False
+    return dpi, split_spreads
+
+
+def _save_import_preferences(path: Path, *, pdf_dpi: int, split_spreads: bool) -> bool:
+    """Atomically persist validated import preferences without blocking the UI on failure."""
+    if type(pdf_dpi) is not int or not 72 <= pdf_dpi <= 2400 or type(split_spreads) is not bool:
+        return False
+    path = Path(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, raw_stage = tempfile.mkstemp(
+            prefix=f".{path.name}.stage-",
+            suffix=".json",
+            dir=path.parent,
+        )
+    except OSError:
+        return False
+    stage = Path(raw_stage)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(
+                {
+                    "schemaVersion": IMPORT_PREFERENCES_SCHEMA,
+                    "pdfDpi": pdf_dpi,
+                    "splitSpreads": split_spreads,
+                },
+                stream,
+                indent=2,
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(stage, path)
+        return True
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        return False
+    finally:
+        try:
+            stage.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _detection_summary_counts(total: int, fallback: int) -> str:
     detected = total - fallback
     if total == 0:
@@ -426,6 +513,7 @@ class UnifiedScanApp(ctk.CTk):
         self.minsize(1024, 680)
 
         self.autosave_path = default_autosave_path()
+        self.import_preferences_path = self.autosave_path.parent / "import_preferences.json"
         try:
             self._autosave_lock = acquire_autosave_lock(self.autosave_path)
         except SessionInUseError:
@@ -439,6 +527,9 @@ class UnifiedScanApp(ctk.CTk):
             self.session = create_persistent_session(self.autosave_path.parent)
             self._session_restored = False
         self.camera: CameraService | None = None
+        self.burst_camera: CameraService | None = None
+        self._burst_capture_active = False
+        self._camera_state_lock = threading.RLock()
         self.processing_cache = ProcessingStageCache(
             self.autosave_path.parent / "stage_cache",
             max_bytes=512 * 1024 * 1024,
@@ -470,6 +561,7 @@ class UnifiedScanApp(ctk.CTk):
         self.corner_preview_canvas: tk.Canvas | None = None
         self.corner_meta_var: tk.StringVar | None = None
         self.corner_prev_button: ctk.CTkButton | None = None
+        self.corner_apply_button: ctk.CTkButton | None = None
         self.corner_next_button: ctk.CTkButton | None = None
         self.corner_editor_state: dict[str, object] | None = None
         self.corner_resize_job: str | None = None
@@ -525,8 +617,11 @@ class UnifiedScanApp(ctk.CTk):
         self.geometry_summary_var = tk.StringVar(value="Wave preview: pending")
         self.split_preview_var = tk.StringVar(value="Split: not previewed")
         self.deskew_method_var = tk.StringVar(value="Hybrid (recommended)")
-        self.import_pdf_dpi_var = tk.IntVar(value=300)
-        self.import_two_page_mode_var = tk.BooleanVar(value=False)
+        import_pdf_dpi, import_split_spreads = _load_import_preferences(
+            self.import_preferences_path
+        )
+        self.import_pdf_dpi_var = tk.IntVar(value=import_pdf_dpi)
+        self.import_two_page_mode_var = tk.BooleanVar(value=import_split_spreads)
         self.import_selected_files: list[str] = []
         self.live_edge_var = tk.BooleanVar(value=True)
         self.live_backend_var = tk.StringVar(value="opencv_quad")
@@ -626,6 +721,15 @@ class UnifiedScanApp(ctk.CTk):
             command=self.open_camera_window,
         )
         self.toolbar_camera_button.pack(side=ctk.LEFT, padx=4, pady=8)
+        self.toolbar_import_options_button = ctk.CTkButton(
+            toolbar,
+            text="Import options...",
+            width=125,
+            fg_color="transparent",
+            border_width=1,
+            command=self.open_import_options_dialog,
+        )
+        self.toolbar_import_options_button.pack(side=ctk.LEFT, padx=4, pady=8)
         self.toolbar_export_pdf_button = ctk.CTkButton(
             toolbar,
             text="Export PDF",
@@ -690,7 +794,7 @@ class UnifiedScanApp(ctk.CTk):
         self._update_camera_health()
 
         def close_window() -> None:
-            self.stop_preview()
+            self.close_camera()
             self.camera_window = None
             self.camera_health_label = None
             self.preview_label = None
@@ -741,7 +845,9 @@ class UnifiedScanApp(ctk.CTk):
             anchor="w",
         ).pack(fill=ctk.X, padx=10, pady=(0, 8))
 
-        ctk.CTkLabel(controls, text="Burst shots").pack(anchor="w", padx=10, pady=(4, 2))
+        ctk.CTkLabel(controls, text=f"Burst shots (1-{CameraService.MAX_BURST_SHOTS})").pack(
+            anchor="w", padx=10, pady=(4, 2)
+        )
         self.shots_entry = ctk.CTkEntry(controls, textvariable=self.camera_shots_var, width=120)
         self.shots_entry.pack(anchor="w", padx=10)
 
@@ -1052,13 +1158,6 @@ class UnifiedScanApp(ctk.CTk):
             border_width=1,
             command=self.open_dewarp_points_editor,
         ).pack(fill=ctk.X, padx=6, pady=(0, 4))
-        ctk.CTkButton(
-            processing,
-            text="Auto remove waves",
-            fg_color="transparent",
-            border_width=1,
-            command=self.remove_waves_selected,
-        ).pack(fill=ctk.X, padx=6, pady=(0, 10))
         geometry_utilities = ctk.CTkFrame(processing, fg_color="transparent")
         geometry_utilities.pack(fill=ctk.X, padx=6, pady=(0, 4))
         ctk.CTkButton(
@@ -1289,8 +1388,10 @@ class UnifiedScanApp(ctk.CTk):
             if self.inline_editor_close_callback is inline_close:
                 return
         self._closing = True
-        self.stop_preview()
         self.job_cancel_event.set()
+        self.stop_preview()
+        self._cancel_active_burst()
+        self._release_camera_handle()
         self._cancel_review_page_preview()
         if (
             self.review_processing_window is not None
@@ -1304,8 +1405,6 @@ class UnifiedScanApp(ctk.CTk):
         if self.camera_window is not None and self.camera_window.winfo_exists():
             self.camera_window.destroy()
         self.camera_window = None
-        if self.camera is not None:
-            self.camera.release()
         if self.autosave_job is not None:
             self.after_cancel(self.autosave_job)
             self.autosave_job = None
@@ -1415,7 +1514,7 @@ class UnifiedScanApp(ctk.CTk):
 
     def _update_camera_health(self, error_text: str | None = None) -> None:
         state = camera_health_state(
-            is_open=self.camera is not None,
+            is_open=(self.camera is not None or getattr(self, "burst_camera", None) is not None),
             is_previewing=self.preview_job is not None,
             error_text=error_text,
         )
@@ -1435,6 +1534,74 @@ class UnifiedScanApp(ctk.CTk):
             if callback is not None:
                 callback()
         self.lift()
+
+    def open_import_options_dialog(self) -> None:
+        """Edit import-only settings without starting a file operation."""
+        window = ctk.CTkToplevel(self)
+        window.title("Import options")
+        window.geometry("420x245")
+        window.resizable(False, False)
+        window.transient(self)
+        dpi_var = tk.IntVar(value=int(self.import_pdf_dpi_var.get()))
+        split_var = tk.BooleanVar(value=bool(self.import_two_page_mode_var.get()))
+
+        ctk.CTkLabel(
+            window,
+            text="Import options",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            anchor="w",
+        ).pack(fill=ctk.X, padx=16, pady=(16, 10))
+        dpi_row = ctk.CTkFrame(window, fg_color="transparent")
+        dpi_row.pack(fill=ctk.X, padx=16, pady=(0, 10))
+        ctk.CTkLabel(dpi_row, text="PDF rasterization DPI").pack(side=ctk.LEFT)
+        ctk.CTkEntry(dpi_row, textvariable=dpi_var, width=100).pack(side=ctk.RIGHT)
+        ctk.CTkCheckBox(
+            window,
+            text="Split confidently detected book spreads during import",
+            variable=split_var,
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+        ctk.CTkLabel(
+            window,
+            text="Split is off by default. Imported pixels remain unchanged unless you enable it.",
+            justify="left",
+            wraplength=380,
+            text_color=("#60646c", "#a0a4ab"),
+        ).pack(anchor="w", padx=16)
+
+        def apply_options() -> None:
+            try:
+                dpi = int(dpi_var.get())
+            except (tk.TclError, ValueError):
+                messagebox.showerror("Import Options", "PDF DPI must be a whole number.")
+                return
+            if not 72 <= dpi <= 2400:
+                messagebox.showerror("Import Options", "PDF DPI must be between 72 and 2400.")
+                return
+            self.import_pdf_dpi_var.set(dpi)
+            self.import_two_page_mode_var.set(bool(split_var.get()))
+            saved = _save_import_preferences(
+                self.import_preferences_path,
+                pdf_dpi=dpi,
+                split_spreads=bool(split_var.get()),
+            )
+            split_label = "enabled" if split_var.get() else "disabled"
+            persistence = "" if saved else " Preferences could not be persisted."
+            self._set_status(
+                f"Import options saved: PDF {dpi} DPI, spread split {split_label}.{persistence}"
+            )
+            window.destroy()
+
+        actions = ctk.CTkFrame(window, fg_color="transparent")
+        actions.pack(side=ctk.BOTTOM, fill=ctk.X, padx=16, pady=16)
+        ctk.CTkButton(
+            actions,
+            text="Cancel",
+            fg_color="transparent",
+            border_width=1,
+            command=window.destroy,
+        ).pack(side=ctk.RIGHT)
+        ctk.CTkButton(actions, text="Save", command=apply_options).pack(side=ctk.RIGHT, padx=6)
+        window.grab_set()
 
     def quick_add_files(self) -> None:
         files = filedialog.askopenfilenames(
@@ -1635,7 +1802,46 @@ class UnifiedScanApp(ctk.CTk):
         """Return the configured resolution (legacy method name retained)."""
         return getattr(self, "camera_resolution", self._default_camera_resolution())
 
+    def _camera_guard(self):
+        lock = self.__dict__.get("_camera_state_lock")
+        if lock is None:
+            lock = threading.RLock()
+            self._camera_state_lock = lock
+        return lock
+
+    def _burst_is_active(self) -> bool:
+        with self._camera_guard():
+            return bool(self.__dict__.get("_burst_capture_active", False))
+
+    def _begin_burst_capture(self) -> None:
+        with self._camera_guard():
+            if self.__dict__.get("_burst_capture_active", False):
+                raise RuntimeError("Burst capture is already in progress.")
+            self._burst_capture_active = True
+
+    def _end_burst_capture(self) -> None:
+        with self._camera_guard():
+            self._burst_capture_active = False
+            camera = self.__dict__.get("burst_camera")
+            self.burst_camera = None
+        if camera is not None:
+            camera.release()
+        self._update_camera_health()
+
+    def _cancel_active_burst(self) -> None:
+        if not self._burst_is_active():
+            return
+        cancel_event = self.__dict__.get("job_cancel_event")
+        if cancel_event is not None:
+            cancel_event.set()
+        with self._camera_guard():
+            camera = self.__dict__.get("burst_camera")
+        if camera is not None:
+            camera.release()
+
     def _ensure_camera(self) -> CameraService:
+        if self._burst_is_active():
+            raise RuntimeError("Camera is busy with burst capture.")
         index = int(self.camera_index_var.get())
         resolution = self._max_camera_resolution()
         if self.camera is None:
@@ -1651,6 +1857,13 @@ class UnifiedScanApp(ctk.CTk):
             self.camera.open()
         return self.camera
 
+    def _release_camera_handle(self) -> None:
+        with self._camera_guard():
+            camera = self.camera
+            self.camera = None
+        if camera is not None:
+            camera.release()
+
     def open_camera(self) -> None:
         try:
             self._ensure_camera()
@@ -1663,9 +1876,8 @@ class UnifiedScanApp(ctk.CTk):
 
     def close_camera(self) -> None:
         self.stop_preview()
-        if self.camera is not None:
-            self.camera.release()
-            self.camera = None
+        self._cancel_active_burst()
+        self._release_camera_handle()
         self._update_camera_health()
         self._set_status("Camera closed")
 
@@ -1871,33 +2083,54 @@ class UnifiedScanApp(ctk.CTk):
 
     def _review_before_image(self, entry) -> np.ndarray:
         """Raw source with the detected contour drawn over it."""
+        proposal = _entry_has_crop_proposal(entry)
         if self.lightweight_preview_var.get():
             raw_image = entry.preview_raw_image
         else:
             raw_image = entry.raw_image
 
         contour = entry.detected_contour
-        if contour is None:
+        if not proposal or contour is None:
             return raw_image
 
         # Contour is stored in the original raw coordinate space.
         # The preview may have been resized — scale the contour accordingly.
         full_raw = entry.raw_image if self.lightweight_preview_var.get() else raw_image
-        from uniscan.ui.overlays import scale_contour as _scale_contour
-
-        scaled = _scale_contour(
+        scaled = scale_contour(
             contour,
             src_shape=full_raw.shape[:2],
             dst_shape=raw_image.shape[:2],
         )
         return draw_quad_overlay(raw_image, scaled)
 
+    def _review_source_image(self, entry, *, fast_preview: bool) -> np.ndarray:
+        """Return committed source pixels or an explicitly labelled crop proposal."""
+        committed = entry.preview_original_image if fast_preview else entry.original_image
+        if not _entry_has_crop_proposal(entry):
+            return committed
+
+        raw = entry.preview_raw_image if fast_preview else entry.raw_image
+        contour = np.asarray(entry.detected_contour, dtype=np.float32)
+        if fast_preview:
+            contour = scale_contour(
+                contour,
+                src_shape=entry.raw_image.shape[:2],
+                dst_shape=raw.shape[:2],
+            )
+        try:
+            proposed = warp_perspective_from_points(raw, contour)
+        except ValueError:
+            return committed
+        return proposed if proposed is not None and proposed.size else committed
+
     def _review_after_image(self, entry, before_image: np.ndarray) -> np.ndarray:
-        # Process the durable full-resolution source with the exact request used
-        # by export.  The UI downsizes only the finished pixels for display.
+        # A detected contour is an unapplied proposal.  Show its full-resolution
+        # perspective result, but keep export/current pixels on the durable
+        # original until the user presses Apply in the corner editor.
         del before_image
+        source = self._review_source_image(entry, fast_preview=False)
         return self._process_review_page(
-            entry.original_image,
+            source,
             entry=entry,
             preview=False,
         ).image
@@ -1928,12 +2161,10 @@ class UnifiedScanApp(ctk.CTk):
         self,
         frame: np.ndarray,
         base_name: str,
-        *,
-        two_page_mode: bool,
     ) -> list[PageResult]:
         options = PipelineOptions(
             detect_document=True,
-            two_page_mode=bool(two_page_mode),
+            two_page_mode=False,
             postprocess_name="None",
         )
         return process_loaded_items([(base_name, frame)], options=options)
@@ -1943,9 +2174,12 @@ class UnifiedScanApp(ctk.CTk):
             self.session.add_image_with_contour(
                 name=result.name,
                 raw_image=result.raw,
-                warped_image=result.warped,
+                warped_image=result.raw,
                 contour=result.contour,
-                backend=result.backend,
+                backend=(
+                    result.backend if result.detected and result.contour is not None else None
+                ),
+                crop_state=CROP_STATE_PROPOSED if result.contour is not None else CROP_STATE_NONE,
             )
 
     def _ingest_staged_import_pages(self, pages: list[_StagedImportPage]) -> None:
@@ -1954,15 +2188,15 @@ class UnifiedScanApp(ctk.CTk):
         try:
             for page in pages:
                 raw = imread_unicode(page.raw_path)
-                warped = imread_unicode(page.warped_path)
-                if raw is None or warped is None:
+                if raw is None:
                     raise RuntimeError(f"Cannot read staged imported page: {page.name}")
                 entry = self.session.add_image_with_contour(
                     name=page.name,
                     raw_image=raw,
-                    warped_image=warped,
+                    warped_image=raw,
                     contour=page.contour,
-                    backend=page.backend,
+                    backend=page.backend if page.contour is not None else None,
+                    crop_state=CROP_STATE_PROPOSED if page.contour is not None else CROP_STATE_NONE,
                 )
                 added_entry_ids.append(entry.entry_id)
         except Exception:
@@ -1989,11 +2223,7 @@ class UnifiedScanApp(ctk.CTk):
             if frame is None:
                 raise RuntimeError("Could not capture an image from the camera.")
             timestamp = datetime.now().strftime(r"%Y%m%d_%H%M%S_%f")
-            results = self._process_capture_frame(
-                frame,
-                base_name=timestamp,
-                two_page_mode=bool(self.import_two_page_mode_var.get()),
-            )
+            results = self._process_capture_frame(frame, base_name=timestamp)
             self._ingest_page_results(results)
             self.refresh_page_list(keep_index=len(self.session) - 1)
             self.go_to_review_tab()
@@ -2006,21 +2236,40 @@ class UnifiedScanApp(ctk.CTk):
             self._set_status("Capture failed")
 
     def capture_burst(self) -> None:
+        burst_reserved = False
+        staging_dir = None
         try:
             shots = int(self.camera_shots_var.get())
             delay_sec = float(self.camera_delay_var.get())
             index = int(self.camera_index_var.get())
-            two_page_mode = bool(self.import_two_page_mode_var.get())
+            resolution = self._max_camera_resolution()
+            if not 1 <= shots <= CameraService.MAX_BURST_SHOTS:
+                raise ValueError(
+                    f"Burst shots must be between 1 and {CameraService.MAX_BURST_SHOTS}."
+                )
             timestamp = datetime.now().strftime(r"%Y%m%d_%H%M%S")
 
+            self._begin_burst_capture()
+            burst_reserved = True
             self.stop_preview()
+            self._release_camera_handle()
+            self._update_camera_health()
+            staging_dir = tempfile.TemporaryDirectory(prefix="uniscan_gui_burst_")
 
             def worker(emit, is_cancelled):
                 emit(stage="Burst capture", current=f"Opening camera {index}", progress=0)
-                camera = CameraService(index=index, resolution=self._max_camera_resolution())
-                camera.open()
+                camera = CameraService(index=index, resolution=resolution)
+                frame_paths: list[tuple[int, Path]] = []
                 try:
-                    frames = camera.capture_burst(
+                    # Publish and open under one app-level critical section: a
+                    # simultaneous window close can then always find and release
+                    # the only burst handle after open() returns.
+                    with self._camera_guard():
+                        if is_cancelled():
+                            raise RuntimeError("Cancelled by user.")
+                        self.burst_camera = camera
+                        camera.open()
+                    frames = camera.iter_burst(
                         shots=shots,
                         delay_sec=delay_sec,
                         cancel_cb=is_cancelled,
@@ -2030,43 +2279,87 @@ class UnifiedScanApp(ctk.CTk):
                             progress=int((i / total) * 45),
                         ),
                     )
+                    for frame_index, frame in frames:
+                        frame_path = Path(staging_dir.name) / f"{frame_index:06d}-raw.png"
+                        if not imwrite_unicode(frame_path, frame):
+                            raise RuntimeError(
+                                f"Cannot stage captured frame {frame_index}/{shots}."
+                            )
+                        if is_cancelled():
+                            raise RuntimeError("Cancelled by user.")
+                        frame_paths.append((frame_index, frame_path))
                 finally:
                     camera.release()
+                    with self._camera_guard():
+                        if self.burst_camera is camera:
+                            self.burst_camera = None
 
-                results: list[PageResult] = []
-                total_frames = len(frames)
-                for idx, frame in enumerate(frames, start=1):
+                staged_pages: list[_StagedImportPage] = []
+                fallback_pages = 0
+                total_frames = len(frame_paths)
+                for idx, frame_path in frame_paths:
                     if is_cancelled():
                         raise RuntimeError("Cancelled by user.")
+                    frame = imread_unicode(frame_path)
+                    if frame is None:
+                        raise RuntimeError(f"Cannot read staged captured frame {idx}.")
                     current_results = self._process_capture_frame(
-                        frame,
-                        base_name=f"{timestamp}_{idx:03d}",
-                        two_page_mode=two_page_mode,
+                        frame, base_name=f"{timestamp}_{idx:03d}"
                     )
-                    results.extend(current_results)
+                    for result in current_results:
+                        staged_pages.append(
+                            _StagedImportPage(
+                                name=result.name,
+                                raw_path=frame_path,
+                                contour=result.contour,
+                                backend=result.backend if result.detected else None,
+                                fallback_reason=result.fallback_reason,
+                            )
+                        )
+                        fallback_pages += result.fallback_reason is not None
                     emit(
                         stage="Processing burst",
                         current=f"Frame {idx}/{total_frames}",
                         progress=45 + int((idx / total_frames) * 55),
                     )
-                return results
+                return staged_pages, fallback_pages
 
-            def on_done(results):
-                self._ingest_page_results(results)
-                self.refresh_page_list(keep_index=len(self.session) - 1)
-                self.go_to_review_tab()
-                self._set_status(
-                    f"Burst captured {len(results)} page(s): {_detection_summary(results)}. "
-                    f"Session pages: {len(self.session)}"
-                )
+            def finish_burst() -> None:
+                nonlocal burst_reserved
+                self._end_burst_capture()
+                burst_reserved = False
+                staging_dir.cleanup()
 
-            self._start_background_job("Capture Burst", worker, on_done)
+            def on_done(payload):
+                try:
+                    staged_pages, fallback_pages = payload
+                    self._ingest_staged_import_pages(staged_pages)
+                    self.refresh_page_list(keep_index=len(self.session) - 1)
+                    self.go_to_review_tab()
+                    summary = _detection_summary_counts(len(staged_pages), fallback_pages)
+                    self._set_status(
+                        f"Burst captured {len(staged_pages)} page(s): {summary}. "
+                        f"Session pages: {len(self.session)}"
+                    )
+                finally:
+                    finish_burst()
+
+            if not self._start_background_job(
+                "Capture Burst", worker, on_done, on_error=finish_burst
+            ):
+                finish_burst()
         except Exception as exc:
+            if burst_reserved:
+                self._end_burst_capture()
+            if staging_dir is not None:
+                staging_dir.cleanup()
             messagebox.showerror("Burst Error", str(exc))
             self._set_status("Burst capture failed")
 
     def _set_camera_resolution(self, resolution: tuple[int, int]) -> None:
         """Apply a camera resolution and commit the preference only on success."""
+        if self._burst_is_active():
+            raise RuntimeError("Camera is busy with burst capture.")
         previous_resolution = self.camera_resolution
         if self.camera is None:
             candidate = CameraService(
@@ -2190,8 +2483,6 @@ class UnifiedScanApp(ctk.CTk):
         if not self.session.entries:
             self._set_status("No pages available for export.")
             return
-        self.export_scope_var.set("All pages")
-        self.export_pdf_dpi_var.set(300)
         self.export_pdf_path_var.set("")
         self.export_to_pdf()
 
@@ -2327,11 +2618,7 @@ class UnifiedScanApp(ctk.CTk):
             payload = ImageGrab.grabclipboard()
             image = clipboard_image_to_bgr(payload)
             if image is not None:
-                results = self._process_capture_frame(
-                    image,
-                    base_name="clipboard",
-                    two_page_mode=bool(self.import_two_page_mode_var.get()),
-                )
+                results = self._process_capture_frame(image, base_name="clipboard")
                 self._ingest_page_results(results)
                 self.refresh_page_list(keep_index=len(self.session) - 1)
                 self.go_to_review_tab()
@@ -2352,7 +2639,11 @@ class UnifiedScanApp(ctk.CTk):
         if pdf_dpi < 72:
             raise RuntimeError("PDF DPI must be >= 72.")
         two_page_mode = bool(self.import_two_page_mode_var.get())
-        self._set_status(f"Starting import for {len(paths)} file(s)...")
+        split_label = "enabled" if two_page_mode else "disabled"
+        self._set_status(
+            f"Starting import for {len(paths)} file(s): PDF {pdf_dpi} DPI, "
+            f"spread split {split_label}."
+        )
         staging_dir = tempfile.TemporaryDirectory(prefix="uniscan_gui_import_")
 
         def worker(emit, is_cancelled):
@@ -2397,10 +2688,7 @@ class UnifiedScanApp(ctk.CTk):
                     for result in results:
                         page_index = len(staged_pages) + 1
                         raw_path = Path(staging_dir.name) / f"{page_index:06d}-raw.png"
-                        warped_path = Path(staging_dir.name) / f"{page_index:06d}-warped.png"
-                        if not imwrite_unicode(raw_path, result.raw) or not imwrite_unicode(
-                            warped_path, result.warped
-                        ):
+                        if not imwrite_unicode(raw_path, result.raw):
                             raise RuntimeError(f"Cannot stage imported page: {result.name}")
                         if is_cancelled():
                             raise RuntimeError("Cancelled by user.")
@@ -2408,9 +2696,8 @@ class UnifiedScanApp(ctk.CTk):
                             _StagedImportPage(
                                 name=result.name,
                                 raw_path=raw_path,
-                                warped_path=warped_path,
                                 contour=result.contour,
-                                backend=result.backend,
+                                backend=result.backend if result.detected else None,
                                 fallback_reason=result.fallback_reason,
                             )
                         )
@@ -2441,6 +2728,7 @@ class UnifiedScanApp(ctk.CTk):
                 summary = _detection_summary_counts(pages_count, fallback_pages)
                 self._set_status(
                     f"Imported {files_count} file(s), added {pages_count} page(s): {summary}. "
+                    f"PDF {pdf_dpi} DPI, spread split {split_label}. "
                     f"Session pages: {len(self.session)}"
                 )
             finally:
@@ -2463,7 +2751,12 @@ class UnifiedScanApp(ctk.CTk):
         selected_entry_ids = set(keep_entry_ids or ())
         self.page_listbox.delete(0, tk.END)
         for idx, entry in enumerate(self.session.entries, start=1):
-            tag = "" if entry.detected_contour is not None else "  ⚠"
+            if _entry_has_crop_proposal(entry):
+                tag = "  [crop proposal]"
+            elif _entry_needs_crop_review(entry):
+                tag = "  ⚠"
+            else:
+                tag = ""
             self.page_listbox.insert(tk.END, f"{idx:03d}  {entry.name}{tag}")
 
         page_count = len(self.session.entries)
@@ -2705,9 +2998,13 @@ class UnifiedScanApp(ctk.CTk):
             else None
         )
         self.page_preview_after_title.configure(
-            text="Processed preview · 2 output pages"
-            if split_ratio is not None
-            else "Processed preview"
+            text=(
+                "Processed preview · 2 output pages"
+                if split_ratio is not None
+                else "Crop proposal — not exported"
+                if _entry_has_crop_proposal(entry)
+                else "Processed preview"
+            )
         )
         try:
             before = self._review_before_image(entry)
@@ -2737,11 +3034,7 @@ class UnifiedScanApp(ctk.CTk):
             # Reading one committed generation on Tk is quick; all expensive
             # processing runs after debounce on a cancellable worker.
             try:
-                source = (
-                    entry.preview_original_image.copy()
-                    if fast_preview
-                    else entry.original_image.copy()
-                )
+                source = self._review_source_image(entry, fast_preview=fast_preview).copy()
                 request = self._processing_request(entry=entry, preview=fast_preview)
             except Exception as exc:
                 message = f"Preview failed: {exc}"
@@ -3032,11 +3325,14 @@ class UnifiedScanApp(ctk.CTk):
             ok = self.session.replace_entry_image(
                 entry.entry_id,
                 raw_image=result.raw,
-                original_image=result.warped,
-                current_image=result.current,
+                original_image=result.raw,
+                current_image=result.raw,
                 name=image_path.name,
                 contour=result.contour,
-                backend=result.backend,
+                backend=(
+                    result.backend if result.detected and result.contour is not None else None
+                ),
+                crop_state=CROP_STATE_PROPOSED if result.contour is not None else CROP_STATE_NONE,
             )
             if not ok:
                 raise RuntimeError("Selected page was not found in session.")
@@ -3066,10 +3362,13 @@ class UnifiedScanApp(ctk.CTk):
             ok = self.session.replace_entry_image(
                 entry.entry_id,
                 raw_image=result.raw,
-                original_image=result.warped,
-                current_image=result.current,
+                original_image=result.raw,
+                current_image=result.raw,
                 contour=result.contour,
-                backend=result.backend,
+                backend=(
+                    result.backend if result.detected and result.contour is not None else None
+                ),
+                crop_state=CROP_STATE_PROPOSED if result.contour is not None else CROP_STATE_NONE,
             )
             if not ok:
                 raise RuntimeError("Selected page was not found in session.")
@@ -3111,6 +3410,146 @@ class UnifiedScanApp(ctk.CTk):
         if points.shape[0] < 4:
             return None
         return points[:4]
+
+    def _render_after_geometry_change(self, image: np.ndarray, previous_committed):
+        if previous_committed is None:
+            return image, None
+        previous_request = previous_committed.recipe.to_request()
+        request = replace(
+            previous_request,
+            orientation_method=ORIENTATION_METHOD_NONE,
+            deskew_method=DESKEW_METHOD_NONE,
+            dewarp_method=DEWARP_METHOD_NONE,
+            dewarp_model=None,
+            dewarp_already_applied=False,
+            stage_cache=self.processing_cache,
+            source_fingerprint=None,
+            cancel_cb=None,
+        )
+        result = process_document_page(image, request)
+        committed = CommittedPageProcessing.from_result(
+            request,
+            result.diagnostics,
+            result.image,
+        )
+        return result.image, committed
+
+    def _apply_perspective_crops(self, proposals: list[tuple]) -> None:
+        """Stage every crop, then commit the set with best-effort rollback."""
+        if not proposals:
+            return
+        with tempfile.TemporaryDirectory(prefix="uniscan_crop_apply_") as raw_stage_dir:
+            stage_dir = Path(raw_stage_dir)
+            staged = []
+            seen_ids: set[str] = set()
+            for index, (entry, source_image, points, backend) in enumerate(proposals):
+                if entry.entry_id in seen_ids:
+                    raise RuntimeError(f"Duplicate page in crop apply: {entry.name}")
+                seen_ids.add(entry.entry_id)
+                if source_image is None or source_image.size == 0:
+                    raise RuntimeError(f"Selected page is empty: {entry.name}")
+                normalized = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+                warped = warp_perspective_from_points(source_image, normalized)
+                if warped is None or warped.size == 0:
+                    raise RuntimeError("Perspective transform returned empty image.")
+                current, committed = self._render_after_geometry_change(
+                    warped,
+                    entry.committed_processing,
+                )
+                paths = {
+                    name: stage_dir / f"{index:06d}-{name}.png"
+                    for name in ("old-original", "old-current", "new-original", "new-current")
+                }
+                images = {
+                    "old-original": entry.original_image,
+                    "old-current": entry.current_image,
+                    "new-original": warped,
+                    "new-current": current,
+                }
+                for name, image in images.items():
+                    if not imwrite_unicode(paths[name], image):
+                        raise RuntimeError(f"Cannot stage crop transaction for {entry.name}.")
+                staged.append(
+                    {
+                        "entry": entry,
+                        "paths": paths,
+                        "contour": normalized.copy(),
+                        "backend": backend or "manual",
+                        "committed": committed,
+                        "snapshot_contour": (
+                            entry.detected_contour.copy()
+                            if entry.detected_contour is not None
+                            else None
+                        ),
+                        "snapshot_backend": entry.detected_backend,
+                        "snapshot_crop_state": entry.crop_state,
+                        "snapshot_control_points": entry.dewarp_control_points,
+                        "snapshot_control_curves": entry.dewarp_control_curves,
+                        "snapshot_committed": entry.committed_processing,
+                        "snapshot_revision": entry.revision,
+                    }
+                )
+
+            attempted = []
+            try:
+                for item in staged:
+                    entry = item["entry"]
+                    attempted.append(item)
+                    original = imread_unicode(item["paths"]["new-original"])
+                    current = imread_unicode(item["paths"]["new-current"])
+                    if original is None or current is None:
+                        raise RuntimeError(f"Cannot read staged crop for {entry.name}.")
+                    if not self.session.replace_entry_image(
+                        entry.entry_id,
+                        original_image=original,
+                        current_image=current,
+                        contour=item["contour"],
+                        backend=item["backend"],
+                        crop_state=CROP_STATE_APPLIED,
+                    ):
+                        raise RuntimeError(f"Page disappeared during crop apply: {entry.name}")
+                    entry.committed_processing = item["committed"]
+            except Exception as exc:
+                rollback_errors = []
+                for item in reversed(attempted):
+                    entry = item["entry"]
+                    try:
+                        original = imread_unicode(item["paths"]["old-original"])
+                        current = imread_unicode(item["paths"]["old-current"])
+                        if original is None or current is None:
+                            raise RuntimeError("staged rollback pixels are unreadable")
+                        if not self.session.replace_entry_image(
+                            entry.entry_id,
+                            original_image=original,
+                            current_image=current,
+                            contour=item["snapshot_contour"],
+                            backend=item["snapshot_backend"],
+                            crop_state=item["snapshot_crop_state"],
+                        ):
+                            raise RuntimeError("page disappeared during rollback")
+                        entry.dewarp_control_points = item["snapshot_control_points"]
+                        entry.dewarp_control_curves = item["snapshot_control_curves"]
+                        entry.committed_processing = item["snapshot_committed"]
+                        entry.revision = item["snapshot_revision"]
+                    except Exception as rollback_exc:
+                        rollback_errors.append(f"{entry.name}: {rollback_exc}")
+                if rollback_errors:
+                    raise RuntimeError(
+                        f"Crop apply failed ({exc}); rollback also failed: "
+                        + "; ".join(rollback_errors)
+                    ) from exc
+                raise
+
+    def _apply_perspective_crop(
+        self,
+        entry,
+        *,
+        source_image: np.ndarray,
+        points: np.ndarray,
+        backend: str | None,
+    ) -> None:
+        """Atomically commit one previewed perspective crop."""
+        self._apply_perspective_crops([(entry, source_image, points, backend)])
 
     def _show_inline_geometry_editor(self) -> ctk.CTkFrame:
         if self.inline_editor_host is None:
@@ -3168,6 +3607,7 @@ class UnifiedScanApp(ctk.CTk):
         )
         state = {"index": initial_position}
         points_by_entry: dict[str, np.ndarray] = {}
+        backend_by_entry: dict[str, str | None] = {}
         dirty_entry_ids: set[str] = set()
         source_images_by_entry = {
             entry.entry_id: _perspective_source_image(
@@ -3270,6 +3710,7 @@ class UnifiedScanApp(ctk.CTk):
             # Prefer the already-detected contour from import / previous edit.
             existing = entry.detected_contour
             if existing is not None and not auto_detect and not from_current_geometry:
+                backend_by_entry[entry.entry_id] = entry.detected_backend
                 points = np.asarray(existing, dtype=np.float32).reshape(-1, 2).copy()
                 points_by_entry[entry.entry_id] = points
                 return points
@@ -3278,8 +3719,10 @@ class UnifiedScanApp(ctk.CTk):
             if auto_detect:
                 detected = self._detect_corner_points(source_image)
                 if detected is not None:
+                    backend_by_entry[entry.entry_id] = "automatic"
                     dirty_entry_ids.add(entry.entry_id)
                 if detected is None and existing is not None and not from_current_geometry:
+                    backend_by_entry[entry.entry_id] = entry.detected_backend
                     detected = np.asarray(existing, dtype=np.float32).reshape(-1, 2)
 
             if detected is not None:
@@ -3474,6 +3917,7 @@ class UnifiedScanApp(ctk.CTk):
             points[idx_p][0] = x
             points[idx_p][1] = y
             _entry_index, entry = _current_entry()
+            backend_by_entry[entry.entry_id] = "manual"
             dirty_entry_ids.add(entry.entry_id)
             _redraw()
             _show_canvas_magnifier(
@@ -3498,6 +3942,7 @@ class UnifiedScanApp(ctk.CTk):
                 np.zeros((source_h, source_w, 3), dtype=np.uint8)
             )
             _entry_index, entry = _current_entry()
+            backend_by_entry[entry.entry_id] = "manual"
             dirty_entry_ids.add(entry.entry_id)
             _redraw()
             _render_corrected_preview()
@@ -3512,43 +3957,41 @@ class UnifiedScanApp(ctk.CTk):
                 return
             points = np.asarray(detected, dtype=np.float32).reshape(-1, 2).copy()
             points_by_entry[entry.entry_id] = points
+            backend_by_entry[entry.entry_id] = "automatic"
             view_state["points"] = points
             dirty_entry_ids.add(entry.entry_id)
             _redraw()
             _render_corrected_preview()
 
-        def _apply_entry(entry_index: int, entry, points: np.ndarray) -> None:
-            source_image = source_images_by_entry[entry.entry_id]
-            if source_image is None or source_image.size == 0:
-                raise RuntimeError(f"Selected page is empty: {entry.name}")
-            warped = warp_perspective_from_points(source_image, points.astype(np.float32))
-            if warped is None or warped.size == 0:
-                raise RuntimeError("Perspective transform returned empty image.")
-            previous_committed = entry.committed_processing
-            entry.original_image = warped
-            entry.detected_contour = points.astype(np.float32).reshape(-1, 2).copy()
-            entry.detected_backend = "manual"
-            self._reprocess_after_geometry_change(entry, previous_committed)
-
-        def _save_current_if_dirty() -> bool:
-            entry_index, entry = _current_entry()
-            if entry.entry_id not in dirty_entry_ids:
-                return True
+        def _apply_current() -> None:
+            _entry_index, entry = _current_entry()
             try:
                 points = view_state["points"]
-                _apply_entry(entry_index, entry, points)
+                self._apply_perspective_crop(
+                    entry,
+                    source_image=source_images_by_entry[entry.entry_id],
+                    points=points,
+                    backend=backend_by_entry.get(entry.entry_id) or entry.detected_backend,
+                )
                 dirty_entry_ids.discard(entry.entry_id)
-                self._set_status(f"Saved perspective points for {entry.name}.")
-                return True
+                self.refresh_page_list(keep_entry_ids=(entry.entry_id,))
+                self._set_status(f"Applied perspective crop to {entry.name}.")
             except Exception as exc:
                 messagebox.showerror("Auto Crop Error", str(exc))
-                return False
 
         def _apply_all():
             try:
-                for idx_offset, entry in enumerate(entries):
-                    points = _init_points_for(entry)
-                    _apply_entry(indices[idx_offset], entry, points)
+                proposals = [
+                    (
+                        entry,
+                        source_images_by_entry[entry.entry_id],
+                        _init_points_for(entry),
+                        backend_by_entry.get(entry.entry_id) or entry.detected_backend,
+                    )
+                    for entry in entries
+                ]
+                self._apply_perspective_crops(proposals)
+                for entry in entries:
                     dirty_entry_ids.discard(entry.entry_id)
                 self.refresh_page_list(keep_entry_ids=selected_entry_ids)
                 self._set_status(f"Applied crop to {len(entries)} page(s).")
@@ -3556,12 +3999,12 @@ class UnifiedScanApp(ctk.CTk):
                 messagebox.showerror("Auto Crop Error", str(exc))
 
         def _prev_page():
-            if state["index"] > 0 and _save_current_if_dirty():
+            if state["index"] > 0:
                 state["index"] -= 1
                 _load_current_entry()
 
         def _next_page():
-            if state["index"] < len(entries) - 1 and _save_current_if_dirty():
+            if state["index"] < len(entries) - 1:
                 state["index"] += 1
                 _load_current_entry()
 
@@ -3603,6 +4046,13 @@ class UnifiedScanApp(ctk.CTk):
             side=ctk.LEFT,
             padx=6,
         )
+        self.corner_apply_button = ctk.CTkButton(
+            controls,
+            text="Apply current",
+            width=120,
+            command=_apply_current,
+        )
+        self.corner_apply_button.pack(side=ctk.LEFT, padx=6)
         ctk.CTkButton(controls, text="Reset", width=90, command=_reset).pack(side=ctk.LEFT, padx=6)
         if auto_detect:
             ctk.CTkButton(
@@ -3613,8 +4063,6 @@ class UnifiedScanApp(ctk.CTk):
             ).pack(side=ctk.LEFT, padx=6)
 
         def _close_editor() -> None:
-            if not _save_current_if_dirty():
-                return
             if self.corner_resize_job is not None:
                 win.after_cancel(self.corner_resize_job)
                 self.corner_resize_job = None
@@ -3623,11 +4071,16 @@ class UnifiedScanApp(ctk.CTk):
             self.corner_preview_canvas = None
             self.corner_meta_var = None
             self.corner_prev_button = None
+            self.corner_apply_button = None
             self.corner_next_button = None
             self.corner_editor_state = None
             self.inline_editor_close_callback = None
             win.destroy()
             self.refresh_page_list(keep_entry_ids=selected_entry_ids)
+            if dirty_entry_ids:
+                self._set_status(
+                    f"Closed corner editor without applying {len(dirty_entry_ids)} pending edit(s)."
+                )
             self._hide_inline_geometry_editor()
 
         self.corner_close_button = ctk.CTkButton(
@@ -3972,9 +4425,7 @@ class UnifiedScanApp(ctk.CTk):
 
         def ratio_at(x_pos: float) -> float:
             local_x = float(x_pos) - float(state["offset_x"])
-            return float(
-                np.clip(local_x / max(1, int(state["display_width"]) - 1), 0.05, 0.95)
-            )
+            return float(np.clip(local_x / max(1, int(state["display_width"]) - 1), 0.05, 0.95))
 
         def show_magnifier(event) -> None:
             ratio = float(state["ratio"])
@@ -4054,9 +4505,7 @@ class UnifiedScanApp(ctk.CTk):
         source_canvas.bind("<B1-Motion>", on_move)
         source_canvas.bind("<ButtonRelease-1>", on_up)
         panes.bind("<Configure>", schedule_resize, add="+")
-        ctk.CTkLabel(window, textvariable=status, anchor="w").pack(
-            fill=ctk.X, padx=16, pady=(0, 8)
-        )
+        ctk.CTkLabel(window, textvariable=status, anchor="w").pack(fill=ctk.X, padx=16, pady=(0, 8))
         actions = ctk.CTkFrame(window, fg_color="transparent")
         actions.pack(fill=ctk.X, padx=16, pady=(0, 14))
         ctk.CTkButton(actions, text="Auto detect", command=use_automatic).pack(side=ctk.LEFT)
@@ -4104,14 +4553,14 @@ class UnifiedScanApp(ctk.CTk):
             current_image=left_warped,
             name=f"{base_name} [L]",
             contour=None,
-            backend=None,
+            backend="intentional_split",
         )
         right_entry = self.session.add_image_with_contour(
             name=f"{base_name} [R]",
             raw_image=right_raw,
             warped_image=right_warped,
             contour=None,
-            backend=None,
+            backend="intentional_split",
         )
         self._reprocess_after_geometry_change(entry, previous_committed)
         self._reprocess_after_geometry_change(right_entry, previous_committed)
@@ -4205,37 +4654,6 @@ class UnifiedScanApp(ctk.CTk):
             f"{uncertain} left unchanged as uncertain."
         )
 
-    def remove_waves_selected(self) -> None:
-        indices = self._selected_entry_indices()
-        if not indices:
-            self._set_status("Select page(s) to remove waves.")
-            return
-
-        self.dewarp_method_var.set("Automatic (validated)")
-        diagnostics = []
-        entry_ids = tuple(self.session.entries[idx].entry_id for idx in indices)
-        for idx in indices:
-            entry = self.session.entries[idx]
-            previous_committed = entry.committed_processing
-            entry.clear_dewarp_control_points()
-            diagnostics.append(
-                self._reprocess_with_dewarp(
-                    entry,
-                    previous_committed,
-                    method=DEWARP_METHOD_AUTO,
-                )
-            )
-        self.refresh_page_list(keep_entry_ids=entry_ids)
-        applied = sum(item.applied for item in diagnostics)
-        max_displacement = max((item.max_displacement_px for item in diagnostics), default=0.0)
-        self._set_status(
-            f"Removed page waves on {applied}/{len(indices)} page(s); "
-            f"max correction {max_displacement:.1f}px."
-        )
-        self.geometry_summary_var.set(
-            f"Wave applied: {applied}/{len(indices)} pages, {max_displacement:.1f}px max"
-        )
-
     def open_dewarp_points_editor(self) -> None:
         index, entry = self._single_selected_entry()
         if entry is None or index is None:
@@ -4264,8 +4682,7 @@ class UnifiedScanApp(ctk.CTk):
         elif entry.dewarp_control_points is not None:
             initial_points = list(entry.dewarp_control_points)
             initial_curves = [
-                {"anchor": anchor, "points": list(initial_points)}
-                for anchor in (0.25, 0.5, 0.75)
+                {"anchor": anchor, "points": list(initial_points)} for anchor in (0.25, 0.5, 0.75)
             ]
             initial_message = "Expanded the saved legacy curve across three page regions."
         else:
@@ -4284,8 +4701,7 @@ class UnifiedScanApp(ctk.CTk):
                     "Automatic model was not confident; adjust the neutral points if needed."
                 )
             initial_curves = [
-                {"anchor": anchor, "points": list(initial_points)}
-                for anchor in (0.25, 0.5, 0.75)
+                {"anchor": anchor, "points": list(initial_points)} for anchor in (0.25, 0.5, 0.75)
             ]
 
         window = self._show_inline_geometry_editor()
@@ -4370,8 +4786,7 @@ class UnifiedScanApp(ctk.CTk):
 
         def current_model(*, source_name: str = "user") -> DewarpModel:
             curves = tuple(
-                (float(curve["anchor"]), tuple(curve["points"]))
-                for curve in state["curves"]
+                (float(curve["anchor"]), tuple(curve["points"])) for curve in state["curves"]
             )
             return DewarpModel(
                 method=DEWARP_METHOD_TEXTLINE,
@@ -4531,9 +4946,8 @@ class UnifiedScanApp(ctk.CTk):
             local_x = float(x_pos) - float(state["offset_x"])
             local_y = float(y_pos) - float(state["offset_y"])
             x_value = local_x / max(1, int(state["display_width"]) - 1)
-            displacement = (
-                local_y / max(1, int(state["display_height"]))
-                - float(state["guide_anchor"])
+            displacement = local_y / max(1, int(state["display_height"])) - float(
+                state["guide_anchor"]
             )
             return (
                 float(np.clip(x_value, 0.0, 1.0)),
@@ -4542,9 +4956,7 @@ class UnifiedScanApp(ctk.CTk):
 
         def nearest_curve(x_pos: float, y_pos: float) -> int | None:
             local_x = float(x_pos) - float(state["offset_x"])
-            x_value = float(
-                np.clip(local_x / max(1, int(state["display_width"]) - 1), 0.0, 1.0)
-            )
+            x_value = float(np.clip(local_x / max(1, int(state["display_width"]) - 1), 0.0, 1.0))
             best_curve = None
             best_distance = 12.0
             for curve_index, curve in enumerate(state["curves"]):
@@ -4554,9 +4966,9 @@ class UnifiedScanApp(ctk.CTk):
                         np.asarray([x_value], dtype=np.float32),
                     )[0]
                 )
-                expected_y = float(state["offset_y"]) + (
-                    float(curve["anchor"]) + curve_y
-                ) * int(state["display_height"])
+                expected_y = float(state["offset_y"]) + (float(curve["anchor"]) + curve_y) * int(
+                    state["display_height"]
+                )
                 distance = abs(float(y_pos) - expected_y)
                 if distance < best_distance:
                     best_distance = distance
@@ -4634,9 +5046,7 @@ class UnifiedScanApp(ctk.CTk):
                 curve_index = int(state["active_curve"])
                 curves = state["curves"]
                 lower_anchor = (
-                    float(curves[curve_index - 1]["anchor"]) + 0.02
-                    if curve_index > 0
-                    else 0.0
+                    float(curves[curve_index - 1]["anchor"]) + 0.02 if curve_index > 0 else 0.0
                 )
                 upper_anchor = (
                     float(curves[curve_index + 1]["anchor"]) - 0.02
@@ -4711,9 +5121,7 @@ class UnifiedScanApp(ctk.CTk):
             status.set(f"Automatic model restored from {diagnostics.line_count} supporting lines.")
 
         def use_neutral() -> None:
-            neutral = [
-                (float(x), 0.0) for x in np.linspace(0.0, 1.0, 9, dtype=np.float32)
-            ]
+            neutral = [(float(x), 0.0) for x in np.linspace(0.0, 1.0, 9, dtype=np.float32)]
             for curve in state["curves"]:
                 curve["points"] = list(neutral)
             select_curve(int(state["active_curve"]))
@@ -4726,10 +5134,7 @@ class UnifiedScanApp(ctk.CTk):
             try:
                 previous_committed = entry.committed_processing
                 entry.set_dewarp_control_curves(
-                    [
-                        (float(curve["anchor"]), curve["points"])
-                        for curve in state["curves"]
-                    ]
+                    [(float(curve["anchor"]), curve["points"]) for curve in state["curves"]]
                 )
                 self.dewarp_method_var.set("Text lines (offline)")
                 diagnostics = self._reprocess_with_dewarp(
@@ -4743,8 +5148,7 @@ class UnifiedScanApp(ctk.CTk):
                     f"max correction {diagnostics.max_displacement_px:.1f}px."
                 )
                 self.geometry_summary_var.set(
-                    f"Wave applied: 3 regional curves, "
-                    f"{diagnostics.max_displacement_px:.1f}px"
+                    f"Wave applied: 3 regional curves, {diagnostics.max_displacement_px:.1f}px"
                 )
                 close_editor()
             except Exception as exc:

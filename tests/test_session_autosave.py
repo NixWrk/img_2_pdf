@@ -10,6 +10,7 @@ import pytest
 
 from uniscan.session import (
     AutosaveSessionLock,
+    CROP_STATE_APPLIED,
     CommittedPageProcessing,
     SessionInUseError,
     UnsafeSessionLockError,
@@ -46,7 +47,7 @@ def test_session_manifest_round_trip(tmp_path) -> None:
     )
     session.add_image(name="second", image=_image(30))
     session.save_manifest(manifest)
-    assert json.loads(manifest.read_text(encoding="utf-8"))["schemaVersion"] == 3
+    assert json.loads(manifest.read_text(encoding="utf-8"))["schemaVersion"] == 5
     session.close(preserve=True)
 
     restored, was_restored = load_or_create_session(manifest)
@@ -120,7 +121,14 @@ def test_incomplete_page_assets_are_skipped_without_losing_valid_pages(tmp_path)
     restored.save_manifest(manifest)
     assert (session_dir / "pages" / entry_id).is_dir()
     saved = json.loads(manifest.read_text(encoding="utf-8"))
-    assert saved["quarantinedEntries"] == [{"entryId": entry_id, "name": "broken"}]
+    assert saved["quarantinedEntries"] == [
+        {
+            "entryId": entry_id,
+            "name": "broken",
+            "cropState": "none",
+            "documentPosition": 0,
+        }
+    ]
 
 
 @pytest.mark.parametrize("damage", ["missing", "corrupt"])
@@ -346,7 +354,7 @@ def test_manifest_v2_round_trips_committed_recipe_and_v1_migrates(tmp_path) -> N
     )
     session.save_manifest(manifest)
     payload = json.loads(manifest.read_text(encoding="utf-8"))
-    assert payload["schemaVersion"] == 3
+    assert payload["schemaVersion"] == 5
     session.close(preserve=True)
 
     restored = CaptureSession.restore_manifest(manifest)
@@ -429,6 +437,98 @@ def test_replace_raw_invalidates_committed_processing_and_revision(tmp_path) -> 
     revision = entry.revision
 
     entry.replace_raw(_image(90))
-
     assert entry.committed_processing is None
     assert entry.revision == revision + 1
+
+
+def test_manifest_v4_legacy_crop_metadata_migrates_as_applied(tmp_path) -> None:
+    manifest = tmp_path / "autosave.json"
+    session = create_persistent_session(tmp_path)
+    contour = np.float32([[2, 2], [27, 2], [27, 17], [2, 17]])
+    entry = session.add_image_with_contour(
+        name="legacy-applied",
+        raw_image=_image(10),
+        warped_image=_image(80),
+        contour=contour,
+        backend="opencv_quad",
+    )
+    session.save_manifest(manifest)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["schemaVersion"] = 4
+    payload["entries"][0].pop("cropState")
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    session.close(preserve=True)
+
+    restored = CaptureSession.restore_manifest(manifest)
+    restored_entry = restored.entries[0]
+
+    assert restored_entry.entry_id == entry.entry_id
+    assert restored_entry.crop_state == CROP_STATE_APPLIED
+    assert restored_entry.detected_backend == "opencv_quad"
+    np.testing.assert_array_equal(restored_entry.detected_contour, contour)
+    np.testing.assert_array_equal(restored_entry.original_image, _image(80))
+
+
+@pytest.mark.parametrize(
+    ("crop_state", "contour", "backend"),
+    [
+        ("proposed", None, "opencv_quad"),
+        ("none", [[1, 2], [28, 2], [28, 18], [1, 18]], "opencv_quad"),
+        ("none", None, "opencv_quad"),
+    ],
+)
+def test_manifest_v5_quarantines_inconsistent_crop_state(
+    tmp_path, crop_state, contour, backend
+) -> None:
+    manifest = tmp_path / "autosave.json"
+    session = create_persistent_session(tmp_path)
+    entry = session.add_image(name="page", image=_image(20))
+    session.save_manifest(manifest)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["entries"][0].update(
+        {
+            "cropState": crop_state,
+            "detectedContour": contour,
+            "detectedBackend": backend,
+        }
+    )
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    session.close(preserve=True)
+
+    restored = CaptureSession.restore_manifest(manifest)
+
+    assert restored.entries == []
+    assert restored.quarantined_entry_ids == (entry.entry_id,)
+    assert any("crop state" in warning.lower() for warning in restored.restore_warnings)
+
+
+@pytest.mark.parametrize("broken_index", [0, 1, 2])
+def test_quarantined_page_recovers_at_its_document_position(tmp_path, broken_index) -> None:
+    manifest = tmp_path / "autosave.json"
+    session = create_persistent_session(tmp_path)
+    entries = [
+        session.add_image(name=name, image=_image(value))
+        for name, value in (("first", 10), ("middle", 20), ("last", 30))
+    ]
+    session.save_manifest(manifest)
+    broken = entries[broken_index]
+    broken.raw_path.unlink()
+    broken.original_path.unlink()
+    session.close(preserve=True)
+
+    restored = CaptureSession.restore_manifest(manifest)
+    assert [entry.name for entry in restored.entries] == [
+        name for index, name in enumerate(("first", "middle", "last")) if index != broken_index
+    ]
+    assert restored.quarantined_entry_ids == (broken.entry_id,)
+    restored.save_manifest(manifest)
+
+    page_dir = restored.store.session_dir / "pages" / broken.entry_id
+    restored.store.write_image(page_dir / "raw.png", _image((broken_index + 1) * 10))
+    restored.store.write_image(page_dir / "original.png", _image((broken_index + 1) * 10))
+    restored.close(preserve=True)
+
+    recovered = CaptureSession.restore_manifest(manifest)
+
+    assert [entry.name for entry in recovered.entries] == ["first", "middle", "last"]
+    assert recovered.quarantined_entry_ids == ()

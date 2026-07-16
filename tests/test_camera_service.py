@@ -63,6 +63,23 @@ def test_open_rejects_unavailable_camera() -> None:
         service.open()
 
 
+def test_open_releases_handle_when_configuration_raises() -> None:
+    class FailingCapture(FakeCapture):
+        def set(self, prop_id: int, value: float) -> bool:
+            raise OSError("driver failed")
+
+    capture = FailingCapture()
+    service = CameraService(
+        resolution=(640, 480),
+        capture_factory=lambda _index, _api: capture,
+    )
+
+    with pytest.raises(OSError, match="driver failed"):
+        service.open()
+
+    assert capture.released is True
+
+
 def test_capture_burst_progress_and_validation() -> None:
     capture = FakeCapture([_frame(value) for value in range(6)])
     service = CameraService(capture_factory=lambda _index, _api: capture)
@@ -79,6 +96,8 @@ def test_capture_burst_progress_and_validation() -> None:
     assert progress == [(1, 2), (2, 2)]
     with pytest.raises(ValueError, match="shots"):
         service.capture_burst(shots=0, delay_sec=0)
+    with pytest.raises(ValueError, match="between 1 and 20"):
+        service.capture_burst(shots=21, delay_sec=0)
     with pytest.raises(ValueError, match="delay_sec"):
         service.capture_burst(shots=1, delay_sec=-1)
 
@@ -91,6 +110,39 @@ def test_capture_burst_cancellation_and_failed_frame() -> None:
     failed = CameraService(capture_factory=lambda _index, _api: FakeCapture())
     with pytest.raises(RuntimeError, match="Failed to capture"):
         failed.capture_burst(shots=1, delay_sec=0, warmup_reads=0)
+
+
+def test_iter_burst_yields_frames_incrementally() -> None:
+    capture = FakeCapture([_frame(1), _frame(2)])
+    service = CameraService(capture_factory=lambda _index, _api: capture)
+
+    frames = service.iter_burst(shots=2, delay_sec=0, warmup_reads=0)
+    first_index, first = next(frames)
+
+    assert first_index == 1
+    assert int(first.mean()) == 1
+    assert len(capture.frames) == 1
+    assert [(index, int(frame.mean())) for index, frame in frames] == [(2, 2)]
+
+
+def test_releasing_incremental_burst_does_not_reopen_camera() -> None:
+    captures = [FakeCapture([_frame(1), _frame(2)])]
+    factory_calls = 0
+
+    def factory(_index: int, _api: int | None) -> FakeCapture:
+        nonlocal factory_calls
+        factory_calls += 1
+        return captures[0]
+
+    service = CameraService(capture_factory=factory)
+    frames = service.iter_burst(shots=2, delay_sec=0, warmup_reads=0)
+    assert next(frames)[0] == 1
+
+    service.release()
+
+    with pytest.raises(RuntimeError, match="closed during burst"):
+        next(frames)
+    assert factory_calls == 1
 
 
 def test_get_available_device_indices_uses_factory() -> None:

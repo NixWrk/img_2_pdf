@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import platform
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Protocol
 
 import cv2
@@ -12,6 +13,7 @@ import numpy as np
 
 CancelCb = Callable[[], bool]
 ProgressCb = Callable[[int, int], None]
+MAX_BURST_SHOTS = 20
 
 
 class CaptureDevice(Protocol):
@@ -45,6 +47,8 @@ def default_api_preference() -> int | None:
 class CameraService:
     """Thin wrapper around cv2.VideoCapture."""
 
+    MAX_BURST_SHOTS = MAX_BURST_SHOTS
+
     def __init__(
         self,
         *,
@@ -60,47 +64,65 @@ class CameraService:
         self.api_preference = default_api_preference() if api_preference is None else api_preference
         self.capture_factory = capture_factory
         self._capture: CaptureDevice | None = None
+        self._capture_lock = threading.RLock()
 
     def open(self) -> None:
         """Open underlying VideoCapture."""
-        self.release()
-        self._capture = self.capture_factory(self.index, self.api_preference)
+        with self._capture_lock:
+            self._release_locked()
+            capture = self.capture_factory(self.index, self.api_preference)
+            self._capture = capture
 
-        if self.resolution is not None:
-            self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
-            self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
-        if self.target_fps is not None:
-            self._capture.set(cv2.CAP_PROP_FPS, self.target_fps)
+            try:
+                if self.resolution is not None:
+                    capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
+                    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
+                if self.target_fps is not None:
+                    capture.set(cv2.CAP_PROP_FPS, self.target_fps)
+                opened = capture.isOpened()
+            except Exception:
+                self._release_locked()
+                raise
 
-        if not self._capture.isOpened():
-            self._capture.release()
-            self._capture = None
-            raise RuntimeError(f"Cannot open camera index {self.index}.")
+            if not opened:
+                self._release_locked()
+                raise RuntimeError(f"Cannot open camera index {self.index}.")
+
+    def _release_locked(self) -> None:
+        capture = self._capture
+        self._capture = None
+        if capture is not None:
+            capture.release()
 
     def release(self) -> None:
         """Release capture handle."""
-        if self._capture is not None:
-            self._capture.release()
-            self._capture = None
+        with self._capture_lock:
+            self._release_locked()
 
     def set_index(self, index: int) -> None:
         """Switch camera index and re-open."""
-        self.index = index
-        self.open()
+        with self._capture_lock:
+            self.index = index
+            self.open()
 
     def set_resolution(self, resolution: tuple[int, int]) -> None:
         """Switch camera resolution and re-open."""
-        self.resolution = resolution
-        self.open()
+        with self._capture_lock:
+            self.resolution = resolution
+            self.open()
 
     def read_frame(self) -> np.ndarray | None:
         """Read one frame."""
-        if self._capture is None:
-            self.open()
-        ok, frame = self._capture.read()
-        if not ok:
-            return None
-        return frame
+        with self._capture_lock:
+            if self._capture is None:
+                self.open()
+            capture = self._capture
+            if capture is None:  # Defensive: open() either publishes a handle or raises.
+                return None
+            ok, frame = capture.read()
+            if not ok:
+                return None
+            return frame
 
     def capture_burst(
         self,
@@ -112,37 +134,64 @@ class CameraService:
         on_progress: ProgressCb | None = None,
     ) -> list[np.ndarray]:
         """Capture burst of frames with optional delay and cancellation."""
-        if shots < 1:
-            raise ValueError("shots must be >= 1")
+        return [
+            frame
+            for _index, frame in self.iter_burst(
+                shots=shots,
+                delay_sec=delay_sec,
+                warmup_reads=warmup_reads,
+                cancel_cb=cancel_cb,
+                on_progress=on_progress,
+            )
+        ]
+
+    def iter_burst(
+        self,
+        *,
+        shots: int,
+        delay_sec: float,
+        warmup_reads: int = 4,
+        cancel_cb: CancelCb | None = None,
+        on_progress: ProgressCb | None = None,
+    ) -> Iterator[tuple[int, np.ndarray]]:
+        """Yield burst frames one at a time so callers can stage them to disk."""
+        if shots < 1 or shots > MAX_BURST_SHOTS:
+            raise ValueError(f"shots must be between 1 and {MAX_BURST_SHOTS}")
         if delay_sec < 0:
             raise ValueError("delay_sec must be >= 0")
 
-        if self._capture is None:
-            self.open()
+        with self._capture_lock:
+            if self._capture is None:
+                self.open()
 
-        frames: list[np.ndarray] = []
         for i in range(1, shots + 1):
             if cancel_cb and cancel_cb():
                 raise RuntimeError("Cancelled by user.")
 
-            for _ in range(max(0, warmup_reads)):
-                self._capture.read()
-            ok, frame = self._capture.read()
+            # Hold the lock across one shot only. release() can then interrupt
+            # the burst between shots without racing a VideoCapture.read call.
+            with self._capture_lock:
+                capture = self._capture
+                if capture is None:
+                    raise RuntimeError("Camera was closed during burst capture.")
+                for _ in range(max(0, warmup_reads)):
+                    capture.read()
+                ok, frame = capture.read()
             if not ok or frame is None:
                 raise RuntimeError(f"Failed to capture frame {i}/{shots}.")
 
-            frames.append(frame)
+            captured_at = time.monotonic()
             if on_progress is not None:
                 on_progress(i, shots)
+            yield i, frame
 
             if i < shots and delay_sec > 0:
-                wait_total = int(max(1, delay_sec / 0.1))
-                for _ in range(wait_total):
+                remaining = delay_sec - (time.monotonic() - captured_at)
+                while remaining > 0:
                     if cancel_cb and cancel_cb():
                         raise RuntimeError("Cancelled by user.")
-                    time.sleep(0.1)
-
-        return frames
+                    time.sleep(min(0.1, remaining))
+                    remaining = delay_sec - (time.monotonic() - captured_at)
 
     @classmethod
     def get_available_device_indices(

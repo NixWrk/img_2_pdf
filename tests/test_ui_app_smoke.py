@@ -187,9 +187,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
             float(corner_point[1]) / float(app.corner_editor_state["scale_y"])
             + float(app.corner_editor_state["offset_y"])
         )
-        app.corner_source_canvas.event_generate(
-            "<ButtonPress-1>", x=corner_x, y=corner_y
-        )
+        app.corner_source_canvas.event_generate("<ButtonPress-1>", x=corner_x, y=corner_y)
         app.update()
         assert app.corner_source_canvas.bbox("geometry-magnifier") is not None
         _assert_round_magnifier_at(app.corner_source_canvas, corner_x, corner_y)
@@ -198,12 +196,8 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         )
         app.update()
         assert app.corner_source_canvas.bbox("geometry-magnifier") is not None
-        _assert_round_magnifier_at(
-            app.corner_source_canvas, corner_x + 8, corner_y + 8
-        )
-        app.corner_source_canvas.event_generate(
-            "<ButtonRelease-1>", x=corner_x + 8, y=corner_y + 8
-        )
+        _assert_round_magnifier_at(app.corner_source_canvas, corner_x + 8, corner_y + 8)
+        app.corner_source_canvas.event_generate("<ButtonRelease-1>", x=corner_x + 8, y=corner_y + 8)
         app.update()
         assert app.corner_source_canvas.bbox("geometry-magnifier") is None
         assert first_entry.entry_id in app.corner_editor_state["dirty_entry_ids"]
@@ -242,8 +236,9 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         )
         app.corner_next_button.invoke()
         app.update()
-        assert first_entry.entry_id not in app.corner_editor_state["dirty_entry_ids"]
-        assert first_entry.detected_backend == "manual"
+        assert first_entry.entry_id in app.corner_editor_state["dirty_entry_ids"]
+        assert first_entry.detected_backend is None
+        np.testing.assert_array_equal(first_entry.original_image, first)
         assert app.corner_meta_var.get().startswith("2/2  second.png")
         assert app.corner_prev_button.cget("state") == "normal"
         assert app.corner_next_button.cget("state") == "disabled"
@@ -256,19 +251,20 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
             float(second_point[1]) / float(app.corner_editor_state["scale_y"])
             + float(app.corner_editor_state["offset_y"])
         )
-        app.corner_source_canvas.event_generate(
-            "<ButtonPress-1>", x=second_x, y=second_y
-        )
+        app.corner_source_canvas.event_generate("<ButtonPress-1>", x=second_x, y=second_y)
         app.corner_source_canvas.event_generate(
             "<B1-Motion>", x=second_x + 6, y=second_y + 6, state=0x0100
         )
-        app.corner_source_canvas.event_generate(
-            "<ButtonRelease-1>", x=second_x + 6, y=second_y + 6
-        )
+        app.corner_source_canvas.event_generate("<ButtonRelease-1>", x=second_x + 6, y=second_y + 6)
         app.update()
         assert second_entry.entry_id in app.corner_editor_state["dirty_entry_ids"]
-        app.corner_close_button.invoke()
+        app.corner_apply_button.invoke()
+        app.update()
+        assert second_entry.entry_id not in app.corner_editor_state["dirty_entry_ids"]
         assert second_entry.detected_backend == "manual"
+        app.corner_close_button.invoke()
+        assert first_entry.detected_backend is None
+        np.testing.assert_array_equal(first_entry.original_image, first)
         assert app.inline_editor_host.winfo_manager() == ""
         assert app.workspace_preview_frame.winfo_manager() == "grid"
         app.page_listbox.selection_clear(0, app_module.tk.END)
@@ -326,9 +322,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.dewarp_source_canvas.bbox("geometry-magnifier") is not None
         _assert_round_magnifier_at(app.dewarp_source_canvas, press_x, press_y)
         target_y = offset_y
-        app.dewarp_source_canvas.event_generate(
-            "<B1-Motion>", x=press_x, y=target_y, state=0x0100
-        )
+        app.dewarp_source_canvas.event_generate("<B1-Motion>", x=press_x, y=target_y, state=0x0100)
         app.update()
         assert app.dewarp_source_canvas.bbox("geometry-magnifier") is not None
         _assert_round_magnifier_at(app.dewarp_source_canvas, press_x, target_y)
@@ -422,8 +416,12 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.camera_window is not None
         assert app.camera_window.title() == "Camera"
         assert app.tabs._name_list == [app.tab_review_name]
+        released: list[bool] = []
+        app.camera = SimpleNamespace(release=lambda: released.append(True))
         app.camera_close_callback()
         assert app.camera_window is None
+        assert app.camera is None
+        assert released == [True]
         app.update()
         app.move_selected_up()
         assert app.session.entries[0].name == "second.png"
@@ -603,9 +601,7 @@ def test_split_workflow_previews_two_pages_before_mutating_session(tmp_path, mon
         app.update()
         assert app.split_source_canvas.bbox("geometry-magnifier") is not None
         _assert_round_magnifier_at(app.split_source_canvas, line_x, drag_y)
-        app.split_source_canvas.event_generate(
-            "<B1-Motion>", x=target_x, y=drag_y, state=0x0100
-        )
+        app.split_source_canvas.event_generate("<B1-Motion>", x=target_x, y=drag_y, state=0x0100)
         app.update()
         assert float(app.split_editor_state["ratio"]) == pytest.approx(0.4, abs=0.01)
         assert app.split_source_canvas.bbox("geometry-magnifier") is not None

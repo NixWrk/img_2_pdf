@@ -21,6 +21,29 @@ from uniscan.core.processing import PageProcessingDiagnostics, PageProcessingReq
 from uniscan.storage import PagePaths, PageStore
 
 
+CROP_STATE_NONE = "none"
+CROP_STATE_PROPOSED = "proposed"
+CROP_STATE_APPLIED = "applied"
+CROP_STATES = frozenset({CROP_STATE_NONE, CROP_STATE_PROPOSED, CROP_STATE_APPLIED})
+
+
+def _resolve_crop_state(
+    crop_state: str | None, contour: np.ndarray | None, backend: str | None
+) -> str:
+    resolved = crop_state
+    if resolved is None:
+        resolved = (
+            CROP_STATE_APPLIED if contour is not None or backend is not None else CROP_STATE_NONE
+        )
+    if resolved not in CROP_STATES:
+        raise ValueError(f"Invalid crop state: {resolved}")
+    if resolved == CROP_STATE_PROPOSED and contour is None:
+        raise ValueError("Proposed crop state requires a contour.")
+    if resolved == CROP_STATE_NONE and (contour is not None or backend is not None):
+        raise ValueError("Empty crop state cannot retain contour or backend metadata.")
+    return resolved
+
+
 @dataclass(slots=True, frozen=True)
 class ProcessingRecipe:
     """Serializable settings required to reproduce one committed page."""
@@ -203,10 +226,9 @@ class CaptureEntry:
     paths: PagePaths
     detected_contour: np.ndarray | None = None
     detected_backend: str | None = None
+    crop_state: str = CROP_STATE_NONE
     dewarp_control_points: tuple[tuple[float, float], ...] | None = None
-    dewarp_control_curves: tuple[
-        tuple[float, tuple[tuple[float, float], ...]], ...
-    ] | None = None
+    dewarp_control_curves: tuple[tuple[float, tuple[tuple[float, float], ...]], ...] | None = None
     committed_processing: CommittedPageProcessing | None = None
     selected: bool = False
     revision: int = field(default=0, repr=False)
@@ -234,7 +256,9 @@ class CaptureEntry:
         contour: np.ndarray | None,
         backend: str | None,
         store: PageStore,
+        crop_state: str | None = None,
     ) -> "CaptureEntry":
+        resolved_crop_state = _resolve_crop_state(crop_state, contour, backend)
         entry_id = uuid4().hex
         paths = store.add_page(entry_id, raw_image, warped_image)
         return cls(
@@ -243,6 +267,7 @@ class CaptureEntry:
             paths=paths,
             detected_contour=contour,
             detected_backend=backend,
+            crop_state=resolved_crop_state,
             entry_id=entry_id,
         )
 
@@ -366,6 +391,7 @@ class CaptureSession:
         self.store = store or PageStore()
         self._entries: list[CaptureEntry] = []
         self._quarantined_entries: list[dict[str, object]] = []
+        self._document_order: list[str] = []
         self.restore_warnings: list[str] = []
 
     @property
@@ -391,14 +417,54 @@ class CaptureSession:
     def clear(self) -> None:
         # Keep assets until the next manifest checkpoint.  If the process dies
         # before that checkpoint, the previous manifest remains fully restorable.
+        removed_ids = {entry.entry_id for entry in self._entries}
         self._entries.clear()
+        self._document_order = [
+            entry_id for entry_id in self._document_order if entry_id not in removed_ids
+        ]
 
     def add_entry(self, entry: CaptureEntry) -> None:
         self._entries.append(entry)
+        if entry.entry_id not in self._document_order:
+            self._document_order.append(entry.entry_id)
+
+    def _sync_document_order(self) -> None:
+        """Apply visible-page ordering while retaining quarantined page slots."""
+        active_ids = [entry.entry_id for entry in self._entries]
+        active_set = set(active_ids)
+        quarantined_ids = [
+            str(item["entryId"])
+            for item in self._quarantined_entries
+            if isinstance(item.get("entryId"), str)
+        ]
+        quarantined_set = set(quarantined_ids)
+        known_ids = active_set | quarantined_set
+        template = [entry_id for entry_id in self._document_order if entry_id in known_ids]
+        for entry_id in quarantined_ids:
+            if entry_id not in template:
+                template.append(entry_id)
+
+        active_iter = iter(active_ids)
+        ordered: list[str] = []
+        for entry_id in template:
+            if entry_id in quarantined_set:
+                ordered.append(entry_id)
+                continue
+            replacement = next(active_iter, None)
+            if replacement is not None:
+                ordered.append(replacement)
+        ordered.extend(active_iter)
+        self._document_order = ordered
+
+    def _remove_from_document_order(self, entry_ids: Iterable[str]) -> None:
+        removed = set(entry_ids)
+        self._document_order = [
+            entry_id for entry_id in self._document_order if entry_id not in removed
+        ]
 
     def add_image(self, *, name: str, image: np.ndarray) -> CaptureEntry:
         entry = CaptureEntry.from_image(name=name, image=image, store=self.store)
-        self._entries.append(entry)
+        self.add_entry(entry)
         return entry
 
     def add_image_with_contour(
@@ -409,6 +475,7 @@ class CaptureSession:
         warped_image: np.ndarray,
         contour: np.ndarray | None,
         backend: str | None,
+        crop_state: str | None = None,
     ) -> CaptureEntry:
         entry = CaptureEntry.from_raw_and_warped(
             name=name,
@@ -417,8 +484,9 @@ class CaptureSession:
             contour=contour,
             backend=backend,
             store=self.store,
+            crop_state=crop_state,
         )
-        self._entries.append(entry)
+        self.add_entry(entry)
         return entry
 
     def add_images(self, items: list[tuple[str, np.ndarray]]) -> list[CaptureEntry]:
@@ -432,6 +500,11 @@ class CaptureSession:
         if index is None:
             return False
         self._entries.insert(index + 1, entry)
+        try:
+            order_index = self._document_order.index(after_entry_id)
+        except ValueError:
+            order_index = len(self._document_order) - 1
+        self._document_order.insert(order_index + 1, entry.entry_id)
         return True
 
     def move(self, entry_id: str, distance: int) -> bool:
@@ -446,6 +519,7 @@ class CaptureSession:
             self._entries[new_index],
             self._entries[index],
         )
+        self._sync_document_order()
         return True
 
     def move_many(self, entry_ids: Iterable[str], distance: int) -> bool:
@@ -457,9 +531,7 @@ class CaptureSession:
             return False
         moved = False
         indexes = (
-            range(1, len(self._entries))
-            if distance < 0
-            else range(len(self._entries) - 2, -1, -1)
+            range(1, len(self._entries)) if distance < 0 else range(len(self._entries) - 2, -1, -1)
         )
         for index in indexes:
             adjacent = index + distance
@@ -472,6 +544,8 @@ class CaptureSession:
                     self._entries[index],
                 )
                 moved = True
+        if moved:
+            self._sync_document_order()
         return moved
 
     def reorder_entries(
@@ -500,6 +574,7 @@ class CaptureSession:
         if reordered == self._entries:
             return False
         self._entries = reordered
+        self._sync_document_order()
         return True
 
     def select_all(self, selected: bool = True) -> None:
@@ -509,16 +584,21 @@ class CaptureSession:
     def remove_selected(self) -> int:
         before = len(self._entries)
         kept: list[CaptureEntry] = []
+        removed_ids: list[str] = []
         for entry in self._entries:
             if not entry.selected:
                 kept.append(entry)
+            else:
+                removed_ids.append(entry.entry_id)
         self._entries = kept
+        self._remove_from_document_order(removed_ids)
         return before - len(self._entries)
 
     def remove_entry(self, entry_id: str) -> bool:
         index = self._find_index(entry_id)
         if index is None:
             return False
+        self._remove_from_document_order((entry_id,))
         del self._entries[index]
         return True
 
@@ -539,6 +619,7 @@ class CaptureSession:
         raw_image: np.ndarray | None = None,
         contour: np.ndarray | None = None,
         backend: str | None = None,
+        crop_state: str | None = None,
     ) -> bool:
         """Replace entry images in-place while preserving ordering and identity."""
         index = self._find_index(entry_id)
@@ -546,6 +627,7 @@ class CaptureSession:
             return False
 
         entry = self._entries[index]
+        resolved_crop_state = _resolve_crop_state(crop_state, contour, backend)
         entry.paths = self.store.replace_page_set(
             entry.entry_id,
             raw_image=raw_image,
@@ -562,6 +644,7 @@ class CaptureSession:
         # from the previous source instead of retaining a stale overlay/backend.
         entry.detected_contour = contour
         entry.detected_backend = backend
+        entry.crop_state = resolved_crop_state
         return True
 
     def selected_entries(self) -> list[CaptureEntry]:
@@ -571,14 +654,20 @@ class CaptureSession:
         """Atomically save enough metadata to reopen this disk-backed session."""
         manifest_path = Path(manifest_path)
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        self._sync_document_order()
+        document_positions = {
+            entry_id: index for index, entry_id in enumerate(self._document_order)
+        }
         payload = {
-            "schemaVersion": 3,
+            "schemaVersion": 5,
             "sessionDir": str(self.store.session_dir.resolve()),
             "entries": [
                 {
                     "entryId": entry.entry_id,
+                    "documentPosition": document_positions[entry.entry_id],
                     "name": entry.name,
                     "selected": entry.selected,
+                    "cropState": entry.crop_state,
                     "detectedBackend": entry.detected_backend,
                     "detectedContour": (
                         entry.detected_contour.tolist()
@@ -608,7 +697,22 @@ class CaptureSession:
             ],
             # Skipped pages remain referenced until an explicit session discard.
             # A future restore can recover them if their assets are repaired.
-            "quarantinedEntries": self._quarantined_entries,
+            "quarantinedEntries": [
+                {
+                    **item,
+                    "cropState": item.get(
+                        "cropState",
+                        (
+                            CROP_STATE_APPLIED
+                            if item.get("detectedContour") is not None
+                            or item.get("detectedBackend") is not None
+                            else CROP_STATE_NONE
+                        ),
+                    ),
+                    "documentPosition": document_positions[str(item["entryId"])],
+                }
+                for item in self._quarantined_entries
+            ],
         }
         descriptor, raw_stage = tempfile.mkstemp(
             prefix=f".{manifest_path.name}.stage-",
@@ -670,7 +774,7 @@ class CaptureSession:
         manifest_version = payload.get("schemaVersion")
         if (
             type(manifest_version) is not int
-            or manifest_version not in {1, 2, 3}
+            or manifest_version not in {1, 2, 3, 4, 5}
             or not isinstance(payload.get("entries"), list)
         ):
             raise ValueError(f"Unsupported session manifest: {manifest_path}")
@@ -691,6 +795,16 @@ class CaptureSession:
         session = cls(store=store)
         seen_ids: set[str] = set()
         restore_items = [*payload["entries"], *quarantined_entries]
+        if manifest_version >= 4:
+            positions = [
+                item.get("documentPosition") if isinstance(item, dict) else None
+                for item in restore_items
+            ]
+            if any(type(position) is not int or position < 0 for position in positions) or sorted(
+                positions
+            ) != list(range(len(restore_items))):
+                raise ValueError(f"Invalid document order in manifest: {manifest_path}")
+            restore_items.sort(key=lambda item: item["documentPosition"])
         for position, item in enumerate(restore_items, start=1):
             entry_id = "unknown"
             can_quarantine = False
@@ -705,6 +819,7 @@ class CaptureSession:
                 # Claim the id before touching its assets.  A malformed duplicate
                 # must never be allowed to shadow or delete the first page.
                 seen_ids.add(entry_id)
+                session._document_order.append(entry_id)
                 can_quarantine = True
                 # Raw and original are authoritative.  Current and all display
                 # derivatives are disposable and can be rebuilt after a crash.
@@ -734,6 +849,18 @@ class CaptureSession:
                 backend_raw = item.get("detectedBackend")
                 if backend_raw is not None and not isinstance(backend_raw, str):
                     raise ValueError("invalid detected backend")
+                if manifest_version >= 5:
+                    crop_state_raw = item.get("cropState")
+                    crop_state = _resolve_crop_state(crop_state_raw, contour, backend_raw)
+                else:
+                    # Before schema 5, contour/backend described geometry that
+                    # was already committed to original.png.  Treating it as a
+                    # proposal would apply legacy crops a second time.
+                    crop_state = (
+                        CROP_STATE_APPLIED
+                        if contour is not None or backend_raw is not None
+                        else CROP_STATE_NONE
+                    )
                 committed_payload = (
                     item.get("committedProcessing") if manifest_version >= 2 else None
                 )
@@ -789,6 +916,7 @@ class CaptureSession:
                     paths=paths,
                     detected_contour=contour,
                     detected_backend=backend_raw,
+                    crop_state=crop_state,
                     dewarp_control_points=control_points,
                     dewarp_control_curves=control_curves,
                     committed_processing=committed_processing,

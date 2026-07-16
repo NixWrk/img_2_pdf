@@ -1,6 +1,9 @@
 """Session layer for in-memory page management."""
 
 from .capture_session import (
+    CROP_STATE_APPLIED,
+    CROP_STATE_NONE,
+    CROP_STATE_PROPOSED,
     CaptureEntry,
     CaptureSession,
     CommittedPageProcessing,
@@ -19,6 +22,9 @@ from .autosave import (
 )
 
 __all__ = [
+    "CROP_STATE_APPLIED",
+    "CROP_STATE_NONE",
+    "CROP_STATE_PROPOSED",
     "UnsafeSessionLockError",
     "CommittedPageProcessing",
     "ProcessingRecipe",

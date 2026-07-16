@@ -12,6 +12,8 @@ from uniscan.core.processing import PageProcessingRequest, process_document_page
 from uniscan.diagnostics import DiagnosticCheck, DiagnosticReport
 from uniscan.io.loaders import imwrite_unicode
 from uniscan.session import (
+    CROP_STATE_APPLIED,
+    CROP_STATE_PROPOSED,
     CaptureSession,
     CommittedPageProcessing,
     UnsafeSessionLockError,
@@ -27,6 +29,10 @@ from uniscan.ui.app import (
     _add_dewarp_control_point,
     _compose_split_preview,
     _detection_summary,
+    _entry_has_crop_proposal,
+    _load_import_preferences,
+    _save_import_preferences,
+    _entry_needs_crop_review,
     _fit_image_to_box,
     _move_dewarp_guide_anchor,
     _move_dewarp_control_point,
@@ -83,6 +89,48 @@ def _read_image(path) -> np.ndarray:
     image = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_UNCHANGED)
     assert image is not None
     return image
+
+
+def test_import_preferences_round_trip_and_corruption_fails_safe(tmp_path) -> None:
+    path = tmp_path / "state" / "import_preferences.json"
+
+    assert _load_import_preferences(path) == (300, False)
+    assert _save_import_preferences(path, pdf_dpi=600, split_spreads=True) is True
+    assert _load_import_preferences(path) == (600, True)
+    assert not list(path.parent.glob(".import_preferences.json.stage-*"))
+
+    path.write_text(
+        '{"schemaVersion": 1, "pdfDpi": "600", "splitSpreads": 1}',
+        encoding="utf-8",
+    )
+    assert _load_import_preferences(path) == (300, False)
+    path.write_text("not json", encoding="utf-8")
+    assert _load_import_preferences(path) == (300, False)
+    path.write_bytes(b"\xff\xfe\xfa")
+    assert _load_import_preferences(path) == (300, False)
+
+
+def test_import_preferences_reject_unsafe_values(tmp_path) -> None:
+    path = tmp_path / "import_preferences.json"
+
+    assert _save_import_preferences(path, pdf_dpi=71, split_spreads=False) is False
+    assert _save_import_preferences(path, pdf_dpi=300, split_spreads=1) is False
+    assert path.exists() is False
+
+
+def test_import_preferences_ignore_stage_cleanup_failure(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "import_preferences.json"
+    real_unlink = type(path).unlink
+
+    def fail_stage_cleanup(self, *args, **kwargs):
+        if self.name.startswith(".import_preferences.json.stage-"):
+            raise OSError("cleanup denied")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(path), "unlink", fail_stage_cleanup)
+
+    assert _save_import_preferences(path, pdf_dpi=450, split_spreads=False) is True
+    assert _load_import_preferences(path) == (450, False)
 
 
 def test_export_uses_each_pages_committed_current_not_pending_global_settings(tmp_path) -> None:
@@ -338,7 +386,7 @@ def test_restored_uvdoc_page_with_dewarp_none_is_identity(tmp_path) -> None:
     ] == (18, 28)
 
 
-def test_capture_frame_uses_plain_two_page_snapshot_not_tk_var(monkeypatch) -> None:
+def test_capture_frame_disables_hidden_auto_split(monkeypatch) -> None:
     app = _app_for_processing()
 
     class _ForbiddenTkVar:
@@ -354,15 +402,134 @@ def test_capture_frame_uses_plain_two_page_snapshot_not_tk_var(monkeypatch) -> N
 
     monkeypatch.setattr("uniscan.ui.app.process_loaded_items", fake_process)
 
-    assert (
-        app._process_capture_frame(
-            np.zeros((10, 10, 3), dtype=np.uint8),
-            "burst",
-            two_page_mode=True,
-        )
-        == []
+    assert app._process_capture_frame(np.zeros((10, 10, 3), dtype=np.uint8), "burst") == []
+    assert seen == [False]
+
+
+def test_ingest_keeps_detected_crop_as_uncommitted_proposal(tmp_path) -> None:
+    app = _app_for_processing()
+    app.session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
+    raw = np.full((12, 16, 3), 25, dtype=np.uint8)
+    warped = np.full((8, 10, 3), 220, dtype=np.uint8)
+    contour = np.float32([[1, 1], [14, 1], [14, 10], [1, 10]])
+
+    app._ingest_page_results(
+        [PageResult("page", raw, warped, warped, contour, "cv_hybrid", True, None)]
     )
-    assert seen == [True]
+
+    entry = app.session.entries[0]
+    np.testing.assert_array_equal(entry.raw_image, raw)
+    np.testing.assert_array_equal(entry.original_image, raw)
+    np.testing.assert_array_equal(entry.current_image, raw)
+    np.testing.assert_array_equal(entry.detected_contour, contour)
+    assert entry.detected_backend == "cv_hybrid"
+    assert entry.crop_state == CROP_STATE_PROPOSED
+    assert _entry_has_crop_proposal(entry) is True
+
+
+def test_crop_proposal_previews_then_commits_only_through_apply(tmp_path) -> None:
+    app = _app_for_processing()
+    app.postprocess_var.set("None")
+    app.session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
+    raw = np.zeros((14, 18, 3), dtype=np.uint8)
+    raw[2:12, 3:15] = (40, 120, 220)
+    contour = np.float32([[3, 2], [14, 2], [14, 11], [3, 11]])
+    app._ingest_page_results(
+        [PageResult("page", raw, raw[2:12, 3:15], raw, contour, "cv_hybrid", True, None)]
+    )
+    entry = app.session.entries[0]
+    expected = app._review_after_image(entry, raw)
+
+    # Previewing a proposal leaves every durable image on the raw generation.
+    np.testing.assert_array_equal(entry.original_image, raw)
+    np.testing.assert_array_equal(entry.current_image, raw)
+
+    app._apply_perspective_crop(
+        entry,
+        source_image=entry.raw_image,
+        points=entry.detected_contour,
+        backend=entry.detected_backend,
+    )
+
+    np.testing.assert_array_equal(entry.original_image, expected)
+    np.testing.assert_array_equal(entry.current_image, expected)
+    np.testing.assert_array_equal(entry.detected_contour, contour)
+    assert entry.detected_backend == "cv_hybrid"
+    assert entry.crop_state == CROP_STATE_APPLIED
+    assert _entry_has_crop_proposal(entry) is False
+
+
+def test_crop_apply_all_rolls_back_every_page_when_later_commit_fails(
+    tmp_path, monkeypatch
+) -> None:
+    app = _app_for_processing()
+    app.session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
+    raw_images = [np.full((14, 18, 3), value, dtype=np.uint8) for value in (30, 90)]
+    contour = np.float32([[2, 2], [15, 2], [15, 11], [2, 11]])
+    for index, raw in enumerate(raw_images):
+        app._ingest_page_results(
+            [PageResult(str(index), raw, raw, raw, contour, "cv_hybrid", True, None)]
+        )
+    entries = list(app.session.entries)
+    snapshots = [
+        (
+            entry.original_image.copy(),
+            entry.current_image.copy(),
+            entry.detected_contour.copy(),
+            entry.detected_backend,
+            entry.crop_state,
+            entry.revision,
+        )
+        for entry in entries
+    ]
+    real_replace = app.session.replace_entry_image
+    failure_pending = True
+
+    def fail_second_once(entry_id, **kwargs):
+        nonlocal failure_pending
+        if entry_id == entries[1].entry_id and failure_pending:
+            failure_pending = False
+            raise RuntimeError("simulated second-page commit failure")
+        return real_replace(entry_id, **kwargs)
+
+    monkeypatch.setattr(app.session, "replace_entry_image", fail_second_once)
+    proposals = [
+        (entry, entry.raw_image, entry.detected_contour, entry.detected_backend)
+        for entry in entries
+    ]
+
+    with pytest.raises(RuntimeError, match="second-page commit failure"):
+        app._apply_perspective_crops(proposals)
+
+    for entry, snapshot in zip(entries, snapshots, strict=True):
+        original, current, old_contour, backend, crop_state, revision = snapshot
+        np.testing.assert_array_equal(entry.original_image, original)
+        np.testing.assert_array_equal(entry.current_image, current)
+        np.testing.assert_array_equal(entry.detected_contour, old_contour)
+        assert entry.detected_backend == backend
+        assert entry.crop_state == crop_state
+        assert entry.revision == revision
+
+
+def test_failed_detection_does_not_leave_success_backend_status(tmp_path) -> None:
+    app = _app_for_processing()
+    app.session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
+    raw = np.zeros((8, 9, 3), dtype=np.uint8)
+
+    app._ingest_page_results(
+        [PageResult("page", raw, raw, raw, None, "cv_hybrid", False, "no boundary")]
+    )
+
+    entry = app.session.entries[0]
+    assert entry.detected_backend is None
+    assert entry.crop_state != CROP_STATE_PROPOSED
+    assert _entry_needs_crop_review(entry) is True
+    assert (
+        _entry_needs_crop_review(
+            SimpleNamespace(detected_contour=None, detected_backend="intentional_split")
+        )
+        is False
+    )
 
 
 def test_preview_error_is_explicit_and_stale_generation_is_ignored() -> None:
@@ -551,6 +718,11 @@ def test_committing_previewed_split_creates_adjacent_pages_with_prior_appearance
     assert entry.committed_processing.recipe.postprocess_name == "Grayscale"
     assert right_entry.committed_processing.recipe.postprocess_name == "Grayscale"
 
+    assert entry.detected_backend == "intentional_split"
+    assert right_entry.detected_backend == "intentional_split"
+    assert _entry_needs_crop_review(entry) is False
+    assert _entry_needs_crop_review(right_entry) is False
+
 
 def test_drag_captures_selected_page_ids_before_listbox_changes_selection() -> None:
     app = object.__new__(UnifiedScanApp)
@@ -592,6 +764,150 @@ def test_pdf_layout_dpi_mismatch_is_rejected(tmp_path) -> None:
     app._validate_pdf_layout_dpi([entry], 300)
     with pytest.raises(RuntimeError, match="physical A4/Letter size"):
         app._validate_pdf_layout_dpi([entry], 200)
+
+
+def test_quick_export_preserves_scope_and_dpi_while_requesting_path() -> None:
+    app = _app_for_processing()
+    app.session = SimpleNamespace(entries=[object()])
+    app.export_scope_var = _Var("Selected pages")
+    app.export_pdf_dpi_var.set(420)
+    app.export_pdf_path_var = _Var("old-output.pdf")
+    observed: list[tuple[str, int, str]] = []
+    app.export_to_pdf = lambda: observed.append(
+        (
+            app.export_scope_var.get(),
+            app.export_pdf_dpi_var.get(),
+            app.export_pdf_path_var.get(),
+        )
+    )
+
+    app.quick_export_pdf()
+
+    assert observed == [("Selected pages", 420, "")]
+
+
+def test_burst_releases_existing_handle_and_commits_staged_raw_frames(
+    tmp_path, monkeypatch
+) -> None:
+    app = _app_for_processing()
+    app.camera_shots_var = _Var(2)
+    app.camera_delay_var = _Var(0.0)
+    app.camera_index_var = _Var(3)
+    app.camera_resolution = (640, 480)
+    app.preview_job = None
+    app.stop_preview = lambda: None
+    app._update_camera_health = lambda: None
+    app.session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
+    app.refresh_page_list = lambda keep_index=None: None
+    app.go_to_review_tab = lambda: None
+    statuses: list[str] = []
+    app._set_status = statuses.append
+
+    class PersistentCamera:
+        released = False
+
+        def release(self) -> None:
+            self.released = True
+
+    persistent = PersistentCamera()
+    app.camera = persistent
+    frames = [
+        np.full((8, 9, 3), 11, dtype=np.uint8),
+        np.full((8, 9, 3), 22, dtype=np.uint8),
+    ]
+    created = []
+
+    class FakeBurstCamera:
+        MAX_BURST_SHOTS = 20
+
+        def __init__(self, *, index, resolution):
+            assert persistent.released is True
+            assert index == 3
+            assert resolution == (640, 480)
+            self.released = False
+            created.append(self)
+
+        def open(self) -> None:
+            pass
+
+        def iter_burst(
+            self,
+            *,
+            shots,
+            delay_sec,
+            cancel_cb,
+            on_progress,
+        ):
+            assert shots == 2
+            assert delay_sec == 0.0
+            assert cancel_cb() is False
+            for index, frame in enumerate(frames, start=1):
+                on_progress(index, shots)
+                yield index, frame
+
+        def release(self) -> None:
+            self.released = True
+
+    monkeypatch.setattr("uniscan.ui.app.CameraService", FakeBurstCamera)
+
+    def process_frame(frame, base_name):
+        assert created[-1].released is True
+        warped = np.full_like(frame, 255)
+        contour = np.float32([[0, 0], [8, 0], [8, 7], [0, 7]])
+        return [PageResult(base_name, frame, warped, warped, contour, "cv_hybrid", True, None)]
+
+    app._process_capture_frame = process_frame
+
+    def run_job(_name, worker, on_done, *, on_error=None):
+        try:
+            payload = worker(lambda **_kwargs: None, lambda: False)
+            on_done(payload)
+        except Exception:
+            if on_error is not None:
+                on_error()
+            raise
+        return True
+
+    app._start_background_job = run_job
+
+    app.capture_burst()
+
+    assert app.camera is None
+    assert app.burst_camera is None
+    assert app._burst_is_active() is False
+    assert created[0].released is True
+    assert len(app.session.entries) == 2
+    np.testing.assert_array_equal(app.session.entries[0].original_image, frames[0])
+    np.testing.assert_array_equal(app.session.entries[1].current_image, frames[1])
+    assert statuses[-1].startswith("Burst captured 2 page(s)")
+
+
+def test_closing_camera_cancels_and_releases_active_burst() -> None:
+    app = object.__new__(UnifiedScanApp)
+    app._camera_state_lock = __import__("threading").RLock()
+    app._burst_capture_active = True
+    app.job_cancel_event = __import__("threading").Event()
+    app.camera = None
+    app.preview_job = None
+    app.stop_preview = lambda: None
+    app._update_camera_health = lambda: None
+    app._set_status = lambda _text: None
+
+    class ActiveCamera:
+        released = False
+
+        def release(self) -> None:
+            self.released = True
+
+    active = ActiveCamera()
+    app.burst_camera = active
+
+    app.close_camera()
+
+    assert app.job_cancel_event.is_set()
+    assert active.released is True
+    assert app.burst_camera is active
+    assert app._burst_is_active() is True
 
 
 def test_camera_resolution_commits_only_after_success(monkeypatch) -> None:
@@ -750,7 +1066,7 @@ def test_staged_apply_rolls_back_prior_pages_on_commit_failure(tmp_path) -> None
 def test_gui_import_consumes_pdf_pages_lazily_and_stages_to_disk(tmp_path, monkeypatch) -> None:
     app = _app_for_processing()
     app.import_pdf_dpi_var = _Var(150)
-    app.import_two_page_mode_var = _Var(False)
+    app.import_two_page_mode_var = _Var(True)
     app.session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
     app.refresh_page_list = lambda keep_index=None: None
     app.go_to_review_tab = lambda: None
@@ -767,6 +1083,7 @@ def test_gui_import_consumes_pdf_pages_lazily_and_stages_to_disk(tmp_path, monke
     def process_one(items, *, options, cancel_cb):
         nonlocal processed
         assert len(items) == 1
+        assert options.two_page_mode is True
         assert yielded == processed + 1
         processed += 1
         name, image = items[0]
@@ -814,11 +1131,11 @@ def test_gui_import_honors_cancellation_after_final_staging_encode(tmp_path, mon
     real_write = imwrite_unicode
     writes = 0
 
-    def cancel_after_second_write(path, pixels) -> bool:
+    def cancel_after_staging_write(path, pixels) -> bool:
         nonlocal cancelled, writes
         written = real_write(path, pixels)
         writes += 1
-        if writes == 2:
+        if writes == 1:
             cancelled = True
         return written
 
@@ -830,12 +1147,12 @@ def test_gui_import_honors_cancellation_after_final_staging_encode(tmp_path, mon
             on_error()
         return True
 
-    monkeypatch.setattr("uniscan.ui.app.imwrite_unicode", cancel_after_second_write)
+    monkeypatch.setattr("uniscan.ui.app.imwrite_unicode", cancel_after_staging_write)
     app._start_background_job = run_job
 
     app._import_paths(paths=[tmp_path / "page.png"])
 
-    assert writes == 2
+    assert writes == 1
     assert errors == ["Cancelled by user."]
     assert app.session.entries == []
 
