@@ -9,6 +9,7 @@ import re
 import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Iterable
 from uuid import uuid4
 
 import numpy as np
@@ -433,6 +434,60 @@ class CaptureSession:
             self._entries[new_index],
             self._entries[index],
         )
+        return True
+
+    def move_many(self, entry_ids: Iterable[str], distance: int) -> bool:
+        """Move selected entries one position while preserving their relative order."""
+        if distance not in {-1, 1}:
+            raise ValueError("Multiple pages can only move one position at a time.")
+        selected = set(entry_ids)
+        if not selected:
+            return False
+        moved = False
+        indexes = (
+            range(1, len(self._entries))
+            if distance < 0
+            else range(len(self._entries) - 2, -1, -1)
+        )
+        for index in indexes:
+            adjacent = index + distance
+            if (
+                self._entries[index].entry_id in selected
+                and self._entries[adjacent].entry_id not in selected
+            ):
+                self._entries[index], self._entries[adjacent] = (
+                    self._entries[adjacent],
+                    self._entries[index],
+                )
+                moved = True
+        return moved
+
+    def reorder_entries(
+        self,
+        entry_ids: Iterable[str],
+        target_entry_id: str,
+        *,
+        place_after: bool,
+    ) -> bool:
+        """Place selected entries beside a target while preserving selected-page order."""
+        selected = set(entry_ids)
+        if not selected or target_entry_id in selected:
+            return False
+        moving = [entry for entry in self._entries if entry.entry_id in selected]
+        if not moving:
+            return False
+        remaining = [entry for entry in self._entries if entry.entry_id not in selected]
+        target_index = next(
+            (index for index, entry in enumerate(remaining) if entry.entry_id == target_entry_id),
+            None,
+        )
+        if target_index is None:
+            return False
+        insertion_index = target_index + int(place_after)
+        reordered = remaining[:insertion_index] + moving + remaining[insertion_index:]
+        if reordered == self._entries:
+            return False
+        self._entries = reordered
         return True
 
     def select_all(self, selected: bool = True) -> None:

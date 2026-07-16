@@ -29,6 +29,31 @@ def test_session_add_move_select_remove(tmp_path) -> None:
     session.close()
 
 
+def test_session_moves_and_reorders_multiple_pages_as_a_stable_block(tmp_path) -> None:
+    session = CaptureSession(store=PageStore(root_dir=tmp_path))
+    entries = [session.add_image(name=name, image=_img(index)) for index, name in enumerate("abcd")]
+    selected_ids = (entries[1].entry_id, entries[2].entry_id)
+
+    assert session.move_many(selected_ids, 1) is True
+    assert [entry.name for entry in session.entries] == ["a", "d", "b", "c"]
+    assert session.move_many(selected_ids, -1) is True
+    assert [entry.name for entry in session.entries] == ["a", "b", "c", "d"]
+
+    assert session.reorder_entries(
+        selected_ids,
+        entries[3].entry_id,
+        place_after=True,
+    )
+    assert [entry.name for entry in session.entries] == ["a", "d", "b", "c"]
+    assert session.reorder_entries(
+        selected_ids,
+        entries[0].entry_id,
+        place_after=False,
+    )
+    assert [entry.name for entry in session.entries] == ["b", "c", "a", "d"]
+    session.close()
+
+
 def test_session_apply_postprocess_uses_original(tmp_path) -> None:
     session = CaptureSession(store=PageStore(root_dir=tmp_path))
     entry = session.add_image(name="gray", image=_img(127))

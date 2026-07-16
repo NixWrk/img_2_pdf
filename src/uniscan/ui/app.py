@@ -257,6 +257,7 @@ class UnifiedScanApp(ctk.CTk):
         self.corner_editor_window: ctk.CTkToplevel | None = None
         self.corner_source_canvas: tk.Canvas | None = None
         self.corner_preview_canvas: tk.Canvas | None = None
+        self.page_drag_state: dict[str, object] | None = None
         self.live_detector = LiveContourDetector(backend=DEFAULT_LIVE_BACKEND)
 
         initial_status = "Ready"
@@ -600,17 +601,42 @@ class UnifiedScanApp(ctk.CTk):
         )
         self.page_listbox.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
         self.page_listbox.bind("<<ListboxSelect>>", self.on_page_select)
+        self.page_listbox.bind("<ButtonPress-1>", self._on_page_drag_start, add="+")
+        self.page_listbox.bind("<B1-Motion>", self._on_page_drag_motion, add="+")
+        self.page_listbox.bind("<ButtonRelease-1>", self._on_page_drag_end, add="+")
+        self.page_listbox.bind("<Button-3>", self._show_page_context_menu)
 
         page_actions = ctk.CTkFrame(left, fg_color="transparent")
         page_actions.pack(fill=ctk.X, padx=10, pady=(0, 4))
-        for text, command in (
-            ("Up", self.move_selected_up),
-            ("Down", self.move_selected_down),
-            ("Delete", self.delete_selected_pages),
-        ):
-            ctk.CTkButton(page_actions, text=text, width=78, command=command).pack(
-                side=ctk.LEFT, padx=(0, 4)
-            )
+        self.move_pages_up_button = ctk.CTkButton(
+            page_actions,
+            text="Move up",
+            width=82,
+            command=self.move_selected_up,
+        )
+        self.move_pages_up_button.pack(side=ctk.LEFT, padx=(0, 4))
+        self.move_pages_down_button = ctk.CTkButton(
+            page_actions,
+            text="Move down",
+            width=86,
+            command=self.move_selected_down,
+        )
+        self.move_pages_down_button.pack(side=ctk.LEFT, padx=(0, 4))
+        self.delete_pages_button = ctk.CTkButton(
+            page_actions,
+            text="Delete",
+            width=72,
+            fg_color="#b42318",
+            hover_color="#912018",
+            command=self.delete_selected_pages,
+        )
+        self.delete_pages_button.pack(side=ctk.LEFT)
+
+        self.page_context_menu = tk.Menu(self, tearoff=False)
+        self.page_context_menu.add_command(label="Move up", command=self.move_selected_up)
+        self.page_context_menu.add_command(label="Move down", command=self.move_selected_down)
+        self.page_context_menu.add_separator()
+        self.page_context_menu.add_command(label="Delete", command=self.delete_selected_pages)
 
         edit_actions = ctk.CTkFrame(left, fg_color="transparent")
         edit_actions.pack(fill=ctk.X, padx=10, pady=(0, 4))
@@ -2218,7 +2244,13 @@ class UnifiedScanApp(ctk.CTk):
         ):
             staging_dir.cleanup()
 
-    def refresh_page_list(self, keep_index: int | None = None) -> None:
+    def refresh_page_list(
+        self,
+        keep_index: int | None = None,
+        *,
+        keep_entry_ids: Iterable[str] | None = None,
+    ) -> None:
+        selected_entry_ids = set(keep_entry_ids or ())
         self.page_listbox.delete(0, tk.END)
         for idx, entry in enumerate(self.session.entries, start=1):
             tag = "" if entry.detected_contour is not None else "  ⚠"
@@ -2236,10 +2268,15 @@ class UnifiedScanApp(ctk.CTk):
             if button is not None:
                 button.configure(state=export_state)
 
-        if keep_index is not None and len(self.session.entries) > 0:
+        if selected_entry_ids:
+            for index, entry in enumerate(self.session.entries):
+                if entry.entry_id in selected_entry_ids:
+                    self.page_listbox.selection_set(index)
+        elif keep_index is not None and len(self.session.entries) > 0:
             keep_index = max(0, min(keep_index, len(self.session.entries) - 1))
             self.page_listbox.selection_set(keep_index)
         self._sync_page_selection_to_session()
+        self._update_page_action_states()
         self.update_page_preview()
 
     def _sync_page_selection_to_session(self) -> None:
@@ -2249,7 +2286,99 @@ class UnifiedScanApp(ctk.CTk):
 
     def on_page_select(self, _event=None) -> None:
         self._sync_page_selection_to_session()
+        self._update_page_action_states()
         self.update_page_preview()
+
+    def _update_page_action_states(self) -> None:
+        selected = set(self._selected_entry_indices())
+        can_move_up = any(index > 0 and index - 1 not in selected for index in selected)
+        can_move_down = any(
+            index + 1 < len(self.session.entries) and index + 1 not in selected
+            for index in selected
+        )
+        states = (
+            ("move_pages_up_button", tk.NORMAL if can_move_up else tk.DISABLED),
+            ("move_pages_down_button", tk.NORMAL if can_move_down else tk.DISABLED),
+            ("delete_pages_button", tk.NORMAL if selected else tk.DISABLED),
+        )
+        for name, state in states:
+            button = getattr(self, name, None)
+            if button is not None:
+                button.configure(state=state)
+        menu = getattr(self, "page_context_menu", None)
+        if menu is not None:
+            menu.entryconfigure(0, state=tk.NORMAL if can_move_up else tk.DISABLED)
+            menu.entryconfigure(1, state=tk.NORMAL if can_move_down else tk.DISABLED)
+            menu.entryconfigure(3, state=tk.NORMAL if selected else tk.DISABLED)
+
+    def _page_index_at_y(self, y: int) -> int | None:
+        if self.page_listbox.size() == 0:
+            return None
+        index = int(self.page_listbox.nearest(y))
+        bounds = self.page_listbox.bbox(index)
+        if bounds is None or not bounds[1] <= y <= bounds[1] + bounds[3]:
+            return None
+        return index
+
+    def _on_page_drag_start(self, event) -> None:
+        index = self._page_index_at_y(event.y)
+        self.page_drag_state = (
+            None
+            if index is None
+            else {"index": index, "start_y": event.y, "entry_ids": (), "dragged": False}
+        )
+
+    def _on_page_drag_motion(self, event) -> str | None:
+        state = self.page_drag_state
+        if state is None or abs(event.y - int(state["start_y"])) < 5:
+            return None
+        if not state["dragged"]:
+            indexes = self._selected_entry_indices()
+            start_index = int(state["index"])
+            if start_index not in indexes:
+                indexes = [start_index]
+            state["entry_ids"] = tuple(self.session.entries[index].entry_id for index in indexes)
+            state["dragged"] = True
+            self.page_listbox.configure(cursor="fleur")
+        return "break"
+
+    def _on_page_drag_end(self, event) -> str | None:
+        state = self.page_drag_state
+        self.page_drag_state = None
+        self.page_listbox.configure(cursor="")
+        if state is None or not state["dragged"]:
+            return None
+        target_index = self._page_index_at_y(event.y)
+        if target_index is None:
+            return "break"
+        bounds = self.page_listbox.bbox(target_index)
+        if bounds is None:
+            return "break"
+        entry_ids = tuple(state["entry_ids"])
+        target_entry_id = self.session.entries[target_index].entry_id
+        place_after = event.y >= bounds[1] + bounds[3] / 2
+        if self.session.reorder_entries(
+            entry_ids,
+            target_entry_id,
+            place_after=place_after,
+        ):
+            self.refresh_page_list(keep_entry_ids=entry_ids)
+            self._set_status(f"Moved {len(entry_ids)} page(s)")
+        return "break"
+
+    def _show_page_context_menu(self, event) -> str:
+        index = self._page_index_at_y(event.y)
+        if index is not None and index not in self.page_listbox.curselection():
+            self.page_listbox.selection_clear(0, tk.END)
+            self.page_listbox.selection_set(index)
+            self.page_listbox.activate(index)
+            self.on_page_select()
+        self._update_page_action_states()
+        try:
+            self.page_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.page_context_menu.grab_release()
+        return "break"
 
     def _on_preview_mode_change(self, _value: str | None = None) -> None:
         self._layout_page_previews()
@@ -2553,50 +2682,55 @@ class UnifiedScanApp(ctk.CTk):
         return index, self.session.entries[index]
 
     def move_selected_up(self) -> None:
-        index = self._single_selected_index()
-        if index is None:
-            self._set_status("Select exactly one page to move.")
+        indices = self._selected_entry_indices()
+        if not indices:
+            self._set_status("Select page(s) to move.")
             return
-        if index == 0:
-            return
-        entry_id = self.session.entries[index].entry_id
-        moved = self.session.move(entry_id, -1)
+        entry_ids = tuple(self.session.entries[index].entry_id for index in indices)
+        moved = self.session.move_many(entry_ids, -1)
         if moved:
-            self.refresh_page_list(keep_index=index - 1)
-            self._set_status("Moved page up")
+            self.refresh_page_list(keep_entry_ids=entry_ids)
+            self._set_status(f"Moved {len(indices)} page(s) up")
+        else:
+            self._update_page_action_states()
 
     def move_selected_down(self) -> None:
-        index = self._single_selected_index()
-        if index is None:
-            self._set_status("Select exactly one page to move.")
+        indices = self._selected_entry_indices()
+        if not indices:
+            self._set_status("Select page(s) to move.")
             return
-        if index >= len(self.session.entries) - 1:
-            return
-        entry_id = self.session.entries[index].entry_id
-        moved = self.session.move(entry_id, 1)
+        entry_ids = tuple(self.session.entries[index].entry_id for index in indices)
+        moved = self.session.move_many(entry_ids, 1)
         if moved:
-            self.refresh_page_list(keep_index=index + 1)
-            self._set_status("Moved page down")
+            self.refresh_page_list(keep_entry_ids=entry_ids)
+            self._set_status(f"Moved {len(indices)} page(s) down")
+        else:
+            self._update_page_action_states()
 
     def select_all_pages(self) -> None:
         self.page_listbox.selection_set(0, tk.END)
         self._sync_page_selection_to_session()
+        self._update_page_action_states()
         self.update_page_preview()
         self._set_status("Selected all pages")
 
     def clear_page_selection(self) -> None:
         self.page_listbox.selection_clear(0, tk.END)
         self._sync_page_selection_to_session()
+        self._update_page_action_states()
         self.update_page_preview()
         self._set_status("Selection cleared")
 
     def delete_selected_pages(self) -> None:
+        indices = self._selected_entry_indices()
         self._sync_page_selection_to_session()
         removed = self.session.remove_selected()
         if removed <= 0:
             self._set_status("No selected pages to delete")
+            self._update_page_action_states()
             return
-        self.refresh_page_list()
+        keep_index = min(indices[0], len(self.session.entries) - 1) if self.session.entries else None
+        self.refresh_page_list(keep_index=keep_index)
         self._set_status(f"Deleted {removed} page(s). Session pages: {len(self.session)}")
 
     def replace_selected_page_from_file(self) -> None:

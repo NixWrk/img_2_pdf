@@ -62,8 +62,13 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app._drag_drop_error is None
         assert app.toolbar_export_button.cget("state") == "disabled"
         assert app.cancel_task_button.cget("state") == "disabled"
+        assert app.move_pages_up_button.cget("state") == "disabled"
+        assert app.move_pages_down_button.cget("state") == "disabled"
+        assert app.delete_pages_button.cget("state") == "disabled"
         assert app.page_listbox.bind("<Delete>")
         assert app.page_listbox.bind("<Control-Right>")
+        assert app.page_listbox.bind("<B1-Motion>")
+        assert app.page_listbox.bind("<Button-3>")
 
         source = tmp_path / "drop.png"
         source.write_bytes(b"placeholder")
@@ -87,6 +92,9 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.page_count_var.get() == "2 pages"
         assert app.toolbar_export_button.cget("state") == "normal"
         assert app._single_selected_entry()[1].name == "second.png"
+        assert app.move_pages_up_button.cget("state") == "normal"
+        assert app.move_pages_down_button.cget("state") == "disabled"
+        assert app.delete_pages_button.cget("state") == "normal"
         app.binarization_method_var.set("Sauvola (uneven light)")
         app.despeckle_strength_var.set("Conservative")
         settings = app._current_preprocess_settings()
@@ -155,15 +163,31 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         resized_preview_size = app.page_preview_after_photo.cget("size")
         assert resized_preview_size[0] > initial_preview_size[0]
         assert resized_preview_size[1] > initial_preview_size[1]
-        app.withdraw()
         app.move_selected_up()
         assert app.session.entries[0].name == "second.png"
+        assert app.move_pages_up_button.cget("state") == "disabled"
+        assert app.move_pages_down_button.cget("state") == "normal"
         app.move_selected_down()
         assert app.session.entries[1].name == "second.png"
+        start_bounds = app.page_listbox.bbox(1)
+        target_bounds = app.page_listbox.bbox(0)
+        assert start_bounds is not None and target_bounds is not None
+        app._on_page_drag_start(SimpleNamespace(y=start_bounds[1] + start_bounds[3] // 2))
+        assert (
+            app._on_page_drag_motion(SimpleNamespace(y=target_bounds[1])) == "break"
+        )
+        assert app._on_page_drag_end(SimpleNamespace(y=target_bounds[1])) == "break"
+        assert [entry.name for entry in app.session.entries] == ["second.png", "first.png"]
+        app.move_selected_down()
+        assert [entry.name for entry in app.session.entries] == ["first.png", "second.png"]
+        app.withdraw()
         app.select_all_pages()
         assert all(entry.selected for entry in app.session.entries)
+        assert app.move_pages_up_button.cget("state") == "disabled"
+        assert app.move_pages_down_button.cget("state") == "disabled"
         app.clear_page_selection()
         assert not any(entry.selected for entry in app.session.entries)
+        assert app.delete_pages_button.cget("state") == "disabled"
         app.select_all_pages()
         app.delete_selected_pages()
         assert len(app.session) == 0
