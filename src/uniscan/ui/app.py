@@ -211,6 +211,106 @@ def _compose_split_preview(left: np.ndarray, right: np.ndarray) -> np.ndarray:
     return np.concatenate((left, gap, right), axis=1)
 
 
+def _fit_image_to_box(image: np.ndarray, max_width: int, max_height: int) -> np.ndarray:
+    """Resize only for presentation while preserving the full-resolution source."""
+    height, width = image.shape[:2]
+    scale = min(max_width / max(1, width), max_height / max(1, height))
+    if abs(scale - 1.0) < 0.01:
+        return image
+    return cv2.resize(
+        image,
+        (
+            max(1, int(round(width * scale))),
+            max(1, int(round(height * scale))),
+        ),
+        interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC,
+    )
+
+
+def _image_to_tk_photo(image: np.ndarray) -> ImageTk.PhotoImage:
+    rgb = (
+        cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        if image.ndim == 2
+        else cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    )
+    return ImageTk.PhotoImage(Image.fromarray(rgb))
+
+
+def _show_canvas_magnifier(
+    canvas: tk.Canvas,
+    source: np.ndarray,
+    source_x: float,
+    source_y: float,
+    canvas_x: float,
+    photo_refs: dict[str, object],
+) -> None:
+    """Draw a full-resolution crop opposite the active drag position."""
+    canvas.delete("geometry-magnifier")
+    canvas_width = max(1, canvas.winfo_width())
+    canvas_height = max(1, canvas.winfo_height())
+    lens_size = max(96, min(180, canvas_width // 3, canvas_height // 3))
+    source_height, source_width = source.shape[:2]
+    crop_size = max(24, int(round(min(source_width, source_height) * 0.06)))
+    crop_size = min(crop_size, max(2, source_width), max(2, source_height))
+    crop = cv2.getRectSubPix(
+        source,
+        (crop_size, crop_size),
+        (
+            float(np.clip(source_x, 0, source_width - 1)),
+            float(np.clip(source_y, 0, source_height - 1)),
+        ),
+    )
+    enlarged = cv2.resize(crop, (lens_size, lens_size), interpolation=cv2.INTER_CUBIC)
+    photo = _image_to_tk_photo(enlarged)
+    margin = 12
+    left = margin if canvas_x > canvas_width / 2 else canvas_width - lens_size - margin
+    left = max(margin, left)
+    top = margin
+    canvas.create_rectangle(
+        left - 3,
+        top - 3,
+        left + lens_size + 3,
+        top + lens_size + 3,
+        fill="#111111",
+        outline="#ffffff",
+        width=2,
+        tags="geometry-magnifier",
+    )
+    canvas.create_image(
+        left,
+        top,
+        image=photo,
+        anchor=tk.NW,
+        tags="geometry-magnifier",
+    )
+    center_x = left + lens_size / 2
+    center_y = top + lens_size / 2
+    canvas.create_line(
+        center_x - 14,
+        center_y,
+        center_x + 14,
+        center_y,
+        fill="#ff3355",
+        width=2,
+        tags="geometry-magnifier",
+    )
+    canvas.create_line(
+        center_x,
+        center_y - 14,
+        center_x,
+        center_y + 14,
+        fill="#ff3355",
+        width=2,
+        tags="geometry-magnifier",
+    )
+    photo_refs["magnifier_photo"] = photo
+
+
+def _hide_canvas_magnifier(canvas: tk.Canvas, photo_refs: dict[str, object]) -> None:
+    canvas.delete("geometry-magnifier")
+    photo_refs["magnifier_photo"] = None
+
+
 def _perspective_source_image(entry, *, from_current_geometry: bool) -> np.ndarray:
     return entry.original_image if from_current_geometry else entry.raw_image
 
@@ -355,7 +455,13 @@ class UnifiedScanApp(ctk.CTk):
         self.corner_meta_var: tk.StringVar | None = None
         self.corner_prev_button: ctk.CTkButton | None = None
         self.corner_next_button: ctk.CTkButton | None = None
+        self.corner_editor_state: dict[str, object] | None = None
         self.corner_resize_job: str | None = None
+        self.split_editor_window: ctk.CTkFrame | None = None
+        self.split_source_canvas: tk.Canvas | None = None
+        self.split_preview_canvas: tk.Canvas | None = None
+        self.split_editor_state: dict[str, object] | None = None
+        self.split_resize_job: str | None = None
         self.dewarp_editor_window: ctk.CTkFrame | None = None
         self.dewarp_source_canvas: tk.Canvas | None = None
         self.dewarp_preview_canvas: tk.Canvas | None = None
@@ -897,9 +1003,9 @@ class UnifiedScanApp(ctk.CTk):
         split_actions.pack(fill=ctk.X, padx=6, pady=(0, 4))
         ctk.CTkButton(
             split_actions,
-            text="2  Preview split",
+            text="2  Adjust split",
             width=118,
-            command=self.preview_selected_spread_split,
+            command=self.open_split_editor,
         ).pack(side=ctk.LEFT, padx=(0, 4))
         self.apply_split_button = ctk.CTkButton(
             split_actions,
@@ -3114,6 +3220,7 @@ class UnifiedScanApp(ctk.CTk):
                 source_images_by_entry[entries[state["index"]].entry_id]
             ),
         }
+        self.corner_editor_state = view_state
 
         def _map_display_points_to_source(
             points: np.ndarray, source_shape: tuple[int, int], display_shape: tuple[int, int]
@@ -3128,28 +3235,6 @@ class UnifiedScanApp(ctk.CTk):
         def _current_entry() -> tuple[int, object]:
             entry_index = indices[state["index"]]
             return entry_index, self.session.entries[entry_index]
-
-        def _display_image_for(
-            source: np.ndarray,
-            *,
-            max_width: int,
-            max_height: int,
-        ) -> np.ndarray:
-            source_h, source_w = source.shape[:2]
-            scale = min(
-                max_width / max(1, source_w),
-                max_height / max(1, source_h),
-            )
-            if abs(scale - 1.0) < 0.01:
-                return source
-            return cv2.resize(
-                source,
-                (
-                    max(1, int(round(source_w * scale))),
-                    max(1, int(round(source_h * scale))),
-                ),
-                interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC,
-            )
 
         def _init_points_for(entry) -> np.ndarray:
             cached = points_by_entry.get(entry.entry_id)
@@ -3223,44 +3308,22 @@ class UnifiedScanApp(ctk.CTk):
                     )
 
         def _render_corrected_preview() -> None:
-            display_image = view_state["display_image"]
-            if display_image is None:
+            source_image = view_state["source_image"]
+            if source_image is None:
                 return
-            display_points = np.asarray(view_state["points"], dtype=np.float32).copy()
-            display_points[:, 0] /= max(float(view_state["scale_x"]), 1e-6)
-            display_points[:, 1] /= max(float(view_state["scale_y"]), 1e-6)
             try:
-                corrected = warp_perspective_from_points(display_image, display_points)
+                view_state["last_corrected_source_shape"] = source_image.shape
+                corrected = warp_perspective_from_points(
+                    source_image,
+                    np.asarray(view_state["points"], dtype=np.float32),
+                )
             except ValueError:
                 return
-            rgb = (
-                cv2.cvtColor(corrected, cv2.COLOR_GRAY2RGB)
-                if corrected.ndim == 2
-                else cv2.cvtColor(corrected, cv2.COLOR_BGR2RGB)
-            )
             available_w = max(200, corrected_canvas.winfo_width() - 16)
             available_h = max(200, corrected_canvas.winfo_height() - 16)
-            corrected_h, corrected_w = corrected.shape[:2]
-            preview_scale = min(
-                available_w / max(1, corrected_w),
-                available_h / max(1, corrected_h),
-            )
-            if abs(preview_scale - 1.0) >= 0.01:
-                corrected = cv2.resize(
-                    corrected,
-                    (
-                        max(1, int(round(corrected_w * preview_scale))),
-                        max(1, int(round(corrected_h * preview_scale))),
-                    ),
-                    interpolation=(cv2.INTER_AREA if preview_scale < 1.0 else cv2.INTER_CUBIC),
-                )
-                rgb = (
-                    cv2.cvtColor(corrected, cv2.COLOR_GRAY2RGB)
-                    if corrected.ndim == 2
-                    else cv2.cvtColor(corrected, cv2.COLOR_BGR2RGB)
-                )
-            photo = ImageTk.PhotoImage(Image.fromarray(rgb))
-            preview_h, preview_w = corrected.shape[:2]
+            display_corrected = _fit_image_to_box(corrected, available_w, available_h)
+            photo = _image_to_tk_photo(display_corrected)
+            preview_h, preview_w = display_corrected.shape[:2]
             offset_x = max(0, (corrected_canvas.winfo_width() - preview_w) // 2)
             offset_y = max(0, (corrected_canvas.winfo_height() - preview_h) // 2)
             corrected_canvas.delete("all")
@@ -3285,10 +3348,10 @@ class UnifiedScanApp(ctk.CTk):
 
             available_w = max(200, canvas.winfo_width() - 16)
             available_h = max(200, canvas.winfo_height() - 16)
-            display_image = _display_image_for(
+            display_image = _fit_image_to_box(
                 source_image,
-                max_width=available_w,
-                max_height=available_h,
+                available_w,
+                available_h,
             )
             display_h, display_w = display_image.shape[:2]
             source_h, source_w = source_image.shape[:2]
@@ -3354,6 +3417,17 @@ class UnifiedScanApp(ctk.CTk):
 
         def _on_down(event):
             drag["idx"] = _nearest_handle(event.x, event.y)
+            idx_p = drag["idx"]
+            if idx_p is not None:
+                point = view_state["points"][idx_p]
+                _show_canvas_magnifier(
+                    canvas,
+                    view_state["source_image"],
+                    float(point[0]),
+                    float(point[1]),
+                    float(event.x),
+                    canvas_image_ref,
+                )
 
         def _on_move(event):
             idx_p = drag["idx"]
@@ -3372,9 +3446,18 @@ class UnifiedScanApp(ctk.CTk):
             points[idx_p][0] = x
             points[idx_p][1] = y
             _redraw()
+            _show_canvas_magnifier(
+                canvas,
+                view_state["source_image"],
+                x,
+                y,
+                float(event.x),
+                canvas_image_ref,
+            )
 
         def _on_up(_event):
             drag["idx"] = None
+            _hide_canvas_magnifier(canvas, canvas_image_ref)
             _render_corrected_preview()
 
         def _reset():
@@ -3500,6 +3583,7 @@ class UnifiedScanApp(ctk.CTk):
             self.corner_meta_var = None
             self.corner_prev_button = None
             self.corner_next_button = None
+            self.corner_editor_state = None
             self.inline_editor_close_callback = None
             win.destroy()
             self._hide_inline_geometry_editor()
@@ -3668,6 +3752,288 @@ class UnifiedScanApp(ctk.CTk):
         if title is not None:
             title.configure(text="Processed preview")
 
+    def _activate_split_preview(self, entry, ratio: float) -> None:
+        ratio = float(np.clip(ratio, 0.05, 0.95))
+        self.pending_split_entry_id = entry.entry_id
+        self.pending_split_ratio = ratio
+        self.pending_split_revision = entry.revision
+        self.split_preview_var.set(f"Split: 2 pages at {ratio * 100:.1f}%")
+        self.apply_split_button.configure(state=tk.NORMAL)
+        self.preview_mode_var.set("Compare")
+        self._layout_page_previews()
+        self.update_page_preview()
+        self._set_status("Split preview ready: original spread and two output pages.")
+
+    def open_split_editor(self) -> None:
+        index, entry = self._single_selected_entry()
+        if entry is None or index is None:
+            self._set_status("Select exactly one spread to adjust its split.")
+            return
+        if self.split_editor_window is not None:
+            try:
+                if self.split_editor_window.winfo_exists():
+                    self.split_editor_window.lift()
+                    return
+            except tk.TclError:
+                pass
+            self.split_editor_window = None
+        if self.inline_editor_close_callback is not None:
+            self.inline_editor_close_callback()
+
+        source = entry.original_image
+        source_height, source_width = source.shape[:2]
+        if source_width < 2:
+            self._set_status("The selected image is too narrow to split.")
+            return
+
+        detected_pair = _split_spread_pair(entry.raw_image, source)
+        detected_ratio = None
+        if detected_pair is not None:
+            detected_ratio = detected_pair[1][0].shape[1] / max(1, source_width)
+        if (
+            self.pending_split_entry_id == entry.entry_id
+            and self.pending_split_revision == entry.revision
+            and self.pending_split_ratio is not None
+        ):
+            initial_ratio = self.pending_split_ratio
+            initial_message = "Loaded the current split preview."
+        elif detected_ratio is not None:
+            initial_ratio = detected_ratio
+            initial_message = "Automatic gutter detected. Drag the line to correct it."
+        else:
+            initial_ratio = 0.5
+            initial_message = "No confident gutter found. The line starts at the center."
+
+        window = self._show_inline_geometry_editor()
+        self.split_editor_window = window
+        ctk.CTkLabel(
+            window,
+            text="Spread split",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            anchor="w",
+        ).pack(fill=ctk.X, padx=16, pady=(14, 2))
+
+        panes = ctk.CTkFrame(window)
+        panes.pack(fill=ctk.BOTH, expand=True, padx=16, pady=(0, 10))
+        panes.grid_columnconfigure(0, weight=1)
+        panes.grid_columnconfigure(1, weight=1)
+        panes.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(panes, text="Source and split line").grid(
+            row=0, column=0, sticky="w", padx=8, pady=(8, 4)
+        )
+        ctk.CTkLabel(panes, text="Two output pages").grid(
+            row=0, column=1, sticky="w", padx=8, pady=(8, 4)
+        )
+        source_canvas = tk.Canvas(panes, bg="black", highlightthickness=0)
+        preview_canvas = tk.Canvas(panes, bg="black", highlightthickness=0)
+        source_canvas.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        preview_canvas.grid(row=1, column=1, sticky="nsew", padx=8, pady=(0, 8))
+        self.split_source_canvas = source_canvas
+        self.split_preview_canvas = preview_canvas
+
+        state: dict[str, object] = {
+            "ratio": float(np.clip(initial_ratio, 0.05, 0.95)),
+            "dragging": False,
+            "display_width": source_width,
+            "display_height": source_height,
+            "offset_x": 0.0,
+            "offset_y": 0.0,
+            "source_photo": None,
+            "preview_photo": None,
+            "magnifier_photo": None,
+            "source_shape": source.shape,
+        }
+        self.split_editor_state = state
+        status = tk.StringVar(value=initial_message)
+        self.split_editor_status_var = status
+
+        def draw_split_line() -> None:
+            source_canvas.delete("split-overlay")
+            x_pos = float(state["offset_x"]) + float(state["ratio"]) * max(
+                1, int(state["display_width"]) - 1
+            )
+            top = float(state["offset_y"])
+            bottom = top + int(state["display_height"])
+            source_canvas.create_line(
+                x_pos,
+                top,
+                x_pos,
+                bottom,
+                fill="#00ff66",
+                width=3,
+                tags="split-overlay",
+            )
+            center_y = (top + bottom) / 2
+            source_canvas.create_oval(
+                x_pos - 9,
+                center_y - 9,
+                x_pos + 9,
+                center_y + 9,
+                fill="#ff3355",
+                outline="#ffffff",
+                width=2,
+                tags="split-overlay",
+            )
+
+        def render_output() -> None:
+            left, right = _split_at_ratio(source, float(state["ratio"]))
+            full_preview = _compose_split_preview(left, right)
+            display_preview = _fit_image_to_box(
+                full_preview,
+                max(200, preview_canvas.winfo_width() - 16),
+                max(200, preview_canvas.winfo_height() - 16),
+            )
+            state["preview_photo"] = _image_to_tk_photo(display_preview)
+            height, width = display_preview.shape[:2]
+            offset_x = max(0, (preview_canvas.winfo_width() - width) // 2)
+            offset_y = max(0, (preview_canvas.winfo_height() - height) // 2)
+            preview_canvas.delete("all")
+            preview_canvas.create_image(
+                offset_x,
+                offset_y,
+                image=state["preview_photo"],
+                anchor=tk.NW,
+                tags="split-preview",
+            )
+
+        def render_views() -> None:
+            self.split_resize_job = None
+            if self.split_editor_window is not window or not window.winfo_exists():
+                return
+            display_source = _fit_image_to_box(
+                source,
+                max(200, source_canvas.winfo_width() - 16),
+                max(200, source_canvas.winfo_height() - 16),
+            )
+            display_height, display_width = display_source.shape[:2]
+            offset_x = max(0, (source_canvas.winfo_width() - display_width) // 2)
+            offset_y = max(0, (source_canvas.winfo_height() - display_height) // 2)
+            state.update(
+                {
+                    "display_width": display_width,
+                    "display_height": display_height,
+                    "offset_x": float(offset_x),
+                    "offset_y": float(offset_y),
+                    "source_photo": _image_to_tk_photo(display_source),
+                }
+            )
+            source_canvas.delete("all")
+            source_canvas.create_image(
+                offset_x,
+                offset_y,
+                image=state["source_photo"],
+                anchor=tk.NW,
+                tags="split-source",
+            )
+            draw_split_line()
+            render_output()
+
+        def ratio_at(x_pos: float) -> float:
+            local_x = float(x_pos) - float(state["offset_x"])
+            return float(
+                np.clip(local_x / max(1, int(state["display_width"]) - 1), 0.05, 0.95)
+            )
+
+        def show_magnifier(event) -> None:
+            ratio = float(state["ratio"])
+            local_y = float(event.y) - float(state["offset_y"])
+            source_y = np.clip(
+                local_y / max(1, int(state["display_height"]) - 1) * (source_height - 1),
+                0,
+                source_height - 1,
+            )
+            _show_canvas_magnifier(
+                source_canvas,
+                source,
+                ratio * (source_width - 1),
+                float(source_y),
+                float(event.x),
+                state,
+            )
+
+        def on_down(event) -> None:
+            line_x = float(state["offset_x"]) + float(state["ratio"]) * max(
+                1, int(state["display_width"]) - 1
+            )
+            if abs(float(event.x) - line_x) > 20:
+                return
+            state["dragging"] = True
+            show_magnifier(event)
+
+        def on_move(event) -> None:
+            if not state["dragging"]:
+                return
+            state["ratio"] = ratio_at(event.x)
+            draw_split_line()
+            show_magnifier(event)
+            status.set(f"Split position: {float(state['ratio']) * 100:.1f}%")
+
+        def on_up(_event) -> None:
+            if not state["dragging"]:
+                return
+            state["dragging"] = False
+            _hide_canvas_magnifier(source_canvas, state)
+            render_output()
+
+        def use_automatic() -> None:
+            if detected_ratio is None:
+                status.set("No confident automatic gutter was found.")
+                return
+            state["ratio"] = float(detected_ratio)
+            draw_split_line()
+            render_output()
+            status.set(f"Automatic split position: {detected_ratio * 100:.1f}%")
+
+        def close_editor() -> None:
+            if self.split_resize_job is not None:
+                window.after_cancel(self.split_resize_job)
+                self.split_resize_job = None
+            self.split_editor_window = None
+            self.split_source_canvas = None
+            self.split_preview_canvas = None
+            self.split_editor_state = None
+            self.split_editor_status_var = None
+            self.inline_editor_close_callback = None
+            window.destroy()
+            self._hide_inline_geometry_editor()
+
+        def preview_split() -> None:
+            ratio = float(state["ratio"])
+            close_editor()
+            self._activate_split_preview(entry, ratio)
+
+        def schedule_resize(_event=None) -> None:
+            if self.split_resize_job is not None:
+                window.after_cancel(self.split_resize_job)
+            self.split_resize_job = window.after(REVIEW_RESIZE_DEBOUNCE_MS, render_views)
+
+        source_canvas.bind("<Button-1>", on_down)
+        source_canvas.bind("<B1-Motion>", on_move)
+        source_canvas.bind("<ButtonRelease-1>", on_up)
+        panes.bind("<Configure>", schedule_resize, add="+")
+        ctk.CTkLabel(window, textvariable=status, anchor="w").pack(
+            fill=ctk.X, padx=16, pady=(0, 8)
+        )
+        actions = ctk.CTkFrame(window, fg_color="transparent")
+        actions.pack(fill=ctk.X, padx=16, pady=(0, 14))
+        ctk.CTkButton(actions, text="Auto detect", command=use_automatic).pack(side=ctk.LEFT)
+        self.split_editor_preview_button = ctk.CTkButton(
+            actions,
+            text="Preview split",
+            command=preview_split,
+        )
+        self.split_editor_preview_button.pack(side=ctk.RIGHT)
+        self.split_editor_close_button = ctk.CTkButton(
+            actions,
+            text="Cancel",
+            fg_color="transparent",
+            border_width=1,
+            command=close_editor,
+        )
+        self.split_editor_close_button.pack(side=ctk.RIGHT, padx=8)
+        self.inline_editor_close_callback = close_editor
+        window.after_idle(render_views)
+
     def preview_selected_spread_split(self) -> None:
         index, entry = self._single_selected_entry()
         if entry is None or index is None:
@@ -3681,15 +4047,7 @@ class UnifiedScanApp(ctk.CTk):
             return
         _raw_halves, warped_halves = split_pair
         ratio = warped_halves[0].shape[1] / max(1, entry.original_image.shape[1])
-        self.pending_split_entry_id = entry.entry_id
-        self.pending_split_ratio = ratio
-        self.pending_split_revision = entry.revision
-        self.split_preview_var.set(f"Split: 2 pages at {ratio * 100:.1f}%")
-        self.apply_split_button.configure(state=tk.NORMAL)
-        self.preview_mode_var.set("Compare")
-        self._layout_page_previews()
-        self.update_page_preview()
-        self._set_status("Split preview ready: original spread and two output pages.")
+        self._activate_split_preview(entry, ratio)
 
     def _commit_entry_split(self, index: int, entry, ratio: float):
         previous_committed = entry.committed_processing
@@ -3911,13 +4269,6 @@ class UnifiedScanApp(ctk.CTk):
         self.dewarp_source_canvas = left_canvas
         self.dewarp_preview_canvas = right_canvas
 
-        def to_photo(image: np.ndarray) -> ImageTk.PhotoImage:
-            if image.ndim == 2:
-                rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-            else:
-                rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            return ImageTk.PhotoImage(Image.fromarray(rgb))
-
         state = {
             "points": initial_points,
             "active": None,
@@ -3926,13 +4277,14 @@ class UnifiedScanApp(ctk.CTk):
             "drag_start_y": 0.0,
             "drag_start_points": None,
             "add_mode": False,
-            "display_source": source,
             "display_width": source_width,
             "display_height": source_height,
             "offset_x": 0.0,
             "offset_y": 0.0,
             "source_photo": None,
             "corrected_photo": None,
+            "magnifier_photo": None,
+            "source_shape": source.shape,
         }
         status = tk.StringVar(value=initial_message)
         self.dewarp_editor_state = state
@@ -3987,22 +4339,29 @@ class UnifiedScanApp(ctk.CTk):
                 )
 
         def render_corrected() -> None:
+            state["last_corrected_source_shape"] = source.shape
             corrected = process_document_page(
-                state["display_source"],
+                source,
                 PageProcessingRequest(
                     dewarp_method=DEWARP_METHOD_TEXTLINE,
                     dewarp_model=current_model(),
                 ),
             ).image
-            state["corrected_photo"] = to_photo(corrected)
+            display_corrected = _fit_image_to_box(
+                corrected,
+                max(200, right_canvas.winfo_width() - 16),
+                max(200, right_canvas.winfo_height() - 16),
+            )
+            state["corrected_photo"] = _image_to_tk_photo(display_corrected)
             right_canvas.delete("all")
+            corrected_height, corrected_width = display_corrected.shape[:2]
             offset_x = max(
                 0,
-                (right_canvas.winfo_width() - int(state["display_width"])) // 2,
+                (right_canvas.winfo_width() - corrected_width) // 2,
             )
             offset_y = max(
                 0,
-                (right_canvas.winfo_height() - int(state["display_height"])) // 2,
+                (right_canvas.winfo_height() - corrected_height) // 2,
             )
             right_canvas.create_image(
                 offset_x,
@@ -4040,12 +4399,11 @@ class UnifiedScanApp(ctk.CTk):
             offset_y = max(0, (left_canvas.winfo_height() - display_height) // 2)
             state.update(
                 {
-                    "display_source": display_source,
                     "display_width": display_width,
                     "display_height": display_height,
                     "offset_x": float(offset_x),
                     "offset_y": float(offset_y),
-                    "source_photo": to_photo(display_source),
+                    "source_photo": _image_to_tk_photo(display_source),
                 }
             )
             left_canvas.delete("all")
@@ -4101,6 +4459,17 @@ class UnifiedScanApp(ctk.CTk):
             expected_y = float(state["offset_y"]) + (0.5 + curve_y) * int(state["display_height"])
             return abs(float(y_pos) - expected_y) <= 12.0
 
+        def show_magnifier(x_pos: float, y_pos: float) -> None:
+            x_value, displacement = event_values(x_pos, y_pos)
+            _show_canvas_magnifier(
+                left_canvas,
+                source,
+                x_value * (source_width - 1),
+                (0.5 + displacement) * source_height,
+                x_pos,
+                state,
+            )
+
         def add_point_at(x_pos: float, y_pos: float) -> None:
             x_value, displacement = event_values(x_pos, y_pos)
             added = _add_dewarp_control_point(state["points"], x_value, displacement)
@@ -4129,6 +4498,8 @@ class UnifiedScanApp(ctk.CTk):
             else:
                 state["drag_mode"] = None
             draw_overlay()
+            if state["drag_mode"] is not None:
+                show_magnifier(event.x, event.y)
 
         def on_move(event) -> None:
             if state["drag_mode"] == "point" and state["active"] is not None:
@@ -4151,6 +4522,7 @@ class UnifiedScanApp(ctk.CTk):
             else:
                 return
             draw_overlay()
+            show_magnifier(event.x, event.y)
 
         def on_up(_event) -> None:
             if state["drag_mode"] is None:
@@ -4158,6 +4530,7 @@ class UnifiedScanApp(ctk.CTk):
             state["active"] = None
             state["drag_mode"] = None
             state["drag_start_points"] = None
+            _hide_canvas_magnifier(left_canvas, state)
             render_corrected()
             status.set("User-adjusted preview. Apply to save these points for the page.")
 

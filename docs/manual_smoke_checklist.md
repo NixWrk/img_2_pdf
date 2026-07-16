@@ -25,8 +25,11 @@ Record Windows version, artifact SHA-256, camera model, and operator in the rele
 - [ ] Import images by picker, drag-and-drop, and clipboard.
 - [ ] Import a multi-page PDF and cancel a second large import midway.
 - [ ] Review inline auto-crop, manual corners, page reorder/delete, and lighting correction.
+- [ ] Open Adjust split, drag the gutter line using the full-resolution magnifier, preview both
+      output pages in Compare, and confirm Create 2 pages preserves the chosen position.
 - [ ] In inline wave editing, add/remove points, drag a point in both axes, and drag the complete
-      center curve vertically; verify the corrected preview updates after each operation.
+      center curve vertically; verify the magnifier follows each drag and the full-quality corrected
+      preview updates after each operation.
 - [ ] Change processing controls and Preview without Apply; confirm export still uses the previous
       committed page. Apply, then confirm preview and export use the new full-resolution result.
 - [ ] Start Apply on several large pages and cancel midway; confirm the background job remains

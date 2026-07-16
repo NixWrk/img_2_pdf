@@ -84,10 +84,11 @@ You can acquire pages from:
 
 The Workspace supports page selection, reorder and deletion, replacement or camera retake, manual
 four-corner perspective correction with a live corrected pane, automatic crop, 90-degree
-orientation, deskew, spread splitting, automatic wave removal, and an editable wave curve. All
-processing editors replace the Workspace content instead of opening another window. Wave points
-can be added, removed, and moved in both axes; dragging the center curve moves the complete model
-vertically. Processing controls cover document type,
+orientation, deskew, an adjustable spread-split line, automatic wave removal, and an editable wave
+curve. All processing editors replace the Workspace content instead of opening another window.
+Corner, split-line, and wave-point drags show a magnifier sampled from the full-resolution source.
+Wave points can be added, removed, and moved in both axes; dragging the center curve moves the
+complete model vertically. Processing controls cover document type,
 grayscale/B&W output, contrast, brightness, denoise, thresholding, illumination correction,
 binarization, despeckle, A4/Letter layout, margins, alignment, and lighting analysis.
 
@@ -96,7 +97,9 @@ binarization, despeckle, A4/Letter layout, margins, alignment, and lighting anal
 These controls intentionally have different meanings:
 
 1. **Preview** shows what the current controls would do. It does not change exported pixels.
-2. **Fast preview** uses a smaller display proxy. It is responsive but approximate.
+2. **Fast preview** uses a smaller display proxy for the general processing pane. Geometry editors
+   always calculate perspective and wave results from the full-resolution source and resize only
+   the finished image for display.
 3. **Apply preview to pages** runs the canonical pipeline on the full-resolution stored page and
    commits that result. The wave diagnostic is explicitly labelled as a preview until then.
 4. **Export** reads each page's latest committed pixels. It never silently replays whatever global

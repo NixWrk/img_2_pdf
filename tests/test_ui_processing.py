@@ -27,6 +27,7 @@ from uniscan.ui.app import (
     _add_dewarp_control_point,
     _compose_split_preview,
     _detection_summary,
+    _fit_image_to_box,
     _move_dewarp_control_point,
     _perspective_source_image,
     _remove_dewarp_control_point,
@@ -466,6 +467,15 @@ def test_split_preview_composes_two_pages_without_changing_source() -> None:
     assert composed.shape[0] == 100
     assert composed.shape[1] > source.shape[1]
     assert np.all(composed[:, 96:104] == 48)
+
+
+def test_fit_image_to_box_only_resizes_the_presentation_copy() -> None:
+    source = np.arange(120 * 240 * 3, dtype=np.uint8).reshape(120, 240, 3)
+
+    fitted = _fit_image_to_box(source, 80, 80)
+
+    assert fitted.shape == (40, 80, 3)
+    assert source.shape == (120, 240, 3)
 
 
 def test_second_perspective_pass_uses_corrected_page_geometry() -> None:

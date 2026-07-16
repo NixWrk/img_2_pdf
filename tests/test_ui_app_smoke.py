@@ -167,6 +167,31 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         source_bounds = app.corner_source_canvas.bbox("source-image")
         preview_bounds = app.corner_preview_canvas.bbox("perspective-preview")
         assert source_bounds is not None and preview_bounds is not None
+        assert app.corner_editor_state["last_corrected_source_shape"] == first.shape
+        corner_point = app.corner_editor_state["points"][0]
+        corner_x = int(
+            float(corner_point[0]) / float(app.corner_editor_state["scale_x"])
+            + float(app.corner_editor_state["offset_x"])
+        )
+        corner_y = int(
+            float(corner_point[1]) / float(app.corner_editor_state["scale_y"])
+            + float(app.corner_editor_state["offset_y"])
+        )
+        app.corner_source_canvas.event_generate(
+            "<ButtonPress-1>", x=corner_x, y=corner_y
+        )
+        app.update()
+        assert app.corner_source_canvas.bbox("geometry-magnifier") is not None
+        app.corner_source_canvas.event_generate(
+            "<B1-Motion>", x=corner_x + 8, y=corner_y + 8, state=0x0100
+        )
+        app.update()
+        assert app.corner_source_canvas.bbox("geometry-magnifier") is not None
+        app.corner_source_canvas.event_generate(
+            "<ButtonRelease-1>", x=corner_x + 8, y=corner_y + 8
+        )
+        app.update()
+        assert app.corner_source_canvas.bbox("geometry-magnifier") is None
         initial_source_size = (
             source_bounds[2] - source_bounds[0],
             source_bounds[3] - source_bounds[1],
@@ -219,6 +244,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         _pump_until(app, lambda: app.dewarp_resize_job is None)
         initial_dewarp_bounds = app.dewarp_source_canvas.bbox("dewarp-source")
         assert initial_dewarp_bounds is not None
+        assert app.dewarp_editor_state["last_corrected_source_shape"] == second.shape
         initial_dewarp_size = (
             initial_dewarp_bounds[2] - initial_dewarp_bounds[0],
             initial_dewarp_bounds[3] - initial_dewarp_bounds[1],
@@ -251,11 +277,16 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         press_x = offset_x + int(display_width * curve_x)
         press_y = offset_y + int(display_height * (0.5 + curve_y))
         app.dewarp_source_canvas.event_generate("<ButtonPress-1>", x=press_x, y=press_y)
+        app.update()
+        assert app.dewarp_source_canvas.bbox("geometry-magnifier") is not None
         app.dewarp_source_canvas.event_generate(
             "<B1-Motion>", x=press_x, y=press_y + 20, state=0x0100
         )
+        app.update()
+        assert app.dewarp_source_canvas.bbox("geometry-magnifier") is not None
         app.dewarp_source_canvas.event_generate("<ButtonRelease-1>", x=press_x, y=press_y + 20)
         app.update()
+        assert app.dewarp_source_canvas.bbox("geometry-magnifier") is None
         shifted = app.dewarp_editor_state["points"]
         assert all(after[1] > before[1] for before, after in zip(before_shift, shifted))
 
@@ -486,14 +517,41 @@ def test_split_workflow_previews_two_pages_before_mutating_session(tmp_path, mon
                 app_module.cv2.line(spread, (x0, y), (x1, y), (50, 50, 50), 3)
         app.session.add_image(name="spread", image=spread)
         app.refresh_page_list(keep_index=0)
+        app.deiconify()
+        app.geometry("1100x720")
         app.update()
 
-        app.preview_selected_spread_split()
+        app.open_split_editor()
+        app.update()
+        _pump_until(app, lambda: app.split_resize_job is None)
+        assert app.split_editor_window is not None
+        assert app.split_editor_state["source_shape"] == spread.shape
+        display_width = int(app.split_editor_state["display_width"])
+        display_height = int(app.split_editor_state["display_height"])
+        offset_x = int(app.split_editor_state["offset_x"])
+        offset_y = int(app.split_editor_state["offset_y"])
+        line_x = offset_x + int(float(app.split_editor_state["ratio"]) * (display_width - 1))
+        drag_y = offset_y + display_height // 2
+        target_x = offset_x + int(0.4 * (display_width - 1))
+        app.split_source_canvas.event_generate("<ButtonPress-1>", x=line_x, y=drag_y)
+        app.update()
+        assert app.split_source_canvas.bbox("geometry-magnifier") is not None
+        app.split_source_canvas.event_generate(
+            "<B1-Motion>", x=target_x, y=drag_y, state=0x0100
+        )
+        app.update()
+        assert float(app.split_editor_state["ratio"]) == pytest.approx(0.4, abs=0.01)
+        assert app.split_source_canvas.bbox("geometry-magnifier") is not None
+        app.split_source_canvas.event_generate("<ButtonRelease-1>", x=target_x, y=drag_y)
+        app.update()
+        assert app.split_source_canvas.bbox("geometry-magnifier") is None
+        app.split_editor_preview_button.invoke()
 
         assert len(app.session.entries) == 1
         assert app.preview_mode_var.get() == "Compare"
         assert app.apply_split_button.cget("state") == "normal"
         assert app.split_preview_var.get().startswith("Split: 2 pages")
+        assert app.pending_split_ratio == pytest.approx(0.4, abs=0.01)
         _pump_until(
             app,
             lambda: (
