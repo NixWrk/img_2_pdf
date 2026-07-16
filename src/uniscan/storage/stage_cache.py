@@ -46,6 +46,7 @@ class ProcessingStageCache:
         self.max_entries = int(max_entries)
         self.stats = StageCacheStats()
         self._lock = threading.RLock()
+        self._rejected_keys: set[str] = set()
 
     @staticmethod
     def fingerprint_image(image: np.ndarray) -> str:
@@ -79,7 +80,9 @@ class ProcessingStageCache:
 
     @staticmethod
     def _discard_paths(image_path: Path, metadata_path: Path) -> None:
-        for path in (image_path, metadata_path):
+        # Remove metadata first: one successful unlink immediately makes the
+        # two-file entry invisible to readers even if the image is locked.
+        for path in (metadata_path, image_path):
             try:
                 path.unlink(missing_ok=True)
             except OSError:
@@ -93,12 +96,14 @@ class ProcessingStageCache:
         image_path, metadata_path = self._paths(key)
         with self._lock:
             self._discard_paths(image_path, metadata_path)
+            self._rejected_keys.add(key)
 
     def reject_hit(self, key: str) -> None:
         """Discard a semantically invalid hit and correct cache telemetry."""
         image_path, metadata_path = self._paths(key)
         with self._lock:
             self._discard_paths(image_path, metadata_path)
+            self._rejected_keys.add(key)
             if self.stats.hits > 0:
                 self.stats.hits -= 1
             self.stats.misses += 1
@@ -106,6 +111,9 @@ class ProcessingStageCache:
     def get(self, key: str) -> tuple[np.ndarray, dict[str, object]] | None:
         image_path, metadata_path = self._paths(key)
         with self._lock:
+            if key in self._rejected_keys:
+                self.stats.misses += 1
+                return None
             if not image_path.is_file() or not metadata_path.is_file():
                 self.stats.misses += 1
                 return None
@@ -121,12 +129,16 @@ class ProcessingStageCache:
                 payload = metadata.get("metadata")
                 if not isinstance(payload, dict):
                     raise ValueError("invalid cache metadata")
-                os.utime(image_path, None)
-                os.utime(metadata_path, None)
             except (OSError, RuntimeError, UnicodeError, ValueError, json.JSONDecodeError):
                 self._discard_paths(image_path, metadata_path)
+                self._rejected_keys.add(key)
                 self.stats.misses += 1
                 return None
+            try:
+                os.utime(image_path, None)
+                os.utime(metadata_path, None)
+            except OSError:
+                pass
             self.stats.hits += 1
             return image, payload
 
@@ -156,9 +168,9 @@ class ProcessingStageCache:
             except (OSError, TypeError, ValueError):
                 return False
             finally:
-                temporary_image.unlink(missing_ok=True)
-                temporary_metadata.unlink(missing_ok=True)
+                self._discard_paths(temporary_image, temporary_metadata)
             self.stats.writes += 1
+            self._rejected_keys.discard(key)
             self._prune_locked()
         return True
 
@@ -191,3 +203,4 @@ class ProcessingStageCache:
             for pattern in ("*.png", "*.json", ".*.tmp"):
                 for path in self.root_dir.glob(pattern):
                     path.unlink(missing_ok=True)
+            self._rejected_keys.clear()

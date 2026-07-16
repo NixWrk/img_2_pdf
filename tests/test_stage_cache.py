@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -121,6 +123,62 @@ def test_stage_cache_discard_removes_pair_and_is_idempotent(tmp_path) -> None:
 
     assert not image_path.exists()
     assert not metadata_path.exists()
+
+
+def test_stage_cache_lru_touch_failure_keeps_valid_hit(tmp_path, monkeypatch) -> None:
+    cache = ProcessingStageCache(tmp_path / "cache", max_bytes=1024 * 1024)
+    image = np.full((40, 50), 200, dtype=np.uint8)
+    key = cache.stage_key("a" * 64, "cleanup", {"method": "otsu"})
+    assert cache.put(key, image, {"valid": True}) is True
+
+    def fail_touch(*_args, **_kwargs) -> None:
+        raise PermissionError("read-only cache")
+
+    monkeypatch.setattr("uniscan.storage.stage_cache.os.utime", fail_touch)
+
+    restored = cache.get(key)
+
+    assert restored is not None
+    np.testing.assert_array_equal(restored[0], image)
+    assert restored[1] == {"valid": True}
+    assert cache.stats.hits == 1
+    assert cache.stats.misses == 0
+    assert (cache.root_dir / f"{key}.png").exists()
+    assert (cache.root_dir / f"{key}.json").exists()
+
+
+def test_rejected_cache_entry_stays_a_miss_when_cleanup_is_locked(tmp_path, monkeypatch) -> None:
+    cache = ProcessingStageCache(tmp_path / "cache", max_bytes=1024 * 1024)
+    image = np.full((40, 50), 200, dtype=np.uint8)
+    key = cache.stage_key("a" * 64, "cleanup", {"method": "otsu"})
+    assert cache.put(key, image, {"valid": True}) is True
+    monkeypatch.setattr(cache, "_discard_paths", lambda *_args: None)
+
+    cache.reject_hit(key)
+
+    assert cache.get(key) is None
+    assert cache.stats.misses == 2
+    assert cache.put(key, image, {"valid": "repaired"}) is True
+    restored = cache.get(key)
+    assert restored is not None
+    assert restored[1] == {"valid": "repaired"}
+
+
+def test_stage_cache_temp_cleanup_failure_is_fail_soft(tmp_path, monkeypatch) -> None:
+    cache = ProcessingStageCache(tmp_path / "cache", max_bytes=1024 * 1024)
+    image = np.full((40, 50), 200, dtype=np.uint8)
+    key = cache.stage_key("a" * 64, "cleanup", {"method": "otsu"})
+    real_unlink = Path.unlink
+
+    def fail_temp_cleanup(path: Path, *, missing_ok: bool = False) -> None:
+        if path.name.endswith(".tmp"):
+            raise PermissionError("locked temporary file")
+        real_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail_temp_cleanup)
+
+    assert cache.put(key, image, {"valid": True}) is True
+    assert cache.get(key) is not None
 
 
 def test_stage_cache_writes_encoded_buffer_without_tobytes_copy(tmp_path, monkeypatch) -> None:
