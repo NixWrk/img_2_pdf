@@ -18,7 +18,6 @@ from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.orientation import rotate_right_angle
 from uniscan.core.scanner_adapter import (
     DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
-    DETECTOR_BACKEND_OPENCV_HOUGH,
     _find_quad_contour,
     scan_with_document_detector,
 )
@@ -37,7 +36,7 @@ def _check_cancelled(cancel_cb: CancelCb | None) -> None:
 
 @dataclass(slots=True)
 class PipelineOptions:
-    detect_document: bool = True
+    detect_document: bool = False
     two_page_mode: bool = False
     postprocess_name: str = "None"
     detector_backends: tuple[str, ...] | None = None
@@ -146,7 +145,7 @@ def _rectify_split_page(
     uvdoc_cache_home: Path | None,
 ):
     attempted: set[str] = set()
-    for backend in (*detector_backends, DETECTOR_BACKEND_OPENCV_HOUGH):
+    for backend in detector_backends:
         if backend in attempted:
             continue
         attempted.add(backend)
@@ -177,6 +176,8 @@ def process_loaded_items(
     pre_split_rotation = int(options.pre_split_rotation_degrees) % 360
     if pre_split_rotation not in {0, 90, 180, 270}:
         raise ValueError("Pre-split rotation must be a multiple of 90 degrees.")
+    if options.strict_detect and not options.detect_document:
+        raise ValueError("Strict detection requires document detection to be enabled.")
 
     postprocess_fn = POSTPROCESSING_OPTIONS[options.postprocess_name]
     pages: list[PageResult] = []
@@ -185,29 +186,35 @@ def process_loaded_items(
     for index, (name, image) in enumerate(loaded_items, start=1):
         _check_cancelled(cancel_cb)
 
-        scan_output = scan_with_document_detector(
-            image,
-            enabled=options.detect_document,
-            backends=options.detector_backends or DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
-            scanner_root=scanner_root,
-            uvdoc_cache_home=uvdoc_cache_home,
-        )
-        _check_cancelled(cancel_cb)
         fallback_reason = None
-        if options.detect_document and not scan_output.detected:
-            fallback_reason = _detection_fallback_reason(scan_output)
-            if options.strict_detect:
-                raise RuntimeError(f"Document detection failed for {name}: {fallback_reason}")
-        warped = scan_output.warped if scan_output.warped is not None else image
-        contour = _augment_overlay_contour(scan_output, image)
+        if options.detect_document:
+            scan_output = scan_with_document_detector(
+                image,
+                enabled=True,
+                backends=options.detector_backends or DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
+                scanner_root=scanner_root,
+                uvdoc_cache_home=uvdoc_cache_home,
+            )
+            _check_cancelled(cancel_cb)
+            if not scan_output.detected:
+                fallback_reason = _detection_fallback_reason(scan_output)
+                if options.strict_detect:
+                    raise RuntimeError(f"Document detection failed for {name}: {fallback_reason}")
+            warped = scan_output.warped if scan_output.warped is not None else image
+            contour = _augment_overlay_contour(scan_output, image)
+            backend = scan_output.backend
+            detected = scan_output.detected
+        else:
+            warped = image
+            contour = None
+            backend = None
+            detected = False
         _check_cancelled(cancel_cb)
-        backend = scan_output.backend
 
         oriented_raw = rotate_right_angle(image, pre_split_rotation)
         oriented_warped = rotate_right_angle(warped, pre_split_rotation)
         if pre_split_rotation:
             contour = None
-        detected = scan_output.detected
 
         raw_height, raw_width = oriented_raw.shape[:2]
         warped_height, warped_width = oriented_warped.shape[:2]
@@ -216,11 +223,7 @@ def process_loaded_items(
         crop_area_ratio = (warped_width * warped_height) / max(1, raw_width * raw_height)
         landscape_crop_from_portrait = source_aspect < 1.3 <= warped_aspect
         trusted_landscape_crop = landscape_crop_from_portrait and crop_area_ratio >= 0.30
-        if (
-            options.two_page_mode
-            and landscape_crop_from_portrait
-            and not trusted_landscape_crop
-        ):
+        if options.two_page_mode and landscape_crop_from_portrait and not trusted_landscape_crop:
             # A table or other internal rectangle can fool boundary detection
             # into turning a portrait source into a wide strip. Keep the full
             # source rather than splitting or publishing a destructive crop.
@@ -242,11 +245,7 @@ def process_loaded_items(
             content_area_ratio = (content_box.width * content_box.height) / max(
                 1, warped_width * warped_height
             )
-            if (
-                content_confidence >= 0.5
-                and content_aspect >= 1.3
-                and content_area_ratio >= 0.30
-            ):
+            if content_confidence >= 0.5 and content_aspect >= 1.3 and content_area_ratio >= 0.30:
                 x0 = content_box.x
                 y0 = content_box.y
                 x1 = x0 + content_box.width
@@ -261,11 +260,7 @@ def process_loaded_items(
                 embedded_landscape_crop = True
 
         if options.two_page_mode:
-            if (
-                source_aspect < 1.3
-                and not trusted_landscape_crop
-                and not embedded_landscape_crop
-            ):
+            if source_aspect < 1.3 and not trusted_landscape_crop and not embedded_landscape_crop:
                 spread = SpreadSplitResult(
                     (oriented_warped,),
                     None,

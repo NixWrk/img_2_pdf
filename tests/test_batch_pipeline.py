@@ -281,7 +281,7 @@ def test_report_records_complete_effective_processing_configuration(tmp_path) ->
     assert report["pdfDpi"] == 200
     assert report["inputPdfDpi"] == 200
     assert report["outputPdfDpi"] == 200
-    assert report["pdfJpegQuality"] == 80
+    assert report["pdfJpegQuality"] is None
     assert report["maxInputPixels"] == 150_000_000
     assert report["imageFormat"] == "jpg"
     assert report["imagesDirectory"] == str(tmp_path / "configured-pages")
@@ -1052,6 +1052,7 @@ def test_detector_policy_and_fallback_are_reported(tmp_path, monkeypatch) -> Non
         output_pdf=tmp_path / "fallback.pdf",
         detector_policy="cv_hybrid",
         lens_mode="none",
+        detect_document=True,
     )
 
     assert seen_backends == [(DETECTOR_BACKEND_CV_HYBRID,)]
@@ -1088,6 +1089,7 @@ def test_strict_detection_failure_preserves_existing_pdf(tmp_path, monkeypatch) 
             output_pdf=output_pdf,
             detector_policy="cv_hybrid",
             strict_detect=True,
+            detect_document=True,
             lens_mode="none",
         )
 
@@ -1417,3 +1419,240 @@ def test_batch_backup_cleanup_failure_does_not_turn_commit_into_failure(
         )
     assert not journal.exists()
     assert not list(tmp_path.glob(".*.backup-*"))
+
+
+def test_cli_convert_defaults_are_lossless_and_opt_in(tmp_path) -> None:
+    source = tmp_path / "safe-default.png"
+    source_pixels = np.full((37, 53, 3), 17, dtype=np.uint8)
+    source_pixels[5:20, 7:30] = (61, 123, 207)
+    source_pixels[22:, 31:] = (241, 83, 29)
+    ok, encoded = cv2.imencode(".png", source_pixels)
+    assert ok
+    encoded.tofile(str(source))
+    output_pdf = tmp_path / "safe-default.pdf"
+
+    exit_code = main(
+        [
+            "convert",
+            "--input",
+            str(source),
+            "--output",
+            str(output_pdf),
+        ]
+    )
+
+    assert exit_code == 0
+    report = json.loads(output_pdf.with_suffix(".pdf.report.json").read_text(encoding="utf-8"))
+    assert report["detectionEnabled"] is False
+    assert report["lensMode"] == "none"
+    assert report["preprocessEnabled"] is False
+    assert report["pdfJpegQuality"] is None
+    document = pdfium.PdfDocument(str(output_pdf))
+    try:
+        page = document[0]
+        try:
+            images = list(page.get_objects())
+            assert len(images) == 1
+            assert images[0].get_px_size() == (53, 37)
+            embedded = images[0].get_bitmap().to_numpy()
+            np.testing.assert_array_equal(embedded, source_pixels)
+        finally:
+            page.close()
+    finally:
+        document.close()
+
+
+def test_batch_recovers_committed_outputs_before_resolving_missing_inputs(
+    tmp_path, monkeypatch
+) -> None:
+    from uniscan.tools import batch_pipeline
+
+    output_pdf = tmp_path / "recover-first.pdf"
+    report_path = tmp_path / "recover-first.report.json"
+    images_dir = tmp_path / "recover-first-images"
+    output_pdf.write_bytes(b"old-pdf")
+    report_path.write_bytes(b"old-report")
+    images_dir.mkdir()
+    (images_dir / "page.png").write_bytes(b"old-image")
+    staged_pdf = tmp_path / ".recover-first.pdf.stage-test"
+    staged_report = tmp_path / ".recover-first.report.json.stage-test"
+    staged_images = tmp_path / ".recover-first-images.stage-test"
+    staged_pdf.write_bytes(b"new-pdf")
+    staged_report.write_bytes(b"new-report")
+    staged_images.mkdir()
+    (staged_images / "page.png").write_bytes(b"new-image")
+    targets = [
+        batch_pipeline._StagedTarget(staged=staged_pdf, target=output_pdf),
+        batch_pipeline._StagedTarget(staged=staged_images, target=images_dir),
+        batch_pipeline._StagedTarget(staged=staged_report, target=report_path),
+    ]
+    journal = batch_pipeline._transaction_journal_path(output_pdf)
+    real_cleanup = batch_pipeline._cleanup_path_best_effort
+
+    def leave_committed_journal(path: Path) -> bool:
+        if path == journal:
+            return False
+        return real_cleanup(path)
+
+    monkeypatch.setattr(batch_pipeline, "_cleanup_path_best_effort", leave_committed_journal)
+    batch_pipeline._publish_staged_targets(targets, journal_path=journal)
+    assert journal.is_file()
+    assert json.loads(journal.read_text(encoding="utf-8"))["state"] == "committed"
+
+    monkeypatch.setattr(batch_pipeline, "_cleanup_path_best_effort", real_cleanup)
+    missing_input = tmp_path / "disconnected-source.png"
+    with pytest.raises(ValueError, match="Input does not exist"):
+        run_batch_pipeline(
+            inputs=[missing_input],
+            output_pdf=output_pdf,
+        )
+
+    assert output_pdf.read_bytes() == b"new-pdf"
+    assert report_path.read_bytes() == b"new-report"
+    assert (images_dir / "page.png").read_bytes() == b"new-image"
+    assert not journal.exists()
+
+
+def test_batch_recovers_recorded_targets_when_current_targets_changed(tmp_path) -> None:
+    from uniscan.tools import batch_pipeline
+
+    output_pdf = tmp_path / "result.pdf"
+    recorded_report = tmp_path / "old-location.report.json"
+    recorded_images = tmp_path / "old-location-images"
+    output_pdf.write_bytes(b"new-pdf")
+    recorded_report.write_bytes(b"new-report")
+    recorded_images.mkdir()
+    (recorded_images / "page.png").write_bytes(b"new-image")
+
+    transaction_id = "b" * 32
+    backup_pdf = tmp_path / f".result.pdf.backup-{transaction_id}"
+    backup_report = tmp_path / f".old-location.report.json.backup-{transaction_id}"
+    backup_images = tmp_path / f".old-location-images.backup-{transaction_id}"
+    backup_pdf.write_bytes(b"old-pdf")
+    backup_report.write_bytes(b"old-report")
+    backup_images.mkdir()
+    (backup_images / "page.png").write_bytes(b"old-image")
+    staged_pdf = tmp_path / ".result.pdf.stage-interrupted"
+    staged_report = tmp_path / ".old-location.report.json.stage-interrupted"
+    staged_images = tmp_path / ".old-location-images.stage-interrupted"
+    journal = batch_pipeline._transaction_journal_path(output_pdf)
+    journal.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "transactionId": transaction_id,
+                "state": "prepared",
+                "entries": [
+                    {
+                        "target": str(output_pdf),
+                        "staged": str(staged_pdf),
+                        "backup": str(backup_pdf),
+                        "kind": "file",
+                        "hadTarget": True,
+                    },
+                    {
+                        "target": str(recorded_images),
+                        "staged": str(staged_images),
+                        "backup": str(backup_images),
+                        "kind": "directory",
+                        "hadTarget": True,
+                    },
+                    {
+                        "target": str(recorded_report),
+                        "staged": str(staged_report),
+                        "backup": str(backup_report),
+                        "kind": "file",
+                        "hadTarget": True,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    current_report = tmp_path / "next" / "result.json"
+    current_images = tmp_path / "next-images"
+    with pytest.raises(ValueError, match="Input does not exist"):
+        run_batch_pipeline(
+            inputs=[tmp_path / "disconnected.png"],
+            output_pdf=output_pdf,
+            report_path=current_report,
+            images_dir=current_images,
+        )
+
+    assert output_pdf.read_bytes() == b"old-pdf"
+    assert recorded_report.read_bytes() == b"old-report"
+    assert (recorded_images / "page.png").read_bytes() == b"old-image"
+    assert not journal.exists()
+    assert not backup_pdf.exists()
+    assert not backup_report.exists()
+    assert not backup_images.exists()
+    assert not current_report.parent.exists()
+    assert not current_images.exists()
+
+
+def test_batch_recovery_rejects_current_target_that_owns_recorded_stage(tmp_path) -> None:
+    from uniscan.tools import batch_pipeline
+
+    output_pdf = tmp_path / "result.pdf"
+    recorded_report = tmp_path / "result.report.json"
+    output_pdf.write_bytes(b"new-pdf")
+    recorded_report.write_bytes(b"new-report")
+    transaction_id = "c" * 32
+    backup_pdf = tmp_path / f".result.pdf.backup-{transaction_id}"
+    backup_report = tmp_path / f".result.report.json.backup-{transaction_id}"
+    backup_pdf.write_bytes(b"old-pdf")
+    backup_report.write_bytes(b"old-report")
+    staged_pdf = tmp_path / ".result.pdf.stage-interrupted"
+    staged_report = tmp_path / ".result.report.json.stage-interrupted"
+    journal = batch_pipeline._transaction_journal_path(output_pdf)
+    journal.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "transactionId": transaction_id,
+                "state": "prepared",
+                "entries": [
+                    {
+                        "target": str(output_pdf),
+                        "staged": str(staged_pdf),
+                        "backup": str(backup_pdf),
+                        "kind": "file",
+                        "hadTarget": True,
+                    },
+                    {
+                        "target": str(recorded_report),
+                        "staged": str(staged_report),
+                        "backup": str(backup_report),
+                        "kind": "file",
+                        "hadTarget": True,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="recorded transaction ownership"):
+        run_batch_pipeline(
+            inputs=[tmp_path / "disconnected.png"],
+            output_pdf=output_pdf,
+            report_path=staged_report,
+        )
+
+    assert output_pdf.read_bytes() == b"new-pdf"
+    assert recorded_report.read_bytes() == b"new-report"
+    assert backup_pdf.read_bytes() == b"old-pdf"
+    assert backup_report.read_bytes() == b"old-report"
+    assert journal.exists()
+
+
+def test_missing_input_without_journal_creates_no_output_artifacts(tmp_path) -> None:
+    with pytest.raises(ValueError, match="Input does not exist"):
+        run_batch_pipeline(
+            inputs=[tmp_path / "missing-source.png"],
+            output_pdf=tmp_path / "new-output" / "result.pdf",
+            images_dir=tmp_path / "new-images",
+        )
+
+    assert list(tmp_path.iterdir()) == []

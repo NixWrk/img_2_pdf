@@ -80,8 +80,32 @@ def test_process_loaded_items_checks_cancellation_after_native_detector(monkeypa
     with pytest.raises(RuntimeError, match="Cancelled by user"):
         process_loaded_items(
             [("sample.png", _img())],
-            options=PipelineOptions(),
+            options=PipelineOptions(detect_document=True),
             cancel_cb=lambda: detector_finished,
+        )
+
+
+def test_pipeline_options_default_is_non_destructive(monkeypatch) -> None:
+    source = _img()
+    monkeypatch.setattr(
+        "uniscan.core.pipeline.scan_with_document_detector",
+        lambda *_args, **_kwargs: pytest.fail("default options must not run detection"),
+    )
+
+    pages = process_loaded_items([("source.png", source)], options=PipelineOptions())
+
+    assert len(pages) == 1
+    np.testing.assert_array_equal(pages[0].raw, source)
+    np.testing.assert_array_equal(pages[0].warped, source)
+    np.testing.assert_array_equal(pages[0].current, source)
+    assert pages[0].detected is False
+
+
+def test_pipeline_rejects_strict_detection_when_detection_is_disabled() -> None:
+    with pytest.raises(ValueError, match="requires document detection"):
+        process_loaded_items(
+            [("source.png", _img())],
+            options=PipelineOptions(strict_detect=True),
         )
 
 
@@ -390,6 +414,34 @@ def test_split_page_rectification_rejects_crop_that_loses_page_bottom(monkeypatc
 
     assert len(pages) == 2
     assert all(page.warped.shape[0] == spread.shape[0] for page in pages)
+
+
+def test_split_page_rectification_respects_requested_detector_policy(monkeypatch) -> None:
+    attempted_backends: list[str] = []
+
+    def detector(image, *, backends, **_kwargs):
+        attempted_backends.extend(backends)
+        return ScanOutput(
+            warped=image,
+            contour=None,
+            backend=None,
+            detected=False,
+            raw_result=None,
+        )
+
+    monkeypatch.setattr("uniscan.core.pipeline.scan_with_document_detector", detector)
+
+    from uniscan.core.pipeline import _rectify_split_page
+
+    result = _rectify_split_page(
+        _img(),
+        detector_backends=("office_lens_onnx",),
+        scanner_root=None,
+        uvdoc_cache_home=None,
+    )
+
+    assert result is None
+    assert attempted_backends == ["office_lens_onnx"]
 
 
 def test_build_pdf_uses_fixed_dpi_layout_and_atomically_publishes(tmp_path, monkeypatch) -> None:

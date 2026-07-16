@@ -33,6 +33,10 @@ typical conversion with separate input and output DPI settings is:
 physical page layout and PDF export. The older `--pdf-dpi` option remains a compatibility default
 for each role that does not have a specific override.
 
+Minimal headless conversion is lossless and does not apply detection or cleanup. Add `--detect`
+to propose/apply boundary correction in a headless job, `--mode document` for cleanup, or
+`--pdf-jpeg-quality 1..100` for opt-in JPEG compression.
+
 Each raster image, TIFF frame, or rendered PDF page is limited to 150,000,000 pixels by default.
 Oversized input fails instead of being silently downscaled; headless runs can choose a different
 positive limit with `--max-input-pixels`.
@@ -50,8 +54,9 @@ applied at one DPI, reapply it before exporting at another DPI.
 
 ## Optional model backends
 
-The default document detector is the built-in OpenCV hybrid policy. The portable package does not
-include Office Lens model weights, ONNX Runtime, PaddleOCR, or UVDoc weights.
+Headless boundary detection is disabled by default. When `--detect` is enabled,
+`--backend auto` selects the built-in OpenCV hybrid policy. The portable package does not include
+Office Lens model weights, ONNX Runtime, PaddleOCR, or UVDoc weights.
 
 The Office Lens adapter is a bring-your-own-model source-installation feature for compatible
 weights that the user is legally permitted to use. The required quad model and optional automatic

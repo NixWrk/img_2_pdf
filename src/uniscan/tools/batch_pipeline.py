@@ -531,20 +531,144 @@ def _validate_transaction_payload(
     return payload
 
 
-def _load_transaction_journal(
-    journal_path: Path,
-    *,
-    expected_targets: Sequence[tuple[Path, str]],
-) -> dict[str, object]:
+def _read_transaction_journal(journal_path: Path) -> object:
     if _is_link_like(journal_path) or not journal_path.is_file():
         raise ValueError("Invalid UniScan transaction journal path.")
     if journal_path.stat().st_size > 1024 * 1024:
         raise ValueError("Invalid UniScan transaction journal: file is too large.")
     try:
-        payload = json.loads(journal_path.read_text(encoding="utf-8"))
+        return json.loads(journal_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("Invalid UniScan transaction journal.") from exc
+
+
+def _load_transaction_journal(
+    journal_path: Path,
+    *,
+    expected_targets: Sequence[tuple[Path, str]],
+) -> dict[str, object]:
+    payload = _read_transaction_journal(journal_path)
     return _validate_transaction_payload(payload, expected_targets=expected_targets)
+
+
+def _discover_owned_transaction(
+    journal_path: Path,
+    *,
+    output_pdf: Path,
+) -> tuple[dict[str, object], tuple[tuple[Path, str], ...]]:
+    """Validate an output-owned journal and return its recorded final targets."""
+    payload = _read_transaction_journal(journal_path)
+    if not isinstance(payload, dict) or set(payload) != {
+        "schemaVersion",
+        "transactionId",
+        "state",
+        "entries",
+    }:
+        raise ValueError("Invalid UniScan transaction journal schema.")
+    entries = payload.get("entries")
+    if not isinstance(entries, list) or len(entries) not in {2, 3}:
+        raise ValueError("Invalid UniScan transaction journal schema.")
+
+    expected_kinds = (
+        ("file", "file")
+        if len(entries) == 2
+        else (
+            "file",
+            "directory",
+            "file",
+        )
+    )
+    targets: list[tuple[Path, str]] = []
+    for entry, expected_kind in zip(entries, expected_kinds, strict=True):
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("target"), str)
+            or entry.get("kind") != expected_kind
+        ):
+            raise ValueError("Invalid UniScan transaction journal entry.")
+        recorded_target = Path(entry["target"])
+        if not recorded_target.is_absolute():
+            raise ValueError("Invalid UniScan transaction journal: paths must be absolute.")
+        try:
+            canonical_target = _canonical_export_target(
+                recorded_target,
+                description="Recorded transaction target",
+            )
+        except ValueError as exc:
+            raise ValueError("Invalid UniScan transaction target path.") from exc
+        if recorded_target != canonical_target:
+            raise ValueError("Invalid UniScan transaction target path.")
+        targets.append((canonical_target, expected_kind))
+
+    output_pdf = _canonical_export_target(output_pdf, description="PDF output path")
+    if _path_key(targets[0][0]) != _path_key(output_pdf):
+        raise ValueError("Transaction journal targets do not match this PDF output ownership.")
+    expected_journal = _transaction_journal_path(targets[0][0])
+    if _path_key(journal_path) != _path_key(expected_journal):
+        raise ValueError("Transaction journal targets do not match this PDF output ownership.")
+
+    recorded_images = targets[1][0] if len(targets) == 3 else None
+    _validate_output_targets(
+        output_pdf=targets[0][0],
+        report_path=targets[-1][0],
+        images_dir=recorded_images,
+        input_files=(),
+    )
+    validated = _validate_transaction_payload(payload, expected_targets=targets)
+    return validated, tuple(targets)
+
+
+def _validate_recovery_compatibility(
+    payload: dict[str, object],
+    *,
+    journal_path: Path,
+    recorded_targets: Sequence[tuple[Path, str]],
+    current_targets: Sequence[tuple[Path, str]],
+) -> None:
+    """Reject only path ownership overlaps that could mutate current outputs."""
+
+    def overlaps(first: Path, second: Path) -> bool:
+        first = _absolute_path(first)
+        second = _absolute_path(second)
+        return (
+            _path_key(first) == _path_key(second)
+            or first.is_relative_to(second)
+            or second.is_relative_to(first)
+        )
+
+    for current_path, current_kind in current_targets:
+        for recorded_path, recorded_kind in recorded_targets:
+            if _path_key(current_path) == _path_key(recorded_path):
+                if current_kind != recorded_kind:
+                    raise ValueError(
+                        "Current output targets conflict with recorded transaction ownership."
+                    )
+                continue
+            if overlaps(current_path, recorded_path):
+                raise ValueError(
+                    "Current output targets conflict with recorded transaction ownership."
+                )
+
+    protected_paths = [
+        journal_path,
+        journal_path.with_name(f"{journal_path.name}.lock"),
+    ]
+    entries = payload["entries"]
+    assert isinstance(entries, list)
+    for entry in entries:
+        assert isinstance(entry, dict)
+        protected_paths.extend((Path(entry["staged"]), Path(entry["backup"])))
+    for recorded_path, recorded_kind in recorded_targets:
+        lock_path = (
+            _directory_export_lock_path(recorded_path)
+            if recorded_kind == "directory"
+            else _file_export_lock_path(recorded_path)
+        )
+        protected_paths.append(lock_path)
+
+    for current_path, _current_kind in current_targets:
+        if any(overlaps(current_path, protected_path) for protected_path in protected_paths):
+            raise ValueError("Current output targets conflict with recorded transaction ownership.")
 
 
 def _rollback_prepared_transaction(payload: dict[str, object]) -> bool:
@@ -951,13 +1075,13 @@ def run_batch_pipeline(
     pdf_dpi: int = 300,
     input_pdf_dpi: int | None = None,
     output_pdf_dpi: int | None = None,
-    pdf_jpeg_quality: int | None = 80,
+    pdf_jpeg_quality: int | None = None,
     max_input_pixels: int = DEFAULT_MAX_INPUT_PIXELS,
-    detect_document: bool = True,
+    detect_document: bool = False,
     detector_policy: str = "auto",
     strict_detect: bool = False,
     two_page_mode: bool = False,
-    lens_mode: str = "document",
+    lens_mode: str = "none",
     illumination_correction: bool = False,
     orientation_method: str = "none",
     deskew_method: str = "none",
@@ -1050,17 +1174,18 @@ def run_batch_pipeline(
         Path(report_path) if report_path else output_pdf.with_suffix(".pdf.report.json"),
         description="JSON report path",
     )
-    input_files = resolve_input_paths(inputs, output_pdf=output_pdf)
     images_dir = (
         _canonical_export_target(Path(images_dir), description="Images output path")
         if images_dir is not None
         else None
     )
+    # Validate relationships before acquiring recovery locks: a nested target's
+    # lock directory could otherwise create an invalid file target path.
     _validate_output_targets(
         output_pdf=output_pdf,
         report_path=report_path,
         images_dir=images_dir,
-        input_files=input_files,
+        input_files=(),
     )
     transaction_journal = _transaction_journal_path(output_pdf)
     transaction_targets = _transaction_target_specs(
@@ -1068,9 +1193,30 @@ def run_batch_pipeline(
         images_dir=images_dir,
         report_path=report_path,
     )
-    _recover_batch_transaction(
-        transaction_journal,
-        expected_targets=transaction_targets,
+    # Recovery depends only on the durable journal and its output targets.  Do
+    # it before resolving inputs so a disconnected source drive cannot strand
+    # an otherwise recoverable publication transaction.
+    if _path_exists(transaction_journal):
+        recorded_payload, recorded_targets = _discover_owned_transaction(
+            transaction_journal,
+            output_pdf=output_pdf,
+        )
+        _validate_recovery_compatibility(
+            recorded_payload,
+            journal_path=transaction_journal,
+            recorded_targets=recorded_targets,
+            current_targets=transaction_targets,
+        )
+        _recover_batch_transaction(
+            transaction_journal,
+            expected_targets=recorded_targets,
+        )
+    input_files = resolve_input_paths(inputs, output_pdf=output_pdf)
+    _validate_output_targets(
+        output_pdf=output_pdf,
+        report_path=report_path,
+        images_dir=images_dir,
+        input_files=input_files,
     )
 
     postprocess_name, preprocess_preset, preprocess_settings = _resolve_processing(lens_mode)

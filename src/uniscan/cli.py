@@ -80,8 +80,8 @@ def main(argv: list[str] | None = None) -> int:
     convert_parser.add_argument(
         "--mode",
         choices=LENS_MODE_CHOICES,
-        default="document",
-        help="Document cleanup profile.",
+        default="none",
+        help="Document cleanup profile (default: none; processing is opt-in).",
     )
     convert_parser.add_argument(
         "--backend",
@@ -127,8 +127,8 @@ def main(argv: list[str] | None = None) -> int:
     convert_parser.add_argument(
         "--pdf-jpeg-quality",
         type=int,
-        default=80,
-        help="JPEG quality embedded in PDF (1-100; 0 keeps lossless PNG).",
+        default=0,
+        help="JPEG quality embedded in PDF (1-100; default 0 keeps lossless PNG).",
     )
     convert_parser.add_argument(
         "--max-input-pixels",
@@ -136,10 +136,19 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_MAX_INPUT_PIXELS,
         help="Fail-closed pixel limit for every raster, TIFF, or rendered PDF page.",
     )
-    convert_parser.add_argument(
-        "--no-detect",
+    detection_group = convert_parser.add_mutually_exclusive_group()
+    detection_group.add_argument(
+        "--detect",
+        dest="detect_document",
         action="store_true",
-        help="Disable document boundary detection and perspective correction.",
+        default=False,
+        help="Detect document boundaries and apply perspective correction.",
+    )
+    detection_group.add_argument(
+        "--no-detect",
+        dest="detect_document",
+        action="store_false",
+        help="Compatibility alias for the safe default (detection disabled).",
     )
     convert_parser.add_argument(
         "--two-page",
@@ -348,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
                 output_pdf_dpi=args.output_pdf_dpi,
                 pdf_jpeg_quality=args.pdf_jpeg_quality,
                 max_input_pixels=args.max_input_pixels,
-                detect_document=not args.no_detect,
+                detect_document=args.detect_document,
                 detector_policy=args.backend,
                 strict_detect=args.strict_detect,
                 two_page_mode=args.two_page,
