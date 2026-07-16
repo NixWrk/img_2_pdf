@@ -125,6 +125,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Physical DPI used for layout and PDF export; overrides --pdf-dpi.",
     )
     convert_parser.add_argument(
+        "--pdf-jpeg-quality",
+        type=int,
+        default=80,
+        help="JPEG quality embedded in PDF (1-100; 0 keeps lossless PNG).",
+    )
+    convert_parser.add_argument(
         "--max-input-pixels",
         type=int,
         default=DEFAULT_MAX_INPUT_PIXELS,
@@ -340,6 +346,7 @@ def main(argv: list[str] | None = None) -> int:
                 pdf_dpi=args.pdf_dpi,
                 input_pdf_dpi=args.input_pdf_dpi,
                 output_pdf_dpi=args.output_pdf_dpi,
+                pdf_jpeg_quality=args.pdf_jpeg_quality,
                 max_input_pixels=args.max_input_pixels,
                 detect_document=not args.no_detect,
                 detector_policy=args.backend,

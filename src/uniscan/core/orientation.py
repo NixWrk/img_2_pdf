@@ -38,7 +38,7 @@ class _LayoutEvidence:
     line_count: int
 
 
-def _rotate_right_angle(image: np.ndarray, angle_degrees: int) -> np.ndarray:
+def rotate_right_angle(image: np.ndarray, angle_degrees: int) -> np.ndarray:
     normalized = angle_degrees % 360
     if normalized == 0:
         return image
@@ -166,7 +166,7 @@ def _line_upright_score(
 
 
 def _layout_evidence(image: np.ndarray, angle_degrees: int) -> _LayoutEvidence:
-    rotated = _rotate_right_angle(image, angle_degrees)
+    rotated = rotate_right_angle(image, angle_degrees)
     gray = _analysis_gray(rotated)
     mask = _foreground_mask(gray)
     foreground_ratio = float(np.count_nonzero(mask)) / max(1, mask.size)
@@ -280,7 +280,7 @@ def orient_document(
         )
     if normalized in {"90", "180", "270"}:
         angle = int(normalized)
-        return _rotate_right_angle(image, angle), OrientationDiagnostics(
+        return rotate_right_angle(image, angle), OrientationDiagnostics(
             method=normalized,
             applied=True,
             angle_degrees=angle,
@@ -291,4 +291,4 @@ def orient_document(
     diagnostics = estimate_page_orientation(image)
     if not diagnostics.applied:
         return image, diagnostics
-    return _rotate_right_angle(image, diagnostics.angle_degrees), diagnostics
+    return rotate_right_angle(image, diagnostics.angle_degrees), diagnostics

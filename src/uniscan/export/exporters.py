@@ -605,6 +605,7 @@ def export_pages_as_pdf(
     *,
     out_pdf: Path,
     dpi: int = 300,
+    jpeg_quality: int | None = None,
     cancel_cb: CancelCb | None = None,
 ) -> Path:
     """Export pages to one merged PDF."""
@@ -636,6 +637,7 @@ def export_pages_as_pdf(
                 image_paths,
                 out_pdf=out_pdf,
                 dpi=int(dpi),
+                jpeg_quality=jpeg_quality,
                 cancel_cb=cancel_cb,
             )
     return out_pdf
@@ -689,6 +691,7 @@ def export_image_paths_as_pdf(
     *,
     out_pdf: Path,
     dpi: int = 300,
+    jpeg_quality: int | None = None,
     cancel_cb: CancelCb | None = None,
 ) -> Path:
     """Export image file paths to merged PDF without loading all images in memory."""
@@ -707,6 +710,7 @@ def export_image_paths_as_pdf(
             [Path(p) for p in image_paths],
             out_pdf=out_pdf,
             dpi=int(dpi),
+            jpeg_quality=jpeg_quality,
             cancel_cb=cancel_cb,
         )
     return out_pdf

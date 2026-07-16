@@ -24,6 +24,7 @@ from .orientation import (
     OrientationDiagnostics,
     estimate_page_orientation,
     orient_document,
+    rotate_right_angle,
 )
 from .layout import (
     DEFAULT_MAX_LAYOUT_PIXELS,
@@ -173,6 +174,7 @@ __all__ = [
     "order_quad_points",
     "normalize_control_points",
     "orient_document",
+    "rotate_right_angle",
     "process_loaded_items",
     "process_document_page",
     "probe_detector_backend",

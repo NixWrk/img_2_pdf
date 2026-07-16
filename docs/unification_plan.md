@@ -54,7 +54,7 @@ Deliver a PC-first Office Lens analogue for document preparation:
    Glare reduction remains open.
 2. [ ] Deskew/orientation correction tuning.
 3. [ ] Text enhancement profile tuning.
-4. [x] Gutter-based two-page split with midpoint fallback.
+4. [x] Conservative gutter-based two-page split without an uncertain midpoint fallback.
 5. [ ] Preview and processing latency optimization.
 
 ### Stage E: Production Readiness

@@ -51,7 +51,7 @@ fallback, may let PaddleOCR initialize or download its model cache.
 - A fail-closed 150,000,000-pixel limit for each input image, TIFF frame, or rendered PDF page.
 - Independent input-PDF rendering DPI and output/layout DPI controls.
 - Live OpenCV boundary feedback, perspective correction, and manual four-corner editing.
-- Gutter-based two-page splitting with a midpoint fallback when no reliable gutter is found.
+- Conservative gutter-based two-page splitting; uncertain frames remain whole.
 - Conservative non-OCR orientation, selectable deskew, validated dewarp, and editable dewarp
   control points.
 - Document, Whiteboard, Photo, and B/W cleanup; selectable binarization and safe despeckling;

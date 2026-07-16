@@ -1,6 +1,8 @@
 from pathlib import Path
 
+import cv2
 import numpy as np
+import pypdfium2 as pdfium
 import pytest
 
 from uniscan.core.pipeline import (
@@ -10,6 +12,7 @@ from uniscan.core.pipeline import (
     split_spread,
 )
 from uniscan.core.scanner_adapter import ScanOutput
+from uniscan.io import imwrite_unicode
 
 
 def _img() -> np.ndarray:
@@ -101,6 +104,108 @@ def test_process_loaded_items_two_page_mode_splits_at_gutter() -> None:
     assert 350 < pages[0].warped.shape[1] < 450
     assert pages[0].name.endswith("[L]")
     assert pages[1].name.endswith("[R]")
+    assert all(page.spread_detected for page in pages)
+    assert all(page.spread_reason == "gutter_detected" for page in pages)
+
+
+def test_pre_split_rotation_keeps_sideways_single_page_whole() -> None:
+    upright = np.full((900, 600, 3), 245, dtype=np.uint8)
+    for y in range(80, 840, 55):
+        cv2.line(upright, (70, y), (530, y), (45, 45, 45), 5)
+    sideways = cv2.rotate(upright, cv2.ROTATE_90_CLOCKWISE)
+
+    pages = process_loaded_items(
+        [("single.jpg", sideways)],
+        options=PipelineOptions(
+            detect_document=False,
+            two_page_mode=True,
+            pre_split_rotation_degrees=270,
+        ),
+    )
+
+    assert len(pages) == 1
+    assert pages[0].current.shape == upright.shape
+    assert pages[0].spread_detected is False
+    assert pages[0].spread_reason == "source_aspect_not_spread"
+
+
+def test_pre_split_rotation_still_splits_real_spread() -> None:
+    spread = _spread_image()
+    sideways = cv2.rotate(spread, cv2.ROTATE_90_CLOCKWISE)
+
+    pages = process_loaded_items(
+        [("spread.jpg", sideways)],
+        options=PipelineOptions(
+            detect_document=False,
+            two_page_mode=True,
+            pre_split_rotation_degrees=270,
+        ),
+    )
+
+    assert len(pages) == 2
+    assert all(page.spread_detected for page in pages)
+    assert all(page.spread_confidence >= 0.5 for page in pages)
+
+
+def test_portrait_source_rejects_false_gutter_from_bad_landscape_crop(monkeypatch) -> None:
+    upright = np.full((900, 600, 3), 245, dtype=np.uint8)
+    sideways = cv2.rotate(upright, cv2.ROTATE_90_CLOCKWISE)
+    bad_crop = np.full((900, 300, 3), 235, dtype=np.uint8)
+    bad_crop[445:455, :] = 25
+
+    monkeypatch.setattr(
+        "uniscan.core.pipeline.scan_with_document_detector",
+        lambda _image, **_kwargs: ScanOutput(
+            warped=bad_crop,
+            contour=None,
+            backend="fake",
+            detected=True,
+            raw_result=None,
+        ),
+    )
+
+    pages = process_loaded_items(
+        [("table.jpg", sideways)],
+        options=PipelineOptions(
+            detect_document=True,
+            two_page_mode=True,
+            pre_split_rotation_degrees=270,
+        ),
+    )
+
+    assert len(pages) == 1
+    assert pages[0].spread_detected is False
+    assert pages[0].spread_reason == "source_aspect_not_spread"
+    assert pages[0].current.shape == upright.shape
+    assert pages[0].detected is False
+    assert pages[0].fallback_reason == "rejected landscape crop from portrait source"
+
+
+def test_strict_detection_rejects_bad_landscape_crop_from_portrait(monkeypatch) -> None:
+    upright = np.full((900, 600, 3), 245, dtype=np.uint8)
+    sideways = cv2.rotate(upright, cv2.ROTATE_90_CLOCKWISE)
+    bad_crop = np.full((900, 300, 3), 235, dtype=np.uint8)
+    monkeypatch.setattr(
+        "uniscan.core.pipeline.scan_with_document_detector",
+        lambda _image, **_kwargs: ScanOutput(
+            warped=bad_crop,
+            contour=None,
+            backend="fake",
+            detected=True,
+            raw_result=None,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="rejected landscape crop from portrait source"):
+        process_loaded_items(
+            [("table.jpg", sideways)],
+            options=PipelineOptions(
+                detect_document=True,
+                strict_detect=True,
+                two_page_mode=True,
+                pre_split_rotation_degrees=270,
+            ),
+        )
 
 
 def test_build_pdf_uses_fixed_dpi_layout_and_atomically_publishes(tmp_path, monkeypatch) -> None:
@@ -146,3 +251,30 @@ def test_build_pdf_failure_preserves_existing_target(tmp_path, monkeypatch) -> N
 
     assert output.read_bytes() == b"previous"
     assert not list(tmp_path.glob(".output.pdf.stage-*"))
+
+
+def test_build_pdf_jpeg_compression_reduces_photographic_pdf_size(tmp_path) -> None:
+    rng = np.random.default_rng(1234)
+    image = rng.integers(0, 256, size=(600, 800, 3), dtype=np.uint8)
+    source = tmp_path / "photo.png"
+    assert imwrite_unicode(source, image)
+    lossless = tmp_path / "lossless.pdf"
+    compressed = tmp_path / "compressed.pdf"
+
+    build_pdf_from_images([source], lossless, 300)
+    build_pdf_from_images([source], compressed, 300, jpeg_quality=80)
+
+    assert compressed.stat().st_size < lossless.stat().st_size * 0.5
+    lossless_doc = pdfium.PdfDocument(lossless)
+    compressed_doc = pdfium.PdfDocument(compressed)
+    try:
+        assert len(lossless_doc) == len(compressed_doc) == 1
+        assert compressed_doc[0].get_size() == pytest.approx(lossless_doc[0].get_size())
+    finally:
+        lossless_doc.close()
+        compressed_doc.close()
+
+
+def test_build_pdf_rejects_invalid_jpeg_quality(tmp_path) -> None:
+    with pytest.raises(ValueError, match="between 1 and 100"):
+        build_pdf_from_images([Path("page.png")], tmp_path / "invalid.pdf", 300, jpeg_quality=0)

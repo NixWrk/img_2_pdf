@@ -1,6 +1,10 @@
 import numpy as np
 
-from uniscan.core.spread import detect_spread_gutter, split_spread_accurate
+from uniscan.core.spread import (
+    detect_spread_gutter,
+    split_spread_accurate,
+    split_spread_analyzed,
+)
 
 
 def _make_synthetic_spread(
@@ -96,3 +100,13 @@ def test_split_accurate_no_fallback_returns_single_when_no_gutter() -> None:
     halves = split_spread_accurate(image, fallback="none")
     assert len(halves) == 1
     assert halves[0].shape[1] == 800
+
+
+def test_analyzed_split_reports_conservative_no_gutter_decision() -> None:
+    image = _make_single_page(width=800)
+
+    result = split_spread_analyzed(image)
+
+    assert result.pages == (image,)
+    assert result.candidate is None
+    assert result.reason == "no_confident_gutter"

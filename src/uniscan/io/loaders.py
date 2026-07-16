@@ -7,7 +7,7 @@ import os
 import re
 import tempfile
 import warnings
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
 
 import cv2
@@ -189,10 +189,15 @@ def imread_unicode(
         return None
 
 
-def imwrite_unicode(path: Path, image: np.ndarray) -> bool:
+def imwrite_unicode(
+    path: Path,
+    image: np.ndarray,
+    *,
+    params: Sequence[int] | None = None,
+) -> bool:
     """Atomically write an image using a unicode-safe encoded byte buffer."""
     ext = path.suffix.lower() or ".png"
-    ok, buf = cv2.imencode(ext, image)
+    ok, buf = cv2.imencode(ext, image, list(params) if params is not None else [])
     if not ok:
         return False
     temporary_path: Path | None = None

@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from uniscan.core.pipeline import PipelineOptions, process_loaded_items
-from uniscan.core.orientation import ORIENTATION_METHOD_CHOICES
+from uniscan.core.orientation import ORIENTATION_METHOD_CHOICES, OrientationDiagnostics
 from uniscan.core.layout import (
     HORIZONTAL_ALIGNMENTS,
     PAGE_LAYOUT_CHOICES,
@@ -144,6 +144,9 @@ class PageRunReport:
     lighting_warnings: tuple[str, ...] = ()
     processing_stage_durations_ms: dict[str, float] | None = None
     processing_cache_hits: tuple[str, ...] = ()
+    spread_detected: bool = False
+    spread_confidence: float = 0.0
+    spread_reason: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -720,6 +723,7 @@ def _report_payload(
     image_format: str,
     input_pdf_dpi: int,
     output_pdf_dpi: int,
+    pdf_jpeg_quality: int | None,
     max_input_pixels: int,
     input_files: Sequence[Path],
     pages: Sequence[PageRunReport],
@@ -766,6 +770,7 @@ def _report_payload(
         "pdfDpi": output_pdf_dpi,
         "inputPdfDpi": input_pdf_dpi,
         "outputPdfDpi": output_pdf_dpi,
+        "pdfJpegQuality": pdf_jpeg_quality,
         "maxInputPixels": max_input_pixels,
         "inputFiles": [str(path) for path in input_files],
         "detectionEnabled": detect_document,
@@ -855,6 +860,9 @@ def _report_payload(
                 "lightingWarnings": list(page.lighting_warnings),
                 "processingStageDurationsMs": page.processing_stage_durations_ms or {},
                 "processingCacheHits": list(page.processing_cache_hits),
+                "spreadDetected": page.spread_detected,
+                "spreadConfidence": page.spread_confidence,
+                "spreadReason": page.spread_reason,
             }
             for page in pages
         ],
@@ -870,6 +878,7 @@ def _stage_outputs(
     report_path: Path,
     report_payload: dict[str, object],
     dpi: int,
+    pdf_jpeg_quality: int | None,
     cancel_cb: CancelCb | None,
 ) -> tuple[list[_StagedTarget], tuple[Path, ...]]:
     """Prepare every output beside its target and clean all stages on failure."""
@@ -884,6 +893,7 @@ def _stage_outputs(
                 staged_page_paths,
                 out_pdf=staged_pdf,
                 dpi=dpi,
+                jpeg_quality=pdf_jpeg_quality,
                 cancel_cb=cancel_cb,
             )
         finally:
@@ -941,6 +951,7 @@ def run_batch_pipeline(
     pdf_dpi: int = 300,
     input_pdf_dpi: int | None = None,
     output_pdf_dpi: int | None = None,
+    pdf_jpeg_quality: int | None = 80,
     max_input_pixels: int = DEFAULT_MAX_INPUT_PIXELS,
     detect_document: bool = True,
     detector_policy: str = "auto",
@@ -972,12 +983,18 @@ def run_batch_pipeline(
     input_dpi = int(input_pdf_dpi) if input_pdf_dpi is not None else legacy_dpi
     output_dpi = int(output_pdf_dpi) if output_pdf_dpi is not None else legacy_dpi
     max_input_pixels = int(max_input_pixels)
+    if pdf_jpeg_quality == 0:
+        pdf_jpeg_quality = None
+    elif pdf_jpeg_quality is not None:
+        pdf_jpeg_quality = int(pdf_jpeg_quality)
     if input_dpi < 72:
         raise ValueError("Input PDF DPI must be >= 72.")
     if output_dpi < 72:
         raise ValueError("Output PDF DPI must be >= 72.")
     if max_input_pixels < 1:
         raise ValueError("Maximum input pixel count must be positive.")
+    if pdf_jpeg_quality is not None and not 1 <= pdf_jpeg_quality <= 100:
+        raise ValueError("PDF JPEG quality must be between 1 and 100, or 0 for lossless.")
     if strict_detect and not detect_document:
         raise ValueError("strict_detect cannot be used when document detection is disabled.")
     image_format = image_format.strip().lower().lstrip(".")
@@ -1088,12 +1105,19 @@ def run_batch_pipeline(
         if stage_cache_dir is not None
         else None
     )
+    pre_split_rotation = (
+        int(orientation_method)
+        if two_page_mode and orientation_method in {"90", "180", "270"}
+        else 0
+    )
+    processing_orientation_method = "none" if pre_split_rotation else orientation_method
     options = PipelineOptions(
         detect_document=bool(detect_document),
         two_page_mode=bool(two_page_mode),
         postprocess_name="None",
         detector_backends=detector_backends,
         strict_detect=bool(strict_detect),
+        pre_split_rotation_degrees=pre_split_rotation,
     )
 
     staged_targets: list[_StagedTarget] = []
@@ -1127,7 +1151,7 @@ def run_batch_pipeline(
                 processed = process_document_page(
                     page.current,
                     PageProcessingRequest(
-                        orientation_method=orientation_method,
+                        orientation_method=processing_orientation_method,
                         deskew_method=deskew_method,
                         dewarp_method=dewarp_method,
                         uvdoc_cache_home=uvdoc_cache_home,
@@ -1147,6 +1171,14 @@ def run_batch_pipeline(
                 current = processed.image
                 processing_diagnostics = processed.diagnostics
                 orientation_diagnostics = processing_diagnostics.orientation
+                if pre_split_rotation:
+                    orientation_diagnostics = OrientationDiagnostics(
+                        method=orientation_method,
+                        applied=True,
+                        angle_degrees=pre_split_rotation,
+                        confidence=1.0,
+                        reason="forced_before_spread_detection",
+                    )
                 deskew_angle = processing_diagnostics.deskew_angle_degrees
                 dewarp_diagnostics = processing_diagnostics.dewarp
                 despeckle_diagnostics = processing_diagnostics.despeckle
@@ -1221,6 +1253,9 @@ def run_batch_pipeline(
                         lighting_warnings=(lighting.warnings if lighting is not None else ()),
                         processing_stage_durations_ms=processing_diagnostics.stage_durations_ms,
                         processing_cache_hits=processing_diagnostics.cache_hits,
+                        spread_detected=page.spread_detected,
+                        spread_confidence=page.spread_confidence,
+                        spread_reason=page.spread_reason,
                     )
                 )
 
@@ -1235,6 +1270,7 @@ def run_batch_pipeline(
             image_format=image_format,
             input_pdf_dpi=input_dpi,
             output_pdf_dpi=output_dpi,
+            pdf_jpeg_quality=pdf_jpeg_quality,
             max_input_pixels=max_input_pixels,
             input_files=input_files,
             pages=page_reports,
@@ -1294,6 +1330,7 @@ def run_batch_pipeline(
                     report_path=report_path,
                     report_payload=report_payload,
                     dpi=output_dpi,
+                    pdf_jpeg_quality=pdf_jpeg_quality,
                     cancel_cb=cancel_cb,
                 )
                 if cancel_cb is not None and cancel_cb():

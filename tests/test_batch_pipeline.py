@@ -11,6 +11,7 @@ import pytest
 
 from uniscan.cli import main
 from uniscan.core.scanner_adapter import DETECTOR_BACKEND_CV_HYBRID, ScanOutput
+from uniscan.io import imread_unicode
 from uniscan.tools.batch_pipeline import resolve_input_paths, run_batch_pipeline
 
 
@@ -106,6 +107,17 @@ def _write_sideways_text_page(path: Path) -> None:
         )
     sideways = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
     ok, buffer = cv2.imencode(".png", sideways)
+    assert ok
+    buffer.tofile(str(path))
+
+
+def _write_spread_image(path: Path) -> None:
+    image = np.full((500, 800, 3), 235, dtype=np.uint8)
+    image[:, 394:406] = 25
+    for y in range(45, 470, 35):
+        cv2.line(image, (45, y), (350, y), (55, 55, 55), 4)
+        cv2.line(image, (450, y), (755, y), (55, 55, 55), 4)
+    ok, buffer = cv2.imencode(".png", image)
     assert ok
     buffer.tofile(str(path))
 
@@ -269,6 +281,7 @@ def test_report_records_complete_effective_processing_configuration(tmp_path) ->
     assert report["pdfDpi"] == 200
     assert report["inputPdfDpi"] == 200
     assert report["outputPdfDpi"] == 200
+    assert report["pdfJpegQuality"] == 80
     assert report["maxInputPixels"] == 150_000_000
     assert report["imageFormat"] == "jpg"
     assert report["imagesDirectory"] == str(tmp_path / "configured-pages")
@@ -345,7 +358,7 @@ def test_split_page_report_durations_are_per_page_not_cumulative(tmp_path, monke
     from uniscan.tools import batch_pipeline
 
     source = tmp_path / "spread.png"
-    _write_image(source, 90)
+    _write_spread_image(source)
     real_process = batch_pipeline.process_document_page
 
     def delayed_process(*args, **kwargs):
@@ -478,7 +491,7 @@ def test_run_batch_pipeline_places_content_on_standard_page(tmp_path) -> None:
         vertical_alignment="top",
     )
 
-    output = cv2.imread(str(result.image_outputs[0]))
+    output = imread_unicode(result.image_outputs[0])
     assert output.shape[:2] == (1169, 827)
     assert result.pages[0].layout_applied is True
     assert result.pages[0].content_box is not None
@@ -519,7 +532,7 @@ def test_run_batch_pipeline_reports_cleanup_and_lighting_diagnostics(tmp_path) -
         lighting_diagnostics=True,
     )
 
-    output = cv2.imread(str(result.image_outputs[0]), cv2.IMREAD_GRAYSCALE)
+    output = imread_unicode(result.image_outputs[0], preserve_channels=True)
     assert set(np.unique(output).tolist()).issubset({0, 255})
     page = result.pages[0]
     assert page.binarization_method == "sauvola"
@@ -587,12 +600,40 @@ def test_run_batch_pipeline_applies_and_reports_orientation(tmp_path) -> None:
     assert page.orientation_angle_degrees == 270
     assert page.orientation_confidence > 0.2
     assert page.orientation_reason is None
-    output = cv2.imread(str(result.image_outputs[0]))
+    output = imread_unicode(result.image_outputs[0])
     assert output.shape[:2] == (720, 520)
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert report["orientationMethod"] == "auto"
     assert report["pages"][0]["orientationApplied"] is True
     assert report["pages"][0]["orientationAngleDegrees"] == 270
+
+
+def test_forced_orientation_precedes_spread_detection_and_is_reported(tmp_path) -> None:
+    source = tmp_path / "sideways-single.png"
+    _write_sideways_text_page(source)
+
+    result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "single.pdf",
+        images_dir=tmp_path / "single-pages",
+        detect_document=False,
+        two_page_mode=True,
+        lens_mode="none",
+        orientation_method="270",
+    )
+
+    assert result.total_pages == 1
+    page = result.pages[0]
+    assert page.orientation_angle_degrees == 270
+    assert page.orientation_reason == "forced_before_spread_detection"
+    assert page.spread_detected is False
+    assert page.spread_reason == "source_aspect_not_spread"
+    output = imread_unicode(result.image_outputs[0])
+    assert output is not None
+    assert output.shape[:2] == (720, 520)
+    report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    assert report["pages"][0]["spreadDetected"] is False
+    assert report["pages"][0]["spreadReason"] == "source_aspect_not_spread"
 
 
 def test_run_batch_pipeline_reports_hybrid_deskew_fallback_evidence(tmp_path) -> None:
@@ -677,6 +718,12 @@ def test_run_batch_pipeline_rejects_unknown_geometry_methods(tmp_path) -> None:
             output_pdf=tmp_path / "pixels.pdf",
             max_input_pixels=0,
         )
+    with pytest.raises(ValueError, match="PDF JPEG quality"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=tmp_path / "quality.pdf",
+            pdf_jpeg_quality=101,
+        )
     with pytest.raises(RuntimeError, match="safe input limit: 4,000 pixels"):
         run_batch_pipeline(
             inputs=[source],
@@ -714,6 +761,8 @@ def test_cli_convert_runs_end_to_end(tmp_path, capsys) -> None:
             "96",
             "--max-input-pixels",
             "1000000",
+            "--pdf-jpeg-quality",
+            "70",
             "--illumination-correction",
         ]
     )
@@ -725,6 +774,7 @@ def test_cli_convert_runs_end_to_end(tmp_path, capsys) -> None:
     assert report["inputPdfDpi"] == 144
     assert report["outputPdfDpi"] == 96
     assert report["maxInputPixels"] == 1_000_000
+    assert report["pdfJpegQuality"] == 70
     assert "Wrote 1 page(s)" in capsys.readouterr().out
 
 

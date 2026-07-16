@@ -4,21 +4,24 @@ from __future__ import annotations
 
 import os
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
+import cv2
 import img2pdf
 import numpy as np
 
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
+from uniscan.core.orientation import rotate_right_angle
 from uniscan.core.scanner_adapter import (
     DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
     _find_quad_contour,
     scan_with_document_detector,
 )
-from uniscan.core.spread import split_spread_accurate
-from uniscan.io.loaders import imwrite_unicode
+from uniscan.core.spread import SpreadSplitResult, split_spread_analyzed
+from uniscan.io.loaders import imread_unicode, imwrite_unicode
 
 LoadedItem = tuple[str, np.ndarray]
 ProgressCb = Callable[[int, int, str], None]
@@ -37,6 +40,7 @@ class PipelineOptions:
     postprocess_name: str = "None"
     detector_backends: tuple[str, ...] | None = None
     strict_detect: bool = False
+    pre_split_rotation_degrees: int = 0
 
 
 @dataclass(slots=True)
@@ -51,6 +55,9 @@ class PageResult:
     backend: str | None
     detected: bool
     fallback_reason: str | None
+    spread_detected: bool = False
+    spread_confidence: float = 0.0
+    spread_reason: str | None = None
 
 
 def _detection_fallback_reason(scan_output) -> str:
@@ -115,6 +122,9 @@ def process_loaded_items(
     """Process loaded input items and return PageResult list in order."""
     if options.postprocess_name not in POSTPROCESSING_OPTIONS:
         raise ValueError(f"Unsupported postprocess mode: {options.postprocess_name}")
+    pre_split_rotation = int(options.pre_split_rotation_degrees) % 360
+    if pre_split_rotation not in {0, 90, 180, 270}:
+        raise ValueError("Pre-split rotation must be a multiple of 90 degrees.")
 
     postprocess_fn = POSTPROCESSING_OPTIONS[options.postprocess_name]
     pages: list[PageResult] = []
@@ -141,15 +151,44 @@ def process_loaded_items(
         _check_cancelled(cancel_cb)
         backend = scan_output.backend
 
+        oriented_raw = rotate_right_angle(image, pre_split_rotation)
+        oriented_warped = rotate_right_angle(warped, pre_split_rotation)
+        if pre_split_rotation:
+            contour = None
+        detected = scan_output.detected
+
+        raw_height, raw_width = oriented_raw.shape[:2]
+        warped_height, warped_width = oriented_warped.shape[:2]
+        source_aspect = raw_width / max(1, raw_height)
+        warped_aspect = warped_width / max(1, warped_height)
+        if options.two_page_mode and source_aspect < 1.3 <= warped_aspect:
+            # A table or other internal rectangle can fool boundary detection
+            # into turning a portrait source into a wide strip. Keep the full
+            # source rather than splitting or publishing a destructive crop.
+            oriented_warped = oriented_raw
+            contour = None
+            detected = False
+            fallback_reason = "rejected landscape crop from portrait source"
+            if options.strict_detect:
+                raise RuntimeError(f"Document detection failed for {name}: {fallback_reason}")
+
         if options.two_page_mode:
-            warped_halves = split_spread_accurate(warped, fallback="midpoint")
+            if source_aspect < 1.3:
+                spread = SpreadSplitResult(
+                    (oriented_warped,),
+                    None,
+                    "source_aspect_not_spread",
+                )
+            else:
+                spread = split_spread_analyzed(oriented_warped, fallback="none")
+            warped_halves = spread.pages
             _check_cancelled(cancel_cb)
             if len(warped_halves) == 2:
                 # Estimate split ratio from the warped result and replay it on raw
-                warped_width = warped.shape[1]
+                warped_width = oriented_warped.shape[1]
                 left_warped_width = warped_halves[0].shape[1]
                 ratio = left_warped_width / max(1, warped_width)
-                raw_halves = _safe_split_proportional(image, ratio=ratio)
+                raw_halves = _safe_split_proportional(oriented_raw, ratio=ratio)
                 for half_index, (raw_half, warped_half) in enumerate(
                     zip(raw_halves, warped_halves)
                 ):
@@ -164,37 +203,41 @@ def process_loaded_items(
                             current=current_half,
                             contour=None,
                             backend=backend,
-                            detected=scan_output.detected,
+                            detected=detected,
                             fallback_reason=fallback_reason,
+                            spread_detected=True,
+                            spread_confidence=spread.candidate.confidence,
+                            spread_reason=spread.reason,
                         )
                     )
             else:
-                current = postprocess_fn(warped)
+                current = postprocess_fn(oriented_warped)
                 _check_cancelled(cancel_cb)
                 pages.append(
                     PageResult(
                         name=name,
-                        raw=image,
-                        warped=warped,
+                        raw=oriented_raw,
+                        warped=oriented_warped,
                         current=current,
                         contour=contour,
                         backend=backend,
-                        detected=scan_output.detected,
+                        detected=detected,
                         fallback_reason=fallback_reason,
+                        spread_reason=spread.reason,
                     )
                 )
         else:
-            current = postprocess_fn(warped)
+            current = postprocess_fn(oriented_warped)
             _check_cancelled(cancel_cb)
             pages.append(
                 PageResult(
                     name=name,
-                    raw=image,
-                    warped=warped,
+                    raw=oriented_raw,
+                    warped=oriented_warped,
                     current=current,
                     contour=contour,
                     backend=backend,
-                    detected=scan_output.detected,
+                    detected=detected,
                     fallback_reason=fallback_reason,
                 )
             )
@@ -231,47 +274,93 @@ def build_pdf_from_images(
     out_pdf: Path,
     dpi: int,
     *,
+    jpeg_quality: int | None = None,
     cancel_cb: CancelCb | None = None,
 ) -> None:
-    """Build a merged PDF at an exact image DPI and publish it atomically."""
+    """Build a merged PDF at an exact image DPI and publish it atomically.
+
+    When ``jpeg_quality`` is set, each source is converted to an optimized JPEG
+    before PDF assembly. This keeps photographic scans compact while preserving
+    the requested physical DPI.
+    """
     if not image_paths:
         raise ValueError("No image paths to export.")
     dpi = int(dpi)
     if dpi <= 0:
         raise ValueError("PDF DPI must be positive.")
+    if jpeg_quality is not None and not 1 <= int(jpeg_quality) <= 100:
+        raise ValueError("PDF JPEG quality must be between 1 and 100.")
 
     out_pdf = Path(out_pdf)
     if out_pdf.exists() and out_pdf.is_dir():
         raise ValueError(f"PDF output path is a directory: {out_pdf}")
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, raw_staged_path = tempfile.mkstemp(
-        prefix=f".{out_pdf.name}.stage-",
-        suffix=out_pdf.suffix or ".pdf",
-        dir=out_pdf.parent,
-    )
-    staged_path = Path(raw_staged_path)
-    try:
-        if cancel_cb is not None and cancel_cb():
-            raise RuntimeError("Cancelled by user.")
-        with os.fdopen(descriptor, "wb") as file:
-            layout = img2pdf.get_fixed_dpi_layout_fun((dpi, dpi))
-            img2pdf.convert(
-                [str(p) for p in image_paths],
-                layout_fun=layout,
-                outputstream=file,
-            )
-            file.flush()
-            os.fsync(file.fileno())
-        if cancel_cb is not None and cancel_cb():
-            raise RuntimeError("Cancelled by user.")
-        os.replace(staged_path, out_pdf)
-    except Exception:
-        # ``os.fdopen`` owns the descriptor after it succeeds.  If it failed,
-        # closing an already-closed descriptor is harmlessly avoided here.
+    with _pdf_image_sources(
+        image_paths,
+        jpeg_quality=jpeg_quality,
+        cancel_cb=cancel_cb,
+    ) as pdf_image_paths:
+        descriptor, raw_staged_path = tempfile.mkstemp(
+            prefix=f".{out_pdf.name}.stage-",
+            suffix=out_pdf.suffix or ".pdf",
+            dir=out_pdf.parent,
+        )
+        staged_path = Path(raw_staged_path)
         try:
-            os.close(descriptor)
-        except OSError:
-            pass
-        if staged_path.exists():
-            staged_path.unlink()
-        raise
+            _check_cancelled(cancel_cb)
+            with os.fdopen(descriptor, "wb") as file:
+                layout = img2pdf.get_fixed_dpi_layout_fun((dpi, dpi))
+                img2pdf.convert(
+                    [str(p) for p in pdf_image_paths],
+                    layout_fun=layout,
+                    outputstream=file,
+                )
+                file.flush()
+                os.fsync(file.fileno())
+            _check_cancelled(cancel_cb)
+            os.replace(staged_path, out_pdf)
+        except Exception:
+            # ``os.fdopen`` owns the descriptor after it succeeds. If it failed,
+            # closing an already-closed descriptor is harmlessly avoided here.
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            if staged_path.exists():
+                staged_path.unlink()
+            raise
+
+
+@contextmanager
+def _pdf_image_sources(
+    image_paths: list[Path],
+    *,
+    jpeg_quality: int | None,
+    cancel_cb: CancelCb | None,
+) -> Iterator[list[Path]]:
+    """Yield original paths or temporary JPEG-compressed PDF sources."""
+    if jpeg_quality is None:
+        yield image_paths
+        return
+
+    quality = int(jpeg_quality)
+    with tempfile.TemporaryDirectory(prefix="uniscan_pdf_jpeg_") as temporary:
+        temporary_dir = Path(temporary)
+        compressed_paths: list[Path] = []
+        encode_params = (
+            cv2.IMWRITE_JPEG_QUALITY,
+            quality,
+            cv2.IMWRITE_JPEG_OPTIMIZE,
+            1,
+        )
+        for index, source_path in enumerate(image_paths, start=1):
+            _check_cancelled(cancel_cb)
+            image = imread_unicode(Path(source_path))
+            if image is None:
+                raise RuntimeError(f"Cannot read PDF source image: {source_path}")
+            compressed_path = temporary_dir / f"{index:05d}.jpg"
+            if not imwrite_unicode(compressed_path, image, params=encode_params):
+                raise RuntimeError(f"Failed to compress PDF source image: {source_path}")
+            compressed_paths.append(compressed_path)
+        _check_cancelled(cancel_cb)
+        yield compressed_paths

@@ -157,7 +157,9 @@ DPI if a standard-page layout exceeds it.
 - a JSON run report for `convert`, defaulting to `<output>.report.json`.
 
 The PDF contains raster pages. It is not searchable and does not retain text, links, forms,
-bookmarks, layers, or vector objects from an input PDF.
+bookmarks, layers, or vector objects from an input PDF. Headless `convert` embeds pages as JPEG at
+quality 80 by default so photographed books do not become lossless, oversized PDFs. Use
+`--pdf-jpeg-quality 1..100` to tune this, or `--pdf-jpeg-quality 0` for lossless PNG embedding.
 
 ## Headless conversion
 
@@ -184,6 +186,7 @@ A more complete document job:
   --page-layout a4 `
   --page-margin-mm 10 `
   --output-pdf-dpi 300 `
+  --pdf-jpeg-quality 80 `
   --lighting-diagnostics
 ```
 
@@ -196,10 +199,11 @@ Important defaults and controls:
 | Detector choices | `auto`, `office_lens_onnx`, `cv_hybrid`, `opencv_quad`, `opencv_hough`, `opencv_minrect` |
 | Detection failure | keep the unchanged page by default; `--strict-detect` fails the whole atomic job |
 | Geometry | `--orientation none`, `--deskew none`, and `--dewarp none` by default |
-| Book spreads | `--two-page` enables gutter split with a midpoint fallback |
+| Book spreads | `--two-page` splits only when a confident central gutter is detected |
 | Layout | `--page-layout none`; A4/Letter use 10 mm centered margins by default |
 | Cleanup detail | binarization and despeckle default to `none`; local window defaults to 31 |
 | Images | disabled unless `--images-dir` is set; format defaults to PNG |
+| PDF compression | JPEG quality 80; `--pdf-jpeg-quality 0` selects lossless embedding |
 | Stage cache | disabled unless `--stage-cache-dir` is set; enabled limit defaults to 512 MiB |
 
 Use `--no-detect` when inputs are already cropped. `--strict-detect` cannot be combined with
@@ -220,8 +224,10 @@ remains physical A4 or Letter.
 
 ### Geometry and cleanup stages
 
-Boundary detection/perspective and spread splitting happen first. GUI Apply and headless conversion
-then share `PageProcessingRequest -> process_document_page() -> PageProcessingResult` for:
+Boundary detection/perspective and spread splitting happen first. When a forced 90/180/270
+orientation is configured with `--two-page`, that known rotation is applied before the spread
+decision. GUI Apply and headless conversion then share
+`PageProcessingRequest -> process_document_page() -> PageProcessingResult` for:
 
 1. conservative non-OCR 0/90/180/270 orientation;
 2. small-angle deskew: `hybrid`, `hough`, or `min_area`;
@@ -232,6 +238,12 @@ then share `PageProcessingRequest -> process_document_page() -> PageProcessingRe
 `--orientation auto` uses conservative non-OCR layout evidence. For a camera series whose physical
 rotation is known, use `--orientation 90`, `180`, or `270` to force that clockwise correction and
 avoid inherently ambiguous 180-degree text-direction guesses.
+
+Spread mode is conservative: the oriented source frame must itself have spread-like landscape
+geometry, a wide detector crop alone is not sufficient, and an uncertain image is kept as one page
+instead of being cut at its midpoint. The report records `spreadDetected`, `spreadConfidence`, and
+`spreadReason` for each produced page. A boundary crop that changes a portrait source into a wide
+strip is rejected as destructive and recorded as a detection fallback.
 
 `--dewarp textline` uses the built-in text-line geometry estimator and needs no optional model
 runtime. `--dewarp auto` is a conservative policy when explicitly selected: it tries text-line
@@ -246,7 +258,7 @@ See [the geometry guide](docs/document_geometry.md) for algorithms and diagnosti
 The current run report uses `schemaVersion: 3`. It records:
 
 - canonical output/report/image paths and discovered inputs;
-- `inputPdfDpi`, `outputPdfDpi`, legacy `pdfDpi` (the output DPI), and
+- `inputPdfDpi`, `outputPdfDpi`, legacy `pdfDpi` (the output DPI), `pdfJpegQuality`, and
   `maxInputPixels`;
 - every effective detector, geometry, cleanup, layout, and cache setting;
 - page count, detected/fallback count, and per-page fallback reason;

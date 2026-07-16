@@ -36,6 +36,13 @@ horizontal line-layout evidence and glyph baseline asymmetry. Sparse, graphical,
 pages remain unchanged and the reason is recorded. EXIF orientation is still applied while loading,
 and manual 90-degree rotation remains available in Page tools.
 
+With `--two-page`, a forced `--orientation 90|180|270` is applied before spread classification so
+a sideways portrait page is evaluated in its actual portrait geometry. The oriented source frame
+must be landscape before a detector crop can be considered a spread. A spread is split only when
+the central-gutter detector is confident; no midpoint fallback is used for uncertain frames. A
+boundary result that changes a portrait source into a landscape strip is rejected so an internal
+table or diagram cannot become a destructive page crop.
+
 ## Deskew
 
 `--deskew` controls small-angle page rotation:
@@ -82,10 +89,10 @@ page. PDF allocation is checked using PDFium's rounded-up render dimensions; an 
 fails before rendering instead of being silently downsampled. A4/Letter layout also refuses an
 output canvas above 150,000,000 pixels before allocating it.
 
-The batch JSON report uses schema version 3. It records `inputPdfDpi`, `outputPdfDpi`, and
-`maxInputPixels`; `pdfDpi` remains as a compatibility alias for `outputPdfDpi`. The report also
-records the requested orientation policy globally and the applied angle, confidence, and reason for
-each page.
+The batch JSON report uses schema version 3. It records `inputPdfDpi`, `outputPdfDpi`,
+`pdfJpegQuality`, and `maxInputPixels`; `pdfDpi` remains as a compatibility alias for
+`outputPdfDpi`. The report also records the requested orientation policy globally and the applied
+angle, confidence, and reason for each page, plus the spread decision and confidence.
 
 ## Document cleanup and lighting evidence
 

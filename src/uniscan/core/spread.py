@@ -37,6 +37,15 @@ class GutterCandidate:
     balance_score: float
 
 
+@dataclass(slots=True, frozen=True)
+class SpreadSplitResult:
+    """Pages and evidence produced by one automatic spread decision."""
+
+    pages: tuple[np.ndarray, ...]
+    candidate: GutterCandidate | None
+    reason: str
+
+
 def _to_gray(image: np.ndarray) -> np.ndarray:
     if image.ndim == 2:
         return image
@@ -193,6 +202,26 @@ def split_spread_accurate(
 
     Falls back according to ``fallback`` if no confident gutter is found.
     """
+    return list(
+        split_spread_analyzed(
+            image,
+            fallback=fallback,
+            min_confidence=min_confidence,
+            search_band=search_band,
+            min_aspect=min_aspect,
+        ).pages
+    )
+
+
+def split_spread_analyzed(
+    image: np.ndarray,
+    *,
+    fallback: Literal["midpoint", "none"] = "none",
+    min_confidence: float = 0.5,
+    search_band: tuple[float, float] = (0.30, 0.70),
+    min_aspect: float = 1.3,
+) -> SpreadSplitResult:
+    """Split only with gutter evidence and return the decision diagnostics."""
     candidate = detect_spread_gutter(
         image,
         search_band=search_band,
@@ -202,19 +231,21 @@ def split_spread_accurate(
     if candidate is not None:
         cut = candidate.x
     elif fallback == "none":
-        return [image]
+        return SpreadSplitResult((image,), None, "no_confident_gutter")
     else:
         if image is None or image.size == 0:
-            return [image] if image is not None else []
+            pages = (image,) if image is not None else ()
+            return SpreadSplitResult(pages, None, "empty_image")
         _, width = image.shape[:2]
         if width < 2:
-            return [image]
+            return SpreadSplitResult((image,), None, "image_too_narrow")
         cut = width // 2
 
     if cut <= 0 or cut >= image.shape[1]:
-        return [image]
+        return SpreadSplitResult((image,), candidate, "invalid_gutter")
     left = image[:, :cut]
     right = image[:, cut:]
     if left.size == 0 or right.size == 0:
-        return [image]
-    return [left, right]
+        return SpreadSplitResult((image,), candidate, "empty_half")
+    reason = "gutter_detected" if candidate is not None else "midpoint_fallback"
+    return SpreadSplitResult((left, right), candidate, reason)
