@@ -13,6 +13,9 @@ from uniscan.core.scanner_adapter import (
     DETECTOR_BACKEND_OFFICE_LENS_ONNX,
     DETECTOR_BACKEND_PADDLEOCR_UVDOC,
     DETECTOR_BACKEND_UVDOC,
+    ScanOutput,
+    _detection_roi,
+    _is_image_frame,
     scan_with_document_detector,
 )
 
@@ -25,6 +28,20 @@ def _perspective_doc() -> np.ndarray:
     for y in range(170, 540, 40):
         cv2.line(image, (230, y), (640, y), (40, 40, 40), 4)
     return image
+
+
+def _document_inside_white_canvas() -> tuple[np.ndarray, np.ndarray]:
+    image = np.full((800, 1000, 3), 255, dtype=np.uint8)
+    cv2.rectangle(image, (28, 20), (971, 779), (45, 45, 45), -1)
+    document = np.array(
+        [[115, 80], [895, 105], [855, 715], [130, 690]],
+        dtype=np.int32,
+    )
+    cv2.fillConvexPoly(image, document, (242, 242, 242))
+    cv2.polylines(image, [document], isClosed=True, color=(25, 25, 25), thickness=7)
+    for y in range(170, 650, 45):
+        cv2.line(image, (210, y), (780, y + 8), (55, 55, 55), 3)
+    return image, document.astype(np.float32)
 
 
 def test_scanner_adapter_detects_quad_with_opencv_fallback() -> None:
@@ -42,6 +59,101 @@ def test_scanner_adapter_detects_quad_with_opencv_fallback() -> None:
     assert result.warped is not None
     assert result.warped.shape[0] > 350
     assert result.warped.shape[1] > 350
+
+
+def test_scanner_adapter_prefers_document_inside_artificial_white_canvas() -> None:
+    image, document = _document_inside_white_canvas()
+
+    for backend in (DETECTOR_BACKEND_OPENCV, DETECTOR_BACKEND_CV_HYBRID):
+        result = scan_with_document_detector(image, enabled=True, backends=(backend,))
+
+        assert result.detected is True
+        assert result.contour is not None
+        detected_area = abs(float(cv2.contourArea(result.contour)))
+        document_area = abs(float(cv2.contourArea(document)))
+        assert 0.85 <= detected_area / document_area <= 1.15
+        assert float(result.contour[:, 0].min()) > 80
+        assert float(result.contour[:, 1].min()) > 55
+
+
+def test_scanner_adapter_rejects_white_canvas_frame_from_external_backend(
+    monkeypatch,
+) -> None:
+    image, _document = _document_inside_white_canvas()
+    canvas_frame = np.array(
+        [[28, 20], [971, 20], [971, 779], [28, 779]],
+        dtype=np.float32,
+    )
+    framed = ScanOutput(
+        warped=image[20:780, 28:972],
+        contour=canvas_frame,
+        backend=DETECTOR_BACKEND_OFFICE_LENS_ONNX,
+        detected=True,
+        raw_result=None,
+    )
+    monkeypatch.setattr(
+        "uniscan.core.scanner_adapter._office_lens_document_detector",
+        lambda _image: framed,
+    )
+
+    result = scan_with_document_detector(
+        image,
+        enabled=True,
+        backends=(DETECTOR_BACKEND_OFFICE_LENS_ONNX,),
+    )
+
+    assert result.detected is False
+    assert result.contour is None
+    assert "artificial white canvas frame" in result.raw_result["errors"][0]
+
+
+def test_large_axis_aligned_page_on_dark_surface_is_not_treated_as_canvas() -> None:
+    gray = np.full((800, 1000), 35, dtype=np.uint8)
+    page = np.array(
+        [[30, 25], [969, 25], [969, 774], [30, 774]],
+        dtype=np.float32,
+    )
+    cv2.fillConvexPoly(gray, page.astype(np.int32), 245)
+
+    assert _is_image_frame(page, gray.shape, gray) is False
+
+
+def test_detector_ignores_large_white_letterbox_bands() -> None:
+    image = np.full((842, 595, 3), 255, dtype=np.uint8)
+    photo_top = 253
+    photo_bottom = 589
+    image[photo_top:photo_bottom, :] = 45
+    document = np.array(
+        [[70, 270], [535, 278], [520, 565], [82, 570]],
+        dtype=np.int32,
+    )
+    cv2.fillConvexPoly(image, document, (242, 242, 242))
+    cv2.polylines(image, [document], True, (20, 20, 20), 5)
+    for y in range(325, 535, 32):
+        cv2.line(image, (135, y), (465, y + 3), (50, 50, 50), 2)
+
+    roi, offset_x, offset_y = _detection_roi(image)
+    result = scan_with_document_detector(image)
+
+    assert (offset_x, offset_y) == (0, photo_top)
+    assert roi.shape[:2] == (photo_bottom - photo_top, image.shape[1])
+    assert result.contour is not None
+    detected_area = abs(float(cv2.contourArea(result.contour)))
+    expected_area = abs(float(cv2.contourArea(document.astype(np.float32))))
+    assert 0.80 <= detected_area / expected_area <= 1.20
+    assert float(result.contour[:, 1].min()) >= photo_top
+    assert float(result.contour[:, 1].max()) < photo_bottom
+
+
+def test_detection_roi_rechecks_top_and_bottom_after_removing_side_bands() -> None:
+    image = np.full((900, 700, 3), 255, dtype=np.uint8)
+    image[:, 90:610] = 255
+    image[160:740, 90:610] = 40
+
+    roi, offset_x, offset_y = _detection_roi(image)
+
+    assert (offset_x, offset_y) == (90, 160)
+    assert roi.shape[:2] == (580, 520)
 
 
 def test_scanner_adapter_disabled_returns_original() -> None:

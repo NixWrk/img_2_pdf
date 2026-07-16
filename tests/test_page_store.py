@@ -55,6 +55,16 @@ def test_page_store_writes_raw_distinct_from_warped(tmp_path) -> None:
     assert int(warped_back[0, 0, 0]) == 200
 
 
+def test_page_store_preview_resize_never_adds_letterbox_padding(tmp_path) -> None:
+    store = PageStore(root_dir=tmp_path)
+    source = np.full((1200, 2400, 3), 73, dtype=np.uint8)
+
+    preview = store._resize_for_display(source, max_width=1000, max_height=1000)
+
+    assert preview.shape == (500, 1000, 3)
+    assert np.all(preview == 73)
+
+
 def test_page_store_failed_encode_keeps_previous_complete_file(tmp_path, monkeypatch) -> None:
     store = PageStore(root_dir=tmp_path)
     paths = store.add_page("entry_atomic", _img(10))

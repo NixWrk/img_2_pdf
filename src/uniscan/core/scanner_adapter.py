@@ -129,6 +129,83 @@ def _resize_for_detection(image: np.ndarray, *, max_side: int = 1600) -> tuple[n
     return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA), scale
 
 
+def _white_padding_run(flags: np.ndarray, *, from_start: bool) -> int:
+    ordered = flags if from_start else flags[::-1]
+    non_padding = np.flatnonzero(~ordered)
+    return int(non_padding[0]) if non_padding.size else int(ordered.size)
+
+
+def _has_photo_transition(gray: np.ndarray, *, axis: int, start: int, from_start: bool) -> bool:
+    length = gray.shape[axis]
+    probe = max(3, int(round(length * 0.025)))
+    if from_start:
+        inner_start = start
+        inner_stop = min(length, start + probe)
+    else:
+        inner_start = max(0, length - start - probe)
+        inner_stop = length - start
+    if inner_stop <= inner_start:
+        return False
+    region = (
+        gray[inner_start:inner_stop, :]
+        if axis == 0
+        else gray[:, inner_start:inner_stop]
+    )
+    return bool(float(np.count_nonzero(region < 230)) / max(1, region.size) >= 0.15)
+
+
+def _detection_roi(image: np.ndarray) -> tuple[np.ndarray, int, int]:
+    """Exclude synthetic white letterbox bands while retaining source coordinates."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    height, width = gray.shape[:2]
+    top = bottom = left = right = 0
+    for _pass in range(2):
+        region = gray[top : height - bottom, left : width - right]
+        if region.size == 0:
+            return image, 0, 0
+        row_padding = np.mean(region >= 245, axis=1) >= 0.995
+        trim_top = _white_padding_run(row_padding, from_start=True)
+        trim_bottom = _white_padding_run(row_padding, from_start=False)
+        if trim_top < max(2, int(region.shape[0] * 0.02)) or not _has_photo_transition(
+            region, axis=0, start=trim_top, from_start=True
+        ):
+            trim_top = 0
+        if trim_bottom < max(2, int(region.shape[0] * 0.02)) or not _has_photo_transition(
+            region, axis=0, start=trim_bottom, from_start=False
+        ):
+            trim_bottom = 0
+        top += trim_top
+        bottom += trim_bottom
+
+        region = gray[top : height - bottom, left : width - right]
+        if region.size == 0:
+            return image, 0, 0
+        column_padding = np.mean(region >= 245, axis=0) >= 0.995
+        trim_left = _white_padding_run(column_padding, from_start=True)
+        trim_right = _white_padding_run(column_padding, from_start=False)
+        if trim_left < max(2, int(region.shape[1] * 0.02)) or not _has_photo_transition(
+            region, axis=1, start=trim_left, from_start=True
+        ):
+            trim_left = 0
+        if trim_right < max(2, int(region.shape[1] * 0.02)) or not _has_photo_transition(
+            region, axis=1, start=trim_right, from_start=False
+        ):
+            trim_right = 0
+        left += trim_left
+        right += trim_right
+
+        if not any((trim_top, trim_bottom, trim_left, trim_right)):
+            break
+
+    roi = image[top : height - bottom, left : width - right]
+    if (
+        roi.shape[0] < max(32, int(height * 0.20))
+        or roi.shape[1] < max(32, int(width * 0.20))
+    ):
+        return image, 0, 0
+    return roi, left, top
+
+
 def _candidate_maps(gray: np.ndarray) -> list[np.ndarray]:
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     adaptive = cv2.adaptiveThreshold(
@@ -167,16 +244,56 @@ def _contour_score(contour: np.ndarray, image_area: float) -> float:
     return (coverage * 10.0) + fill_ratio
 
 
-def _is_image_frame(contour: np.ndarray, image_shape: tuple[int, int]) -> bool:
-    """Reject threshold-map borders masquerading as a full-page quadrilateral."""
+def _is_image_frame(
+    contour: np.ndarray,
+    image_shape: tuple[int, int],
+    gray: np.ndarray | None = None,
+) -> bool:
+    """Reject raster/canvas borders masquerading as a document quadrilateral."""
     height, width = image_shape
-    normalized = np.asarray(contour, dtype=np.float32).reshape(-1, 2)
+    normalized = order_quad_points(np.asarray(contour, dtype=np.float32).reshape(-1, 2))
     x, y, box_width, box_height = cv2.boundingRect(normalized.astype(np.int32))
     coverage = abs(float(cv2.contourArea(normalized))) / max(1.0, float(width * height))
     touches_every_edge = (
         x <= 1 and y <= 1 and x + box_width >= width - 1 and y + box_height >= height - 1
     )
-    return bool(coverage >= 0.9 and touches_every_edge)
+    if coverage >= 0.9 and touches_every_edge:
+        return True
+
+    # Imported scans sometimes contain an axis-aligned white canvas around the
+    # photographed page. Its inner edge is a stronger and larger rectangle than
+    # the real, perspective-skewed sheet, so area-only ranking picks the canvas.
+    if gray is None or coverage < 0.72:
+        return False
+    near_x = max(2.0, width * 0.06)
+    near_y = max(2.0, height * 0.06)
+    near_every_edge = (
+        float(normalized[:, 0].min()) <= near_x
+        and float(normalized[:, 1].min()) <= near_y
+        and float(normalized[:, 0].max()) >= (width - 1) - near_x
+        and float(normalized[:, 1].max()) >= (height - 1) - near_y
+    )
+    if not near_every_edge:
+        return False
+
+    tl, tr, br, bl = normalized
+    axis_tolerance = max(3.0, min(width, height) * 0.025)
+    axis_aligned = max(
+        abs(float(tl[1] - tr[1])),
+        abs(float(bl[1] - br[1])),
+        abs(float(tl[0] - bl[0])),
+        abs(float(tr[0] - br[0])),
+    ) <= axis_tolerance
+    if not axis_aligned:
+        return False
+
+    outside_mask = np.full((height, width), 255, dtype=np.uint8)
+    cv2.fillConvexPoly(outside_mask, normalized.astype(np.int32), 0)
+    outside = np.asarray(gray)[outside_mask > 0]
+    if outside.size < max(16, int(width * height * 0.01)):
+        return False
+    bright_ratio = float(np.count_nonzero(outside >= 235)) / float(outside.size)
+    return bool(bright_ratio >= 0.80)
 
 
 def _find_quad_contour(image: np.ndarray) -> np.ndarray | None:
@@ -199,14 +316,17 @@ def _find_quad_contour(image: np.ndarray) -> np.ndarray | None:
             approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
             if len(approx) != 4 or not cv2.isContourConvex(approx):
                 continue
-            if _is_image_frame(approx, gray.shape[:2]):
+            if _is_image_frame(approx, gray.shape[:2], gray):
                 continue
             score = _contour_score(approx, image_area)
             if score > best_score:
                 best_score = score
                 best_quad = approx.reshape(4, 2).astype(np.float32)
 
-    if best_quad is not None:
+    best_quad_coverage = (
+        abs(float(cv2.contourArea(best_quad))) / image_area if best_quad is not None else 0.0
+    )
+    if best_quad is not None and best_quad_coverage >= 0.20:
         return order_quad_points(best_quad)
 
     best_rect: np.ndarray | None = None
@@ -221,13 +341,21 @@ def _find_quad_contour(image: np.ndarray) -> np.ndarray | None:
                 continue
             rect = cv2.minAreaRect(contour)
             points = order_quad_points(cv2.boxPoints(rect).astype(np.float32))
-            if _is_image_frame(points, gray.shape[:2]):
+            if _is_image_frame(points, gray.shape[:2], gray):
                 continue
             score = _contour_score(points.reshape(-1, 1, 2), image_area)
             if score > best_rect_score:
                 best_rect_score = score
                 best_rect = points
-    return best_rect
+    if best_quad is None:
+        return best_rect
+    if best_rect is None:
+        return order_quad_points(best_quad)
+    rect_area = abs(float(cv2.contourArea(best_rect)))
+    quad_area = abs(float(cv2.contourArea(best_quad)))
+    if rect_area >= quad_area * 2.0:
+        return best_rect
+    return order_quad_points(best_quad)
 
 
 def _find_minrect_contour(image: np.ndarray) -> np.ndarray | None:
@@ -248,7 +376,7 @@ def _find_minrect_contour(image: np.ndarray) -> np.ndarray | None:
             hull = cv2.convexHull(contour)
             rect = cv2.minAreaRect(hull)
             points = order_quad_points(cv2.boxPoints(rect).astype(np.float32))
-            if _is_image_frame(points, gray.shape[:2]):
+            if _is_image_frame(points, gray.shape[:2], gray):
                 continue
             score = _contour_score(points.reshape(-1, 1, 2), image_area)
             if score > best_score:
@@ -357,6 +485,8 @@ def _find_hough_quad_contour(image: np.ndarray) -> np.ndarray | None:
         return None
     if float(cv2.contourArea(contour.reshape(-1, 1, 2))) < (height * width * 0.12):
         return None
+    if _is_image_frame(contour, gray.shape[:2], gray):
+        return None
     return contour
 
 
@@ -370,7 +500,7 @@ def _select_best_contour(image: np.ndarray, *contours: np.ndarray | None) -> np.
         if contour is None:
             continue
         normalized = order_quad_points(np.asarray(contour, dtype=np.float32))
-        if _is_image_frame(normalized, gray.shape[:2]):
+        if _is_image_frame(normalized, gray.shape[:2], gray):
             continue
         score = _contour_score(normalized.reshape(-1, 1, 2), image_area)
         if score > best_score:
@@ -406,7 +536,8 @@ def _contour_detector_output(
         )
 
     resized, scale = _resize_for_detection(image)
-    contour = contour_finder(resized)
+    detection_image, offset_x, offset_y = _detection_roi(resized)
+    contour = contour_finder(detection_image)
     if contour is None:
         return ScanOutput(
             warped=image,
@@ -416,6 +547,8 @@ def _contour_detector_output(
             raw_result={backend: "no_contour"},
         )
 
+    if offset_x or offset_y:
+        contour = contour + np.array([offset_x, offset_y], dtype=np.float32)
     if scale != 1.0:
         contour = contour / scale
     contour = order_quad_points(contour.astype(np.float32))
@@ -638,6 +771,11 @@ def scan_with_document_detector(
             errors.append(f"{backend}: {exc}")
             continue
 
+        if result.detected and result.contour is not None:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+            if _is_image_frame(result.contour, gray.shape[:2], gray):
+                errors.append(f"{backend}: rejected artificial white canvas frame")
+                continue
         if result.detected:
             return result
         if isinstance(result.raw_result, dict):
