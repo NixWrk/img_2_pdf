@@ -473,6 +473,22 @@ def test_second_perspective_pass_uses_corrected_page_geometry() -> None:
     assert _perspective_source_image(entry, from_current_geometry=True) is corrected
 
 
+def test_import_sources_accept_files_and_multiple_folders_without_duplicates(tmp_path) -> None:
+    first_folder = tmp_path / "first"
+    second_folder = tmp_path / "second"
+    first_folder.mkdir()
+    second_folder.mkdir()
+    first_image = first_folder / "page1.png"
+    second_pdf = second_folder / "book.pdf"
+    first_image.write_bytes(b"image")
+    second_pdf.write_bytes(b"pdf")
+    (first_folder / "ignore.txt").write_text("ignore", encoding="utf-8")
+
+    sources = UnifiedScanApp._expand_import_sources([first_folder, second_folder, first_image])
+
+    assert sources == [first_image, second_pdf]
+
+
 def test_committing_previewed_split_creates_adjacent_pages_with_prior_appearance(tmp_path) -> None:
     app = _app_for_processing()
     app.session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))

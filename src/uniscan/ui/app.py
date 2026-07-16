@@ -294,6 +294,9 @@ class UnifiedScanApp(ctk.CTk):
         self.review_preview_cancel_event = threading.Event()
         self.review_preview_generation = 0
         self.review_processing_window: ctk.CTkToplevel | None = None
+        self.import_dialog_window: ctk.CTkToplevel | None = None
+        self.import_dialog_listbox: tk.Listbox | None = None
+        self.export_dialog_window: ctk.CTkToplevel | None = None
         self.corner_editor_window: ctk.CTkToplevel | None = None
         self.corner_source_canvas: tk.Canvas | None = None
         self.corner_preview_canvas: tk.Canvas | None = None
@@ -347,8 +350,6 @@ class UnifiedScanApp(ctk.CTk):
         self.geometry_summary_var = tk.StringVar(value="Wave preview: pending")
         self.split_preview_var = tk.StringVar(value="Split: not previewed")
         self.deskew_method_var = tk.StringVar(value="Hybrid (recommended)")
-        self.import_folder_var = tk.StringVar()
-        self.import_files_var = tk.StringVar()
         self.import_pdf_dpi_var = tk.IntVar(value=300)
         self.import_two_page_mode_var = tk.BooleanVar(value=False)
         self.import_selected_files: list[str] = []
@@ -360,6 +361,10 @@ class UnifiedScanApp(ctk.CTk):
         self.export_dir_var = tk.StringVar()
         self.export_format_var = tk.StringVar(value="png")
         self.export_pdf_dpi_var = tk.IntVar(value=300)
+        self.export_dialog_mode_var = tk.StringVar(value="PDF")
+        self.export_dialog_scope_var = tk.StringVar(value="All pages")
+        self.export_dialog_dpi_var = tk.IntVar(value=300)
+        self.export_dialog_format_var = tk.StringVar(value="png")
         self.job_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.job_cancel_event = threading.Event()
         self.job_thread: threading.Thread | None = None
@@ -370,8 +375,6 @@ class UnifiedScanApp(ctk.CTk):
         self._last_autosave_signature: tuple[object, ...] | None = None
         self.tab_review_name = "Workspace"
         self.tab_scan_name = "Camera"
-        self.tab_import_name = "Import options"
-        self.tab_export_name = "Export options"
 
         self._build_ui()
         self._bind_shortcuts()
@@ -417,41 +420,17 @@ class UnifiedScanApp(ctk.CTk):
         toolbar.pack(fill=ctk.X, padx=12, pady=(6, 4))
         ctk.CTkButton(
             toolbar,
-            text="+ Add files",
+            text="Import...",
             width=110,
-            command=self.quick_add_files,
-        ).pack(side=ctk.LEFT, padx=(8, 4), pady=8)
-        ctk.CTkButton(
-            toolbar,
-            text="Add folder",
-            width=105,
-            fg_color="transparent",
-            border_width=1,
-            command=self.quick_add_folder,
-        ).pack(side=ctk.LEFT, padx=4, pady=8)
-        ctk.CTkButton(
-            toolbar,
-            text="Paste",
-            width=80,
-            fg_color="transparent",
-            border_width=1,
-            command=self.import_from_clipboard,
-        ).pack(side=ctk.LEFT, padx=4, pady=8)
-        ctk.CTkButton(
-            toolbar,
-            text="Camera",
-            width=90,
-            fg_color="transparent",
-            border_width=1,
-            command=lambda: self.tabs.set(self.tab_scan_name),
-        ).pack(side=ctk.LEFT, padx=4, pady=8)
+            command=self.open_import_dialog,
+        ).pack(side=ctk.LEFT, padx=8, pady=8)
         self.toolbar_export_button = ctk.CTkButton(
             toolbar,
-            text="Export PDF...",
+            text="Export...",
             width=120,
             fg_color="#2f855a",
             hover_color="#276749",
-            command=self.export_to_pdf,
+            command=self.open_export_dialog,
         )
         self.toolbar_export_button.pack(side=ctk.RIGHT, padx=8, pady=8)
 
@@ -476,13 +455,9 @@ class UnifiedScanApp(ctk.CTk):
 
         self.pages_tab = self.tabs.add(self.tab_review_name)
         self.capture_tab = self.tabs.add(self.tab_scan_name)
-        self.import_tab = self.tabs.add(self.tab_import_name)
-        self.export_tab = self.tabs.add(self.tab_export_name)
 
         self._build_pages_tab(self.pages_tab)
         self._build_capture_tab(self.capture_tab)
-        self._build_import_tab(self.import_tab)
-        self._build_export_tab(self.export_tab)
         self.tabs.set(self.tab_review_name)
 
     def _build_capture_tab(self, tab: ctk.CTkFrame) -> None:
@@ -1025,41 +1000,22 @@ class UnifiedScanApp(ctk.CTk):
             font=ctk.CTkFont(size=15, weight="bold"),
             anchor="w",
         ).pack(fill=ctk.X, padx=6, pady=(2, 6))
-        ctk.CTkOptionMenu(
+        self.workspace_export_button = ctk.CTkButton(
             processing,
-            values=["All pages", "Selected pages"],
-            variable=self.export_scope_var,
-        ).pack(fill=ctk.X, padx=6, pady=(0, 8))
-        export_dpi = ctk.CTkFrame(processing, fg_color="transparent")
-        export_dpi.pack(fill=ctk.X, padx=6, pady=(0, 8))
-        ctk.CTkLabel(export_dpi, text="PDF DPI").pack(side=ctk.LEFT)
-        ctk.CTkEntry(export_dpi, textvariable=self.export_pdf_dpi_var, width=80).pack(
-            side=ctk.RIGHT
-        )
-        self.workspace_export_pdf_button = ctk.CTkButton(
-            processing,
-            text="Export PDF...",
+            text="Export...",
             fg_color="#2f855a",
             hover_color="#276749",
-            command=self.export_to_pdf,
+            command=self.open_export_dialog,
         )
-        self.workspace_export_pdf_button.pack(fill=ctk.X, padx=6, pady=(0, 6))
-        self.workspace_export_files_button = ctk.CTkButton(
-            processing,
-            text="Export images...",
-            fg_color="transparent",
-            border_width=1,
-            command=self.export_to_files,
-        )
-        self.workspace_export_files_button.pack(fill=ctk.X, padx=6, pady=(0, 10))
+        self.workspace_export_button.pack(fill=ctk.X, padx=6, pady=(0, 10))
         self.refresh_page_list()
 
     def _bind_shortcuts(self) -> None:
         """Bind the common document actions without stealing text-entry shortcuts."""
-        self.bind("<Control-o>", lambda _event: self._run_shortcut(self.quick_add_files))
+        self.bind("<Control-o>", lambda _event: self._run_shortcut(self.open_import_dialog))
         self.bind("<Control-Shift-O>", lambda _event: self._run_shortcut(self.quick_add_folder))
         self.bind("<Control-Shift-C>", lambda _event: self._run_shortcut(self.capture_one))
-        self.bind("<Control-e>", lambda _event: self._run_shortcut(self.export_to_pdf))
+        self.bind("<Control-e>", lambda _event: self._run_shortcut(self.open_export_dialog))
         self.bind("<F5>", lambda _event: self._run_shortcut(self.update_page_preview))
 
         self.page_listbox.bind(
@@ -1105,6 +1061,12 @@ class UnifiedScanApp(ctk.CTk):
         ):
             self.review_processing_window.destroy()
             self.review_processing_window = None
+        for window_name in ("import_dialog_window", "export_dialog_window"):
+            window = getattr(self, window_name, None)
+            if window is not None and window.winfo_exists():
+                window.destroy()
+            setattr(self, window_name, None)
+        self.import_dialog_listbox = None
         if self.camera is not None:
             self.camera.release()
         if self.autosave_job is not None:
@@ -1203,7 +1165,6 @@ class UnifiedScanApp(ctk.CTk):
             TkinterDnD._require(self)
             targets = (
                 self.page_listbox,
-                getattr(self.import_files_entry, "_entry", self.import_files_entry),
                 getattr(self.page_preview_before_label, "_label", self.page_preview_before_label),
                 getattr(self.page_preview_after_label, "_label", self.page_preview_after_label),
             )
@@ -1228,9 +1189,6 @@ class UnifiedScanApp(ctk.CTk):
     def go_to_review_tab(self) -> None:
         self.tabs.set(self.tab_review_name)
 
-    def go_to_export_tab(self) -> None:
-        self.tabs.set(self.tab_export_name)
-
     def quick_add_files(self) -> None:
         files = filedialog.askopenfilenames(
             title="Add images or PDFs",
@@ -1243,7 +1201,6 @@ class UnifiedScanApp(ctk.CTk):
         if not files:
             return
         self.import_selected_files = self._normalize_selected_files(files)
-        self.import_files_var.set("\n".join(self.import_selected_files))
         self._import_paths(paths=[Path(path) for path in self.import_selected_files])
 
     def quick_add_folder(self) -> None:
@@ -1255,7 +1212,6 @@ class UnifiedScanApp(ctk.CTk):
         if not paths:
             messagebox.showinfo("Add Folder", "No supported images or PDFs were found.")
             return
-        self.import_folder_var.set(str(folder))
         self._import_paths(paths=paths)
 
     def _sync_lens_mode_from_controls(self) -> None:
@@ -1966,187 +1922,295 @@ class UnifiedScanApp(ctk.CTk):
         window.grab_set()
         window.attributes("-topmost", False)
 
-    def _build_import_tab(self, tab: ctk.CTkFrame) -> None:
-        tab.grid_columnconfigure(0, weight=1)
+    @staticmethod
+    def _expand_import_sources(sources: Iterable[Path]) -> list[Path]:
+        supported: list[Path] = []
+        seen: set[str] = set()
+        for source in sources:
+            source = Path(source)
+            candidates = list_supported_in_folder(source) if source.is_dir() else [source]
+            for candidate in candidates:
+                if not candidate.is_file() or candidate.suffix.lower() not in (IMG_EXTS | PDF_EXTS):
+                    continue
+                key = str(candidate.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    supported.append(candidate)
+        return supported
 
-        row_folder = ctk.CTkFrame(tab)
-        row_folder.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
-        row_folder.grid_columnconfigure(0, weight=1)
-        self.import_folder_entry = ctk.CTkEntry(row_folder, textvariable=self.import_folder_var)
-        self.import_folder_entry.grid(row=0, column=0, sticky="ew", padx=(10, 8), pady=10)
-        ctk.CTkButton(
-            row_folder, text="Folder...", width=100, command=self.choose_import_folder
-        ).grid(
-            row=0,
-            column=1,
-            padx=(0, 6),
-            pady=10,
-        )
-        ctk.CTkButton(
-            row_folder, text="Import Folder", width=130, command=self.import_from_folder
-        ).grid(
-            row=0,
-            column=2,
-            padx=(0, 10),
-            pady=10,
-        )
+    def open_import_dialog(self) -> None:
+        if self.import_dialog_window is not None:
+            try:
+                if self.import_dialog_window.winfo_exists():
+                    self.import_dialog_window.lift()
+                    return
+            except tk.TclError:
+                pass
 
-        row_files = ctk.CTkFrame(tab)
-        row_files.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
-        row_files.grid_columnconfigure(0, weight=1)
-        self.import_files_entry = ctk.CTkEntry(row_files, textvariable=self.import_files_var)
-        self.import_files_entry.grid(row=0, column=0, sticky="ew", padx=(10, 8), pady=10)
-        ctk.CTkButton(
-            row_files, text="Files... (multi)", width=110, command=self.choose_import_files
-        ).grid(
-            row=0,
-            column=1,
-            padx=(0, 6),
-            pady=10,
-        )
-        ctk.CTkButton(
-            row_files, text="Import Files", width=130, command=self.import_from_files
-        ).grid(
-            row=0,
-            column=2,
-            padx=(0, 10),
-            pady=10,
-        )
+        window = ctk.CTkToplevel(self)
+        self.import_dialog_window = window
+        window.title("Import")
+        window.geometry("680x460")
+        window.minsize(560, 380)
+        window.transient(self)
 
-        row_options = ctk.CTkFrame(tab)
-        row_options.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 8))
-        ctk.CTkLabel(row_options, text="PDF render DPI").pack(side=ctk.LEFT, padx=(10, 8), pady=10)
-        ctk.CTkEntry(row_options, textvariable=self.import_pdf_dpi_var, width=90).pack(
-            side=ctk.LEFT,
-            padx=(0, 12),
-            pady=10,
-        )
-        ctk.CTkCheckBox(
-            row_options,
-            text="Two-page spread mode (split at detected gutter)",
-            variable=self.import_two_page_mode_var,
-        ).pack(side=ctk.LEFT, padx=(0, 12), pady=10)
+        selected_sources: list[Path] = []
         ctk.CTkLabel(
-            row_options,
-            text="Boundary detection runs on every page during import.",
+            window,
+            text="Import",
+            font=ctk.CTkFont(size=18, weight="bold"),
             anchor="w",
-        ).pack(side=ctk.LEFT, padx=(0, 10), pady=10)
+        ).pack(fill=ctk.X, padx=16, pady=(16, 8))
 
-        row_actions = ctk.CTkFrame(tab)
-        row_actions.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 10))
-        ctk.CTkButton(
-            row_actions, text="Import from Listed Paths", command=self.import_from_files
-        ).pack(
-            side=ctk.LEFT,
-            padx=10,
-            pady=10,
+        source_frame = ctk.CTkFrame(window)
+        source_frame.pack(fill=ctk.BOTH, expand=True, padx=16, pady=(0, 10))
+        source_frame.grid_rowconfigure(0, weight=1)
+        source_frame.grid_columnconfigure(0, weight=1)
+        source_list = tk.Listbox(source_frame, selectmode=tk.EXTENDED, exportselection=False)
+        source_list.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
+        source_scroll = ctk.CTkScrollbar(source_frame, command=source_list.yview)
+        source_scroll.grid(row=0, column=1, sticky="ns", padx=8, pady=8)
+        source_list.configure(yscrollcommand=source_scroll.set)
+        self.import_dialog_listbox = source_list
+
+        def refresh_sources() -> None:
+            source_list.delete(0, tk.END)
+            for source in selected_sources:
+                source_list.insert(tk.END, str(source))
+            self.import_start_button.configure(state=tk.NORMAL if selected_sources else tk.DISABLED)
+
+        def add_sources(items: Iterable[str | Path]) -> None:
+            existing = {str(path.resolve()) for path in selected_sources}
+            for item in items:
+                path = Path(item)
+                key = str(path.resolve())
+                if key not in existing:
+                    existing.add(key)
+                    selected_sources.append(path)
+            refresh_sources()
+
+        def add_files() -> None:
+            files = filedialog.askopenfilenames(
+                parent=window,
+                title="Add images or PDFs",
+                filetypes=[
+                    ("Images and PDF", "*.jpg *.jpeg *.png *.tif *.tiff *.webp *.bmp *.pdf"),
+                    ("All files", "*.*"),
+                ],
+            )
+            add_sources(files)
+
+        def add_folder() -> None:
+            folder = filedialog.askdirectory(parent=window, title="Add image/PDF folder")
+            if folder:
+                add_sources((folder,))
+
+        def remove_selected() -> None:
+            for index in reversed(source_list.curselection()):
+                selected_sources.pop(index)
+            refresh_sources()
+
+        def close_dialog() -> None:
+            self.import_dialog_window = None
+            self.import_dialog_listbox = None
+            window.destroy()
+
+        def paste_clipboard() -> None:
+            close_dialog()
+            self.import_from_clipboard()
+
+        def start_import() -> None:
+            try:
+                paths = self._expand_import_sources(selected_sources)
+            except Exception as exc:
+                messagebox.showerror("Import Error", str(exc), parent=window)
+                return
+            if not paths:
+                messagebox.showwarning(
+                    "Import", "Add at least one supported file or folder.", parent=window
+                )
+                return
+            self.import_selected_files = [str(path) for path in paths]
+            close_dialog()
+            self._import_paths(paths=paths)
+
+        source_actions = ctk.CTkFrame(window, fg_color="transparent")
+        source_actions.pack(fill=ctk.X, padx=16, pady=(0, 10))
+        self.import_add_files_button = ctk.CTkButton(
+            source_actions,
+            text="Add files...",
+            command=add_files,
         )
-        ctk.CTkButton(row_actions, text="Workspace", command=self.go_to_review_tab).pack(
-            side=ctk.LEFT, padx=0, pady=10
-        )
+        self.import_add_files_button.pack(side=ctk.LEFT)
         ctk.CTkButton(
-            row_actions,
-            text="Paste Clipboard",
-            command=self.import_from_clipboard,
-        ).pack(side=ctk.LEFT, padx=8, pady=10)
+            source_actions,
+            text="Add folder...",
+            fg_color="transparent",
+            border_width=1,
+            command=add_folder,
+        ).pack(side=ctk.LEFT, padx=6)
+        ctk.CTkButton(
+            source_actions,
+            text="Paste",
+            fg_color="transparent",
+            border_width=1,
+            command=paste_clipboard,
+        ).pack(side=ctk.LEFT)
+        ctk.CTkButton(
+            source_actions,
+            text="Remove",
+            fg_color="transparent",
+            border_width=1,
+            command=remove_selected,
+        ).pack(side=ctk.RIGHT)
 
-    def _build_export_tab(self, tab: ctk.CTkFrame) -> None:
-        tab.grid_columnconfigure(0, weight=1)
+        footer = ctk.CTkFrame(window, fg_color="transparent")
+        footer.pack(fill=ctk.X, padx=16, pady=(0, 16))
+        ctk.CTkButton(
+            footer,
+            text="Cancel",
+            fg_color="transparent",
+            border_width=1,
+            command=close_dialog,
+        ).pack(side=ctk.RIGHT)
+        self.import_start_button = ctk.CTkButton(
+            footer,
+            text="Import",
+            command=start_import,
+            state=tk.DISABLED,
+        )
+        self.import_start_button.pack(side=ctk.RIGHT, padx=6)
 
-        row_scope = ctk.CTkFrame(tab)
-        row_scope.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
-        ctk.CTkLabel(row_scope, text="Export scope").pack(side=ctk.LEFT, padx=(10, 8), pady=10)
+        window.protocol("WM_DELETE_WINDOW", close_dialog)
+        window.grab_set()
+
+    def open_export_dialog(self) -> None:
+        if not self.session.entries:
+            self._set_status("No pages available for export.")
+            return
+        if self.export_dialog_window is not None:
+            try:
+                if self.export_dialog_window.winfo_exists():
+                    self.export_dialog_window.lift()
+                    return
+            except tk.TclError:
+                pass
+
+        window = ctk.CTkToplevel(self)
+        self.export_dialog_window = window
+        window.title("Export")
+        window.geometry("480x470")
+        window.resizable(False, False)
+        window.transient(self)
+
+        mode_var = self.export_dialog_mode_var
+        scope_var = self.export_dialog_scope_var
+        dpi_var = self.export_dialog_dpi_var
+        image_format_var = self.export_dialog_format_var
+        mode_var.set("PDF")
+        scope_var.set(self.export_scope_var.get())
+        dpi_var.set(self.export_pdf_dpi_var.get())
+        image_format_var.set(self.export_format_var.get())
+
+        def close_dialog() -> None:
+            self.export_dialog_window = None
+            window.destroy()
+
+        def quick_export() -> None:
+            self.export_scope_var.set("All pages")
+            self.export_pdf_dpi_var.set(300)
+            self.export_pdf_path_var.set("")
+            close_dialog()
+            self.export_to_pdf()
+
+        def custom_export() -> None:
+            self.export_scope_var.set(scope_var.get())
+            if mode_var.get() == "PDF":
+                self.export_pdf_dpi_var.set(dpi_var.get())
+                self.export_pdf_path_var.set("")
+                close_dialog()
+                self.export_to_pdf()
+            else:
+                self.export_format_var.set(image_format_var.get())
+                self.export_dir_var.set("")
+                close_dialog()
+                self.export_to_files()
+
+        ctk.CTkLabel(
+            window,
+            text="Quick export",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            anchor="w",
+        ).pack(fill=ctk.X, padx=16, pady=(16, 8))
+        self.export_quick_button = ctk.CTkButton(
+            window,
+            text="Export all pages to PDF",
+            fg_color="#2f855a",
+            hover_color="#276749",
+            command=quick_export,
+        )
+        self.export_quick_button.pack(fill=ctk.X, padx=16, pady=(0, 18))
+
+        ctk.CTkLabel(
+            window,
+            text="Custom export",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            anchor="w",
+        ).pack(fill=ctk.X, padx=16, pady=(0, 8))
+        mode_control = ctk.CTkSegmentedButton(window, values=["PDF", "Images"], variable=mode_var)
+        mode_control.pack(fill=ctk.X, padx=16, pady=(0, 10))
+
+        scope_row = ctk.CTkFrame(window, fg_color="transparent")
+        scope_row.pack(fill=ctk.X, padx=16, pady=(0, 8))
+        ctk.CTkLabel(scope_row, text="Pages").pack(side=ctk.LEFT)
         ctk.CTkOptionMenu(
-            row_scope,
+            scope_row,
             values=["All pages", "Selected pages"],
-            variable=self.export_scope_var,
-        ).pack(side=ctk.LEFT, padx=(0, 12), pady=10)
+            variable=scope_var,
+            width=180,
+        ).pack(side=ctk.RIGHT)
 
-        ctk.CTkLabel(row_scope, text="PDF DPI").pack(side=ctk.LEFT, padx=(0, 8), pady=10)
-        ctk.CTkEntry(row_scope, textvariable=self.export_pdf_dpi_var, width=90).pack(
-            side=ctk.LEFT,
-            padx=(0, 10),
-            pady=10,
-        )
-
-        row_pdf = ctk.CTkFrame(tab)
-        row_pdf.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
-        row_pdf.grid_columnconfigure(0, weight=1)
-        ctk.CTkEntry(row_pdf, textvariable=self.export_pdf_path_var).grid(
-            row=0,
-            column=0,
-            sticky="ew",
-            padx=(10, 8),
-            pady=10,
-        )
-        ctk.CTkButton(
-            row_pdf, text="Save PDF...", width=120, command=self.choose_export_pdf_path
-        ).grid(
-            row=0,
-            column=1,
-            padx=(0, 6),
-            pady=10,
-        )
-        self.export_tab_pdf_button = ctk.CTkButton(
-            row_pdf,
-            text="Export PDF",
-            width=120,
-            command=self.export_to_pdf,
-            state=tk.NORMAL if len(self.session) else tk.DISABLED,
-        )
-        self.export_tab_pdf_button.grid(
-            row=0,
-            column=2,
-            padx=(0, 10),
-            pady=10,
-        )
-
-        row_files = ctk.CTkFrame(tab)
-        row_files.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 10))
-        row_files.grid_columnconfigure(0, weight=1)
-        ctk.CTkEntry(row_files, textvariable=self.export_dir_var).grid(
-            row=0,
-            column=0,
-            sticky="ew",
-            padx=(10, 8),
-            pady=10,
-        )
-        ctk.CTkButton(
-            row_files, text="Dir...", width=80, command=self.choose_export_directory
-        ).grid(
-            row=0,
-            column=1,
-            padx=(0, 6),
-            pady=10,
-        )
+        option_host = ctk.CTkFrame(window, fg_color="transparent")
+        option_host.pack(fill=ctk.X, padx=16, pady=(0, 10))
+        pdf_options = ctk.CTkFrame(option_host, fg_color="transparent")
+        ctk.CTkLabel(pdf_options, text="PDF DPI").pack(side=ctk.LEFT)
+        ctk.CTkEntry(pdf_options, textvariable=dpi_var, width=100).pack(side=ctk.RIGHT)
+        image_options = ctk.CTkFrame(option_host, fg_color="transparent")
+        ctk.CTkLabel(image_options, text="Image format").pack(side=ctk.LEFT)
         ctk.CTkOptionMenu(
-            row_files,
-            values=["png", "jpg", "jpeg", "webp", "tif"],
-            variable=self.export_format_var,
-            width=100,
-        ).grid(row=0, column=2, padx=(0, 6), pady=10)
-        self.export_tab_files_button = ctk.CTkButton(
-            row_files,
-            text="Export Files",
-            width=120,
-            command=self.export_to_files,
-            state=tk.NORMAL if len(self.session) else tk.DISABLED,
+            image_options,
+            values=["png", "jpg", "webp", "tif"],
+            variable=image_format_var,
+            width=140,
+        ).pack(side=ctk.RIGHT)
+
+        def update_mode(_value: str | None = None) -> None:
+            pdf_options.pack_forget()
+            image_options.pack_forget()
+            options = pdf_options if mode_var.get() == "PDF" else image_options
+            options.pack(fill=ctk.X)
+
+        mode_control.configure(command=update_mode)
+        update_mode()
+
+        footer = ctk.CTkFrame(window, fg_color="transparent")
+        footer.pack(side=ctk.BOTTOM, fill=ctk.X, padx=16, pady=16)
+        ctk.CTkButton(
+            footer,
+            text="Cancel",
+            fg_color="transparent",
+            border_width=1,
+            command=close_dialog,
+        ).pack(side=ctk.RIGHT)
+        self.export_custom_button = ctk.CTkButton(
+            footer,
+            text="Export with settings",
+            command=custom_export,
         )
-        self.export_tab_files_button.grid(row=0, column=3, padx=(0, 10), pady=10)
+        self.export_custom_button.pack(side=ctk.RIGHT, padx=6)
 
-        row_note = ctk.CTkFrame(tab)
-        row_note.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 10))
-        ctk.CTkLabel(
-            row_note,
-            text="This build exports processed images and merged PDF only (no OCR stage).",
-            anchor="w",
-        ).pack(fill=ctk.X, padx=10, pady=8)
-
-    def _parse_import_files_text(self, raw_text: str) -> list[str]:
-        parts = [
-            part.strip().strip('"') for part in re.split(r"[;\n\r]+", raw_text) if part.strip()
-        ]
-        return parts
+        window.protocol("WM_DELETE_WINDOW", close_dialog)
+        window.grab_set()
 
     def _normalize_selected_files(self, files: Iterable[str]) -> list[str]:
         unique: list[str] = []
@@ -2159,40 +2223,13 @@ class UnifiedScanApp(ctk.CTk):
             unique.append(key)
         return unique
 
-    def choose_import_folder(self) -> None:
-        path = filedialog.askdirectory(title="Select input folder")
-        if path:
-            self.import_folder_var.set(path)
-
-    def choose_import_files(self) -> None:
-        files = filedialog.askopenfilenames(
-            title="Select image/PDF files",
-            filetypes=[
-                (
-                    "Image and PDF",
-                    "*.jpg *.jpeg *.png *.tif *.tiff *.webp *.bmp *.pdf",
-                ),
-                ("All files", "*.*"),
-            ],
-            multiple=True,
-        )
-        if files:
-            self.import_selected_files = self._normalize_selected_files(files)
-            self.import_files_var.set("\n".join(self.import_selected_files))
-
     def _on_drop_files(self, event) -> str:
         paths = paths_from_tk_drop(str(event.data), self.tk.splitlist)
-        supported: list[Path] = []
-        for path in paths:
-            if path.is_dir():
-                supported.extend(list_supported_in_folder(path))
-            elif path.is_file() and path.suffix.lower() in (IMG_EXTS | PDF_EXTS):
-                supported.append(path)
+        supported = self._expand_import_sources(paths)
         if not supported:
             self._set_status("Drop contained no supported images or PDFs.")
             return "break"
         self.import_selected_files = self._normalize_selected_files(map(str, supported))
-        self.import_files_var.set("\n".join(self.import_selected_files))
         self._import_paths(paths=[Path(path) for path in self.import_selected_files])
         return "break"
 
@@ -2213,50 +2250,13 @@ class UnifiedScanApp(ctk.CTk):
                 return
 
             paths = clipboard_file_paths(payload)
-            supported = [
-                path
-                for path in paths
-                if path.is_file() and path.suffix.lower() in (IMG_EXTS | PDF_EXTS)
-            ]
+            supported = self._expand_import_sources(paths)
             if not supported:
                 raise RuntimeError("Clipboard does not contain an image or supported files.")
             self._import_paths(paths=supported)
         except Exception as exc:
             messagebox.showerror("Clipboard Import Error", str(exc))
             self._set_status("Clipboard import failed")
-
-    def import_from_folder(self) -> None:
-        try:
-            folder = Path(self.import_folder_var.get().strip())
-            paths = list_supported_in_folder(folder)
-            if not paths:
-                raise RuntimeError("No supported image/PDF files found in selected folder.")
-            self._import_paths(paths=paths)
-        except Exception as exc:
-            messagebox.showerror("Import Error", str(exc))
-            self._set_status("Folder import failed")
-
-    def import_from_files(self) -> None:
-        try:
-            text_paths = self._parse_import_files_text(self.import_files_var.get())
-            raw = text_paths if text_paths else list(self.import_selected_files)
-            if not raw:
-                raise RuntimeError("No files selected.")
-            paths = [Path(item) for item in raw]
-            missing = [path for path in paths if not path.exists() or not path.is_file()]
-            if missing:
-                raise RuntimeError(
-                    "Some selected files do not exist:\n" + "\n".join(map(str, missing))
-                )
-            unsupported = [
-                path for path in paths if path.suffix.lower() not in (IMG_EXTS | PDF_EXTS)
-            ]
-            if unsupported:
-                raise RuntimeError("Unsupported file type(s):\n" + "\n".join(map(str, unsupported)))
-            self._import_paths(paths=paths)
-        except Exception as exc:
-            messagebox.showerror("Import Error", str(exc))
-            self._set_status("File import failed")
 
     def _import_paths(self, *, paths: list[Path]) -> None:
         pdf_dpi = int(self.import_pdf_dpi_var.get())
@@ -2382,10 +2382,7 @@ class UnifiedScanApp(ctk.CTk):
         export_state = tk.NORMAL if page_count else tk.DISABLED
         for button_name in (
             "toolbar_export_button",
-            "workspace_export_pdf_button",
-            "workspace_export_files_button",
-            "export_tab_pdf_button",
-            "export_tab_files_button",
+            "workspace_export_button",
         ):
             button = getattr(self, button_name, None)
             if button is not None:
@@ -4515,20 +4512,6 @@ class UnifiedScanApp(ctk.CTk):
             on_error=snapshot_dir.cleanup,
         ):
             snapshot_dir.cleanup()
-
-    def choose_export_pdf_path(self) -> None:
-        path = filedialog.asksaveasfilename(
-            title="Save merged PDF as",
-            defaultextension=".pdf",
-            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
-        )
-        if path:
-            self.export_pdf_path_var.set(path)
-
-    def choose_export_directory(self) -> None:
-        path = filedialog.askdirectory(title="Select output directory")
-        if path:
-            self.export_dir_var.set(path)
 
     def _entries_for_export(self):
         if self.export_scope_var.get() == "Selected pages":

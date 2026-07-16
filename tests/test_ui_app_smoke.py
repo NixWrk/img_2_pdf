@@ -56,13 +56,12 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.preview_mode_var.get() == "Processed"
         assert app.page_preview_after_frame.winfo_manager() == "grid"
         assert app.page_preview_before_frame.winfo_manager() == ""
+        assert app.tabs._name_list == [app.tab_review_name, app.tab_scan_name]
         app.preprocess_illumination_var.set(True)
         assert app._current_preprocess_settings().correct_illumination is True
-        assert app.import_files_entry.winfo_exists()
         assert app._drag_drop_error is None
         assert app.toolbar_export_button.cget("state") == "disabled"
-        assert app.export_tab_pdf_button.cget("state") == "disabled"
-        assert app.export_tab_files_button.cget("state") == "disabled"
+        assert app.workspace_export_button.cget("state") == "disabled"
         assert app.cancel_task_button.cget("state") == "disabled"
         assert app.move_pages_up_button.cget("state") == "disabled"
         assert app.move_pages_down_button.cget("state") == "disabled"
@@ -82,8 +81,15 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
             "uniscan.ui.app.filedialog.askopenfilenames",
             lambda **_kwargs: (str(source),),
         )
-        app.quick_add_files()
+        app.open_import_dialog()
+        app.update()
+        assert app.import_dialog_window.title() == "Import"
+        assert app.grab_current() == app.import_dialog_window
+        app.import_add_files_button.invoke()
+        assert app.import_dialog_listbox.size() == 1
+        app.import_start_button.invoke()
         assert imports[-1] == [source]
+        assert app.import_dialog_window is None
 
         first = np.full((90, 120, 3), 220, dtype=np.uint8)
         second = np.full((90, 120, 3), 180, dtype=np.uint8)
@@ -93,8 +99,33 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         app.update()
         assert app.page_count_var.get() == "2 pages"
         assert app.toolbar_export_button.cget("state") == "normal"
-        assert app.export_tab_pdf_button.cget("state") == "normal"
-        assert app.export_tab_files_button.cget("state") == "normal"
+        assert app.workspace_export_button.cget("state") == "normal"
+        export_calls: list[tuple[str, str, int | str]] = []
+        monkeypatch.setattr(
+            app,
+            "export_to_pdf",
+            lambda: export_calls.append(
+                ("pdf", app.export_scope_var.get(), app.export_pdf_dpi_var.get())
+            ),
+        )
+        monkeypatch.setattr(
+            app,
+            "export_to_files",
+            lambda: export_calls.append(
+                ("images", app.export_scope_var.get(), app.export_format_var.get())
+            ),
+        )
+        app.open_export_dialog()
+        app.export_quick_button.invoke()
+        assert export_calls[-1] == ("pdf", "All pages", 300)
+        assert app.export_dialog_window is None
+        app.open_export_dialog()
+        app.export_dialog_mode_var.set("Images")
+        app.export_dialog_scope_var.set("Selected pages")
+        app.export_dialog_format_var.set("jpg")
+        app.export_custom_button.invoke()
+        assert export_calls[-1] == ("images", "Selected pages", "jpg")
+        assert app.export_dialog_window is None
         assert app._single_selected_entry()[1].name == "second.png"
         assert app.move_pages_up_button.cget("state") == "normal"
         assert app.move_pages_down_button.cget("state") == "disabled"
