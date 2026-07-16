@@ -60,8 +60,12 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         app.preprocess_illumination_var.set(True)
         assert app._current_preprocess_settings().correct_illumination is True
         assert app._drag_drop_error is None
-        assert app.toolbar_export_button.cget("state") == "disabled"
-        assert app.workspace_export_button.cget("state") == "disabled"
+        assert app.toolbar_add_files_button.cget("text") == "+ Add files"
+        assert app.toolbar_add_folder_button.cget("text") == "Add folder"
+        assert app.toolbar_paste_button.cget("text") == "Paste"
+        assert app.toolbar_camera_button.cget("text") == "Camera"
+        assert app.toolbar_export_pdf_button.cget("state") == "disabled"
+        assert app.toolbar_export_options_button.cget("state") == "disabled"
         assert app.cancel_task_button.cget("state") == "disabled"
         assert app.move_pages_up_button.cget("state") == "disabled"
         assert app.move_pages_down_button.cget("state") == "disabled"
@@ -81,15 +85,8 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
             "uniscan.ui.app.filedialog.askopenfilenames",
             lambda **_kwargs: (str(source),),
         )
-        app.open_import_dialog()
-        app.update()
-        assert app.import_dialog_window.title() == "Import"
-        assert app.grab_current() == app.import_dialog_window
-        app.import_add_files_button.invoke()
-        assert app.import_dialog_listbox.size() == 1
-        app.import_start_button.invoke()
+        app.toolbar_add_files_button.invoke()
         assert imports[-1] == [source]
-        assert app.import_dialog_window is None
 
         first = np.full((90, 120, 3), 220, dtype=np.uint8)
         second = np.full((90, 120, 3), 180, dtype=np.uint8)
@@ -98,8 +95,8 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         app.refresh_page_list(keep_index=1)
         app.update()
         assert app.page_count_var.get() == "2 pages"
-        assert app.toolbar_export_button.cget("state") == "normal"
-        assert app.workspace_export_button.cget("state") == "normal"
+        assert app.toolbar_export_pdf_button.cget("state") == "normal"
+        assert app.toolbar_export_options_button.cget("state") == "normal"
         export_calls: list[tuple[str, str, int | str]] = []
         monkeypatch.setattr(
             app,
@@ -115,10 +112,8 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
                 ("images", app.export_scope_var.get(), app.export_format_var.get())
             ),
         )
-        app.open_export_dialog()
-        app.export_quick_button.invoke()
+        app.toolbar_export_pdf_button.invoke()
         assert export_calls[-1] == ("pdf", "All pages", 300)
-        assert app.export_dialog_window is None
         app.open_export_dialog()
         app.export_dialog_mode_var.set("Images")
         app.export_dialog_scope_var.set("Selected pages")
@@ -262,9 +257,18 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.page_preview_after_frame.winfo_manager() == "grid"
         assert app.geometry_summary_var.get() != "Wave preview: pending"
         app.deiconify()
+        app.geometry("1100x720")
+        app.update()
+        _pump_until(
+            app,
+            lambda: (
+                app.page_preview_after_label.winfo_width() > 1
+                and app.page_preview_after_label.winfo_height() > 1
+            ),
+        )
         _pump_until(app, lambda: app.review_preview_resize_job is None)
         initial_preview_size = app.page_preview_after_photo.cget("size")
-        app.geometry("1560x980")
+        app.geometry("1500x920")
         app.update()
         _pump_until(
             app,
@@ -276,6 +280,10 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         resized_preview_size = app.page_preview_after_photo.cget("size")
         assert resized_preview_size[0] > initial_preview_size[0]
         assert resized_preview_size[1] > initial_preview_size[1]
+        app.toolbar_camera_button.invoke()
+        assert app.tabs.get() == app.tab_scan_name
+        app.go_to_review_tab()
+        app.update()
         app.move_selected_up()
         assert app.session.entries[0].name == "second.png"
         assert app.move_pages_up_button.cget("state") == "disabled"

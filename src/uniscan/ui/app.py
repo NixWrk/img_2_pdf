@@ -294,8 +294,6 @@ class UnifiedScanApp(ctk.CTk):
         self.review_preview_cancel_event = threading.Event()
         self.review_preview_generation = 0
         self.review_processing_window: ctk.CTkToplevel | None = None
-        self.import_dialog_window: ctk.CTkToplevel | None = None
-        self.import_dialog_listbox: tk.Listbox | None = None
         self.export_dialog_window: ctk.CTkToplevel | None = None
         self.corner_editor_window: ctk.CTkToplevel | None = None
         self.corner_source_canvas: tk.Canvas | None = None
@@ -418,21 +416,58 @@ class UnifiedScanApp(ctk.CTk):
 
         toolbar = ctk.CTkFrame(container)
         toolbar.pack(fill=ctk.X, padx=12, pady=(6, 4))
-        ctk.CTkButton(
+        self.toolbar_add_files_button = ctk.CTkButton(
             toolbar,
-            text="Import...",
+            text="+ Add files",
             width=110,
-            command=self.open_import_dialog,
-        ).pack(side=ctk.LEFT, padx=8, pady=8)
-        self.toolbar_export_button = ctk.CTkButton(
+            command=self.quick_add_files,
+        )
+        self.toolbar_add_files_button.pack(side=ctk.LEFT, padx=(8, 4), pady=8)
+        self.toolbar_add_folder_button = ctk.CTkButton(
             toolbar,
-            text="Export...",
+            text="Add folder",
+            width=105,
+            fg_color="transparent",
+            border_width=1,
+            command=self.quick_add_folder,
+        )
+        self.toolbar_add_folder_button.pack(side=ctk.LEFT, padx=4, pady=8)
+        self.toolbar_paste_button = ctk.CTkButton(
+            toolbar,
+            text="Paste",
+            width=80,
+            fg_color="transparent",
+            border_width=1,
+            command=self.import_from_clipboard,
+        )
+        self.toolbar_paste_button.pack(side=ctk.LEFT, padx=4, pady=8)
+        self.toolbar_camera_button = ctk.CTkButton(
+            toolbar,
+            text="Camera",
+            width=90,
+            fg_color="transparent",
+            border_width=1,
+            command=lambda: self.tabs.set(self.tab_scan_name),
+        )
+        self.toolbar_camera_button.pack(side=ctk.LEFT, padx=4, pady=8)
+        self.toolbar_export_pdf_button = ctk.CTkButton(
+            toolbar,
+            text="Export PDF",
             width=120,
             fg_color="#2f855a",
             hover_color="#276749",
+            command=self.quick_export_pdf,
+        )
+        self.toolbar_export_pdf_button.pack(side=ctk.RIGHT, padx=(4, 8), pady=8)
+        self.toolbar_export_options_button = ctk.CTkButton(
+            toolbar,
+            text="Export options...",
+            width=135,
+            fg_color="transparent",
+            border_width=1,
             command=self.open_export_dialog,
         )
-        self.toolbar_export_button.pack(side=ctk.RIGHT, padx=8, pady=8)
+        self.toolbar_export_options_button.pack(side=ctk.RIGHT, padx=4, pady=8)
 
         self.status_frame = ctk.CTkFrame(container)
         self.status_frame.pack(side=ctk.BOTTOM, fill=ctk.X, padx=12, pady=(0, 12))
@@ -994,28 +1029,14 @@ class UnifiedScanApp(ctk.CTk):
         )
         self.apply_processing_button.pack(fill=ctk.X, padx=6, pady=(0, 14))
 
-        ctk.CTkLabel(
-            processing,
-            text="Export",
-            font=ctk.CTkFont(size=15, weight="bold"),
-            anchor="w",
-        ).pack(fill=ctk.X, padx=6, pady=(2, 6))
-        self.workspace_export_button = ctk.CTkButton(
-            processing,
-            text="Export...",
-            fg_color="#2f855a",
-            hover_color="#276749",
-            command=self.open_export_dialog,
-        )
-        self.workspace_export_button.pack(fill=ctk.X, padx=6, pady=(0, 10))
         self.refresh_page_list()
 
     def _bind_shortcuts(self) -> None:
         """Bind the common document actions without stealing text-entry shortcuts."""
-        self.bind("<Control-o>", lambda _event: self._run_shortcut(self.open_import_dialog))
+        self.bind("<Control-o>", lambda _event: self._run_shortcut(self.quick_add_files))
         self.bind("<Control-Shift-O>", lambda _event: self._run_shortcut(self.quick_add_folder))
         self.bind("<Control-Shift-C>", lambda _event: self._run_shortcut(self.capture_one))
-        self.bind("<Control-e>", lambda _event: self._run_shortcut(self.open_export_dialog))
+        self.bind("<Control-e>", lambda _event: self._run_shortcut(self.quick_export_pdf))
         self.bind("<F5>", lambda _event: self._run_shortcut(self.update_page_preview))
 
         self.page_listbox.bind(
@@ -1061,12 +1082,9 @@ class UnifiedScanApp(ctk.CTk):
         ):
             self.review_processing_window.destroy()
             self.review_processing_window = None
-        for window_name in ("import_dialog_window", "export_dialog_window"):
-            window = getattr(self, window_name, None)
-            if window is not None and window.winfo_exists():
-                window.destroy()
-            setattr(self, window_name, None)
-        self.import_dialog_listbox = None
+        if self.export_dialog_window is not None and self.export_dialog_window.winfo_exists():
+            self.export_dialog_window.destroy()
+        self.export_dialog_window = None
         if self.camera is not None:
             self.camera.release()
         if self.autosave_job is not None:
@@ -1938,151 +1956,14 @@ class UnifiedScanApp(ctk.CTk):
                     supported.append(candidate)
         return supported
 
-    def open_import_dialog(self) -> None:
-        if self.import_dialog_window is not None:
-            try:
-                if self.import_dialog_window.winfo_exists():
-                    self.import_dialog_window.lift()
-                    return
-            except tk.TclError:
-                pass
-
-        window = ctk.CTkToplevel(self)
-        self.import_dialog_window = window
-        window.title("Import")
-        window.geometry("680x460")
-        window.minsize(560, 380)
-        window.transient(self)
-
-        selected_sources: list[Path] = []
-        ctk.CTkLabel(
-            window,
-            text="Import",
-            font=ctk.CTkFont(size=18, weight="bold"),
-            anchor="w",
-        ).pack(fill=ctk.X, padx=16, pady=(16, 8))
-
-        source_frame = ctk.CTkFrame(window)
-        source_frame.pack(fill=ctk.BOTH, expand=True, padx=16, pady=(0, 10))
-        source_frame.grid_rowconfigure(0, weight=1)
-        source_frame.grid_columnconfigure(0, weight=1)
-        source_list = tk.Listbox(source_frame, selectmode=tk.EXTENDED, exportselection=False)
-        source_list.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
-        source_scroll = ctk.CTkScrollbar(source_frame, command=source_list.yview)
-        source_scroll.grid(row=0, column=1, sticky="ns", padx=8, pady=8)
-        source_list.configure(yscrollcommand=source_scroll.set)
-        self.import_dialog_listbox = source_list
-
-        def refresh_sources() -> None:
-            source_list.delete(0, tk.END)
-            for source in selected_sources:
-                source_list.insert(tk.END, str(source))
-            self.import_start_button.configure(state=tk.NORMAL if selected_sources else tk.DISABLED)
-
-        def add_sources(items: Iterable[str | Path]) -> None:
-            existing = {str(path.resolve()) for path in selected_sources}
-            for item in items:
-                path = Path(item)
-                key = str(path.resolve())
-                if key not in existing:
-                    existing.add(key)
-                    selected_sources.append(path)
-            refresh_sources()
-
-        def add_files() -> None:
-            files = filedialog.askopenfilenames(
-                parent=window,
-                title="Add images or PDFs",
-                filetypes=[
-                    ("Images and PDF", "*.jpg *.jpeg *.png *.tif *.tiff *.webp *.bmp *.pdf"),
-                    ("All files", "*.*"),
-                ],
-            )
-            add_sources(files)
-
-        def add_folder() -> None:
-            folder = filedialog.askdirectory(parent=window, title="Add image/PDF folder")
-            if folder:
-                add_sources((folder,))
-
-        def remove_selected() -> None:
-            for index in reversed(source_list.curselection()):
-                selected_sources.pop(index)
-            refresh_sources()
-
-        def close_dialog() -> None:
-            self.import_dialog_window = None
-            self.import_dialog_listbox = None
-            window.destroy()
-
-        def paste_clipboard() -> None:
-            close_dialog()
-            self.import_from_clipboard()
-
-        def start_import() -> None:
-            try:
-                paths = self._expand_import_sources(selected_sources)
-            except Exception as exc:
-                messagebox.showerror("Import Error", str(exc), parent=window)
-                return
-            if not paths:
-                messagebox.showwarning(
-                    "Import", "Add at least one supported file or folder.", parent=window
-                )
-                return
-            self.import_selected_files = [str(path) for path in paths]
-            close_dialog()
-            self._import_paths(paths=paths)
-
-        source_actions = ctk.CTkFrame(window, fg_color="transparent")
-        source_actions.pack(fill=ctk.X, padx=16, pady=(0, 10))
-        self.import_add_files_button = ctk.CTkButton(
-            source_actions,
-            text="Add files...",
-            command=add_files,
-        )
-        self.import_add_files_button.pack(side=ctk.LEFT)
-        ctk.CTkButton(
-            source_actions,
-            text="Add folder...",
-            fg_color="transparent",
-            border_width=1,
-            command=add_folder,
-        ).pack(side=ctk.LEFT, padx=6)
-        ctk.CTkButton(
-            source_actions,
-            text="Paste",
-            fg_color="transparent",
-            border_width=1,
-            command=paste_clipboard,
-        ).pack(side=ctk.LEFT)
-        ctk.CTkButton(
-            source_actions,
-            text="Remove",
-            fg_color="transparent",
-            border_width=1,
-            command=remove_selected,
-        ).pack(side=ctk.RIGHT)
-
-        footer = ctk.CTkFrame(window, fg_color="transparent")
-        footer.pack(fill=ctk.X, padx=16, pady=(0, 16))
-        ctk.CTkButton(
-            footer,
-            text="Cancel",
-            fg_color="transparent",
-            border_width=1,
-            command=close_dialog,
-        ).pack(side=ctk.RIGHT)
-        self.import_start_button = ctk.CTkButton(
-            footer,
-            text="Import",
-            command=start_import,
-            state=tk.DISABLED,
-        )
-        self.import_start_button.pack(side=ctk.RIGHT, padx=6)
-
-        window.protocol("WM_DELETE_WINDOW", close_dialog)
-        window.grab_set()
+    def quick_export_pdf(self) -> None:
+        if not self.session.entries:
+            self._set_status("No pages available for export.")
+            return
+        self.export_scope_var.set("All pages")
+        self.export_pdf_dpi_var.set(300)
+        self.export_pdf_path_var.set("")
+        self.export_to_pdf()
 
     def open_export_dialog(self) -> None:
         if not self.session.entries:
@@ -2098,8 +1979,8 @@ class UnifiedScanApp(ctk.CTk):
 
         window = ctk.CTkToplevel(self)
         self.export_dialog_window = window
-        window.title("Export")
-        window.geometry("480x470")
+        window.title("Export options")
+        window.geometry("480x350")
         window.resizable(False, False)
         window.transient(self)
 
@@ -2116,13 +1997,6 @@ class UnifiedScanApp(ctk.CTk):
             self.export_dialog_window = None
             window.destroy()
 
-        def quick_export() -> None:
-            self.export_scope_var.set("All pages")
-            self.export_pdf_dpi_var.set(300)
-            self.export_pdf_path_var.set("")
-            close_dialog()
-            self.export_to_pdf()
-
         def custom_export() -> None:
             self.export_scope_var.set(scope_var.get())
             if mode_var.get() == "PDF":
@@ -2138,25 +2012,10 @@ class UnifiedScanApp(ctk.CTk):
 
         ctk.CTkLabel(
             window,
-            text="Quick export",
+            text="Export options",
             font=ctk.CTkFont(size=18, weight="bold"),
             anchor="w",
         ).pack(fill=ctk.X, padx=16, pady=(16, 8))
-        self.export_quick_button = ctk.CTkButton(
-            window,
-            text="Export all pages to PDF",
-            fg_color="#2f855a",
-            hover_color="#276749",
-            command=quick_export,
-        )
-        self.export_quick_button.pack(fill=ctk.X, padx=16, pady=(0, 18))
-
-        ctk.CTkLabel(
-            window,
-            text="Custom export",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            anchor="w",
-        ).pack(fill=ctk.X, padx=16, pady=(0, 8))
         mode_control = ctk.CTkSegmentedButton(window, values=["PDF", "Images"], variable=mode_var)
         mode_control.pack(fill=ctk.X, padx=16, pady=(0, 10))
 
@@ -2381,8 +2240,8 @@ class UnifiedScanApp(ctk.CTk):
         self.page_count_var.set(f"{page_count} page" if page_count == 1 else f"{page_count} pages")
         export_state = tk.NORMAL if page_count else tk.DISABLED
         for button_name in (
-            "toolbar_export_button",
-            "workspace_export_button",
+            "toolbar_export_pdf_button",
+            "toolbar_export_options_button",
         ):
             button = getattr(self, button_name, None)
             if button is not None:
