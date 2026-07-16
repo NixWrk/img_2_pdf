@@ -2311,21 +2311,44 @@ class UnifiedScanApp(ctk.CTk):
             menu.entryconfigure(1, state=tk.NORMAL if can_move_down else tk.DISABLED)
             menu.entryconfigure(3, state=tk.NORMAL if selected else tk.DISABLED)
 
-    def _page_index_at_y(self, y: int) -> int | None:
+    def _page_index_at_y(self, y: int, *, clamp: bool = False) -> int | None:
         if self.page_listbox.size() == 0:
             return None
+        if clamp:
+            y = max(0, min(y, max(0, self.page_listbox.winfo_height() - 1)))
         index = int(self.page_listbox.nearest(y))
         bounds = self.page_listbox.bbox(index)
-        if bounds is None or not bounds[1] <= y <= bounds[1] + bounds[3]:
+        if bounds is None:
+            return None
+        if not clamp and not bounds[1] <= y <= bounds[1] + bounds[3]:
             return None
         return index
+
+    def _page_drop_position(self, y: int) -> tuple[int, bool] | None:
+        target_index = self._page_index_at_y(y, clamp=True)
+        if target_index is None:
+            return None
+        bounds = self.page_listbox.bbox(target_index)
+        if bounds is None:
+            return None
+        if y <= bounds[1]:
+            return target_index, False
+        if y >= bounds[1] + bounds[3]:
+            return target_index, True
+        return target_index, y >= bounds[1] + bounds[3] / 2
 
     def _on_page_drag_start(self, event) -> None:
         index = self._page_index_at_y(event.y)
         self.page_drag_state = (
             None
             if index is None
-            else {"index": index, "start_y": event.y, "entry_ids": (), "dragged": False}
+            else {
+                "index": index,
+                "start_y": event.y,
+                "entry_ids": (),
+                "dragged": False,
+                "moved": False,
+            }
         )
 
     def _on_page_drag_motion(self, event) -> str | None:
@@ -2340,6 +2363,23 @@ class UnifiedScanApp(ctk.CTk):
             state["entry_ids"] = tuple(self.session.entries[index].entry_id for index in indexes)
             state["dragged"] = True
             self.page_listbox.configure(cursor="fleur")
+        drop_position = self._page_drop_position(event.y)
+        if drop_position is None:
+            return "break"
+        target_index, place_after = drop_position
+        entry_ids = tuple(state["entry_ids"])
+        target_entry_id = self.session.entries[target_index].entry_id
+        if self.session.reorder_entries(
+            entry_ids,
+            target_entry_id,
+            place_after=place_after,
+        ):
+            state["moved"] = True
+            self.refresh_page_list(keep_entry_ids=entry_ids)
+            direction = "after" if place_after else "before"
+            self._set_status(
+                f"Moving {len(entry_ids)} page(s) {direction} page {target_index + 1}"
+            )
         return "break"
 
     def _on_page_drag_end(self, event) -> str | None:
@@ -2348,21 +2388,8 @@ class UnifiedScanApp(ctk.CTk):
         self.page_listbox.configure(cursor="")
         if state is None or not state["dragged"]:
             return None
-        target_index = self._page_index_at_y(event.y)
-        if target_index is None:
-            return "break"
-        bounds = self.page_listbox.bbox(target_index)
-        if bounds is None:
-            return "break"
         entry_ids = tuple(state["entry_ids"])
-        target_entry_id = self.session.entries[target_index].entry_id
-        place_after = event.y >= bounds[1] + bounds[3] / 2
-        if self.session.reorder_entries(
-            entry_ids,
-            target_entry_id,
-            place_after=place_after,
-        ):
-            self.refresh_page_list(keep_entry_ids=entry_ids)
+        if state["moved"]:
             self._set_status(f"Moved {len(entry_ids)} page(s)")
         return "break"
 

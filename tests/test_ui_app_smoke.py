@@ -172,13 +172,48 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         start_bounds = app.page_listbox.bbox(1)
         target_bounds = app.page_listbox.bbox(0)
         assert start_bounds is not None and target_bounds is not None
-        app._on_page_drag_start(SimpleNamespace(y=start_bounds[1] + start_bounds[3] // 2))
-        assert (
-            app._on_page_drag_motion(SimpleNamespace(y=target_bounds[1])) == "break"
+        app.page_listbox.event_generate(
+            "<ButtonPress-1>",
+            x=start_bounds[0] + 8,
+            y=start_bounds[1] + start_bounds[3] // 2,
         )
-        assert app._on_page_drag_end(SimpleNamespace(y=target_bounds[1])) == "break"
+        app.update()
+        app.page_listbox.event_generate(
+            "<B1-Motion>",
+            x=target_bounds[0] + 8,
+            y=target_bounds[1] + 2,
+            state=0x0100,
+        )
+        app.update()
+        app.page_listbox.event_generate(
+            "<ButtonRelease-1>",
+            x=target_bounds[0] + 8,
+            y=target_bounds[1] + 2,
+        )
+        app.update()
         assert [entry.name for entry in app.session.entries] == ["second.png", "first.png"]
-        app.move_selected_down()
+        start_bounds = app.page_listbox.bbox(0)
+        assert start_bounds is not None
+        drop_y = app.page_listbox.winfo_height() - 2
+        app.page_listbox.event_generate(
+            "<ButtonPress-1>",
+            x=start_bounds[0] + 8,
+            y=start_bounds[1] + start_bounds[3] // 2,
+        )
+        app.update()
+        app.page_listbox.event_generate(
+            "<B1-Motion>",
+            x=start_bounds[0] + 8,
+            y=drop_y,
+            state=0x0100,
+        )
+        app.update()
+        app.page_listbox.event_generate(
+            "<ButtonRelease-1>",
+            x=start_bounds[0] + 8,
+            y=drop_y,
+        )
+        app.update()
         assert [entry.name for entry in app.session.entries] == ["first.png", "second.png"]
         app.withdraw()
         app.select_all_pages()
