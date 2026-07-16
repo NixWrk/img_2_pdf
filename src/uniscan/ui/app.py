@@ -32,6 +32,7 @@ from uniscan.core.dewarp import (
     DEWARP_METHOD_TEXTLINE,
     DewarpModel,
     estimate_textline_dewarp_model,
+    interpolate_control_curve,
 )
 from uniscan.core.pipeline import PageResult, PipelineOptions, process_loaded_items
 from uniscan.core.processing import PageProcessingRequest, process_document_page
@@ -4403,9 +4404,7 @@ class UnifiedScanApp(ctk.CTk):
             guide_x = np.linspace(0.0, 1.0, 160, dtype=np.float32)
             for curve_index, curve in enumerate(state["curves"]):
                 points = curve["points"]
-                point_x = np.asarray([point[0] for point in points], dtype=np.float32)
-                point_y = np.asarray([point[1] for point in points], dtype=np.float32)
-                guide_y = np.interp(guide_x, point_x, point_y)
+                guide_y = interpolate_control_curve(points, guide_x)
                 guide_anchor = float(curve["anchor"])
                 coords: list[float] = []
                 for x_value, displacement in zip(guide_x, guide_y):
@@ -4557,9 +4556,12 @@ class UnifiedScanApp(ctk.CTk):
 
         def near_center_curve(x_pos: float, y_pos: float) -> bool:
             x_value, _displacement = event_values(x_pos, y_pos)
-            point_x = np.asarray([point[0] for point in state["points"]], dtype=np.float32)
-            point_y = np.asarray([point[1] for point in state["points"]], dtype=np.float32)
-            curve_y = float(np.interp(x_value, point_x, point_y))
+            curve_y = float(
+                interpolate_control_curve(
+                    state["points"],
+                    np.asarray([x_value], dtype=np.float32),
+                )[0]
+            )
             expected_y = float(state["offset_y"]) + (
                 float(state["guide_anchor"]) + curve_y
             ) * int(state["display_height"])

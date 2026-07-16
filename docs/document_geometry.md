@@ -147,6 +147,8 @@ with Prev/Next or leaving with Done; Reset and Auto Detect remain explicit repla
 The inline wave editor shows the source and corrected result with independent **Top**, **Middle**,
 and **Bottom** curves. Each curve has its own vertical anchor and editable points, so uneven
 curvature can be traced in three page regions; the remap interpolates smoothly between them.
+Outside the first and last point, the curve continues the slope of the nearest two points, bounded
+to the normal displacement limit, rather than adding horizontal side segments.
 Normalized anchors and point values are saved with the page and immediately reprocessed at full
 resolution when **Apply points** is
 pressed. Corner, split-line,

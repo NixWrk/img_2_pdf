@@ -86,6 +86,30 @@ def normalize_control_points(
     return tuple((float(x), float(y)) for x, y in points)
 
 
+def interpolate_control_curve(
+    control_points: tuple[tuple[float, float], ...] | list[tuple[float, float]],
+    normalized_x: np.ndarray,
+) -> np.ndarray:
+    """Interpolate between points and linearly continue both end slopes."""
+    points = normalize_control_points(control_points)
+    point_x = np.asarray([point[0] for point in points], dtype=np.float32)
+    point_y = np.asarray([point[1] for point in points], dtype=np.float32)
+    targets = np.clip(np.asarray(normalized_x, dtype=np.float32), 0.0, 1.0)
+    target_shape = targets.shape
+    targets = targets.reshape(-1)
+    result = np.interp(targets, point_x, point_y).astype(np.float32)
+
+    left = targets < point_x[0]
+    if np.any(left):
+        left_slope = (point_y[1] - point_y[0]) / (point_x[1] - point_x[0])
+        result[left] = point_y[0] + (targets[left] - point_x[0]) * left_slope
+    right = targets > point_x[-1]
+    if np.any(right):
+        right_slope = (point_y[-1] - point_y[-2]) / (point_x[-1] - point_x[-2])
+        result[right] = point_y[-1] + (targets[right] - point_x[-1]) * right_slope
+    return np.clip(result, -0.25, 0.25).reshape(target_shape)
+
+
 def normalize_control_curves(
     control_curves,
 ) -> tuple[tuple[float, tuple[tuple[float, float], ...]], ...]:
@@ -406,9 +430,7 @@ def apply_dewarp_model(image: np.ndarray, model: DewarpModel) -> np.ndarray:
     smooth_sigma = max(1.0, width / 180.0)
     profiles = []
     for _anchor, points in curves:
-        point_x = np.asarray([point[0] for point in points], dtype=np.float32)
-        point_y = np.asarray([point[1] for point in points], dtype=np.float32)
-        displacement = np.interp(normalized_x, point_x, point_y).astype(np.float32) * height
+        displacement = interpolate_control_curve(points, normalized_x) * height
         profiles.append(
             cv2.GaussianBlur(
                 displacement.reshape(1, -1),

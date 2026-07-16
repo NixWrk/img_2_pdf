@@ -14,6 +14,7 @@ from uniscan.core.dewarp import (
     apply_dewarp_model,
     dewarp_document,
     estimate_textline_dewarp_model,
+    interpolate_control_curve,
     measure_dewarp_quality,
     normalize_control_curves,
     normalize_control_points,
@@ -140,6 +141,28 @@ def test_control_curves_validate_and_sort_anchors() -> None:
     assert [curve[0] for curve in curves] == [0.2, 0.5, 0.8]
     with pytest.raises(ValueError, match="unique"):
         normalize_control_curves([(0.5, points), (0.5, points)])
+
+
+def test_control_curve_linearly_extrapolates_both_end_slopes() -> None:
+    points = [(0.2, 0.02), (0.4, 0.06), (0.7, 0.03), (0.8, 0.01)]
+
+    values = interpolate_control_curve(
+        points,
+        np.asarray([0.0, 0.2, 0.5, 0.8, 1.0], dtype=np.float32),
+    )
+
+    assert values == pytest.approx([-0.02, 0.02, 0.05, 0.01, -0.03], abs=1e-6)
+
+
+def test_control_curve_extrapolation_is_bounded_to_page_safety_limit() -> None:
+    points = [(0.49, -0.2), (0.5, 0.2), (0.51, -0.2)]
+
+    values = interpolate_control_curve(
+        points,
+        np.asarray([0.0, 1.0], dtype=np.float32),
+    )
+
+    assert values.tolist() == pytest.approx([-0.25, -0.25])
 
 
 def test_textline_dewarp_keeps_straight_page_unchanged() -> None:
