@@ -84,8 +84,9 @@ from uniscan.ui.import_sources import (
 from uniscan.ui.live_detect import DEFAULT_LIVE_BACKEND, LIVE_BACKEND_CHOICES, LiveContourDetector
 from uniscan.ui.overlays import draw_quad_overlay
 
-PREVIEW_WAIT_MS = 25
+PREVIEW_WAIT_MS = 66
 REVIEW_PREVIEW_DEBOUNCE_MS = 120
+REVIEW_RESIZE_DEBOUNCE_MS = 90
 RESOLUTIONS = [
     "3264x2448",
     "3264x1836",
@@ -243,6 +244,10 @@ class UnifiedScanApp(ctk.CTk):
         self.preview_photo: ctk.CTkImage | None = None
         self.page_preview_before_photo: ctk.CTkImage | None = None
         self.page_preview_after_photo: ctk.CTkImage | None = None
+        self.page_preview_before_image: np.ndarray | None = None
+        self.page_preview_after_image: np.ndarray | None = None
+        self.review_preview_resize_job: str | None = None
+        self.review_preview_render_size: tuple[int, int, int, int] | None = None
         self.review_preview_job: str | None = None
         self.review_preview_thread: threading.Thread | None = None
         self.review_preview_threads: list[threading.Thread] = []
@@ -704,6 +709,16 @@ class UnifiedScanApp(ctk.CTk):
             text="No page selected",
         )
         self.page_preview_after_label.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self.page_preview_before_frame.bind(
+            "<Configure>",
+            self._on_review_preview_resize,
+            add="+",
+        )
+        self.page_preview_after_frame.bind(
+            "<Configure>",
+            self._on_review_preview_resize,
+            add="+",
+        )
         self._layout_page_previews()
 
         processing = ctk.CTkScrollableFrame(tab, width=270, label_text="Processing")
@@ -952,6 +967,9 @@ class UnifiedScanApp(ctk.CTk):
         if self.autosave_job is not None:
             self.after_cancel(self.autosave_job)
             self.autosave_job = None
+        if self.review_preview_resize_job is not None:
+            self.after_cancel(self.review_preview_resize_job)
+            self.review_preview_resize_job = None
         self._set_status("Closing: waiting for background work to stop...")
         self._close_deadline = time.monotonic() + 5.0
         self._finish_close_when_idle()
@@ -2289,6 +2307,8 @@ class UnifiedScanApp(ctk.CTk):
             self._clear_preview_label(self.page_preview_after_label)
             self.page_preview_before_photo = None
             self.page_preview_after_photo = None
+            self.page_preview_before_image = None
+            self.page_preview_after_image = None
             return
 
         index = selected[0]
@@ -2297,6 +2317,8 @@ class UnifiedScanApp(ctk.CTk):
             self._clear_preview_label(self.page_preview_after_label)
             self.page_preview_before_photo = None
             self.page_preview_after_photo = None
+            self.page_preview_before_image = None
+            self.page_preview_after_image = None
             return
 
         entry = self.session.entries[index]
@@ -2309,17 +2331,22 @@ class UnifiedScanApp(ctk.CTk):
             self._set_preview_message(self.page_preview_after_label, message)
             self.page_preview_before_photo = None
             self.page_preview_after_photo = None
+            self.page_preview_before_image = None
+            self.page_preview_after_image = None
             self._set_status(message)
             return
 
         if mode in {"Original", "Compare"}:
+            self.page_preview_before_image = before
             before_photo = self._to_ctk_photo_for_label(before, self.page_preview_before_label)
             self.page_preview_before_label.configure(image=before_photo, text="")
             self.page_preview_before_photo = before_photo
         else:
             self.page_preview_before_photo = None
+            self.page_preview_before_image = None
 
         if mode in {"Processed", "Compare"}:
+            self.page_preview_after_image = None
             fast_preview = bool(self.lightweight_preview_var.get())
             # Reading one committed generation on Tk is quick; all expensive
             # processing runs after debounce on a cancellable worker.
@@ -2355,6 +2382,47 @@ class UnifiedScanApp(ctk.CTk):
             )
         else:
             self.page_preview_after_photo = None
+            self.page_preview_after_image = None
+
+    def _on_review_preview_resize(self, _event=None) -> None:
+        """Resize cached preview pixels after layout settles, without reprocessing the page."""
+        if self._closing:
+            return
+        if self.review_preview_resize_job is not None:
+            self.after_cancel(self.review_preview_resize_job)
+        self.review_preview_resize_job = self.after(
+            REVIEW_RESIZE_DEBOUNCE_MS,
+            self._render_cached_review_previews,
+        )
+
+    def _render_cached_review_previews(self) -> None:
+        self.review_preview_resize_job = None
+        if self._closing or not self.winfo_exists():
+            return
+        render_size = (
+            self.page_preview_before_label.winfo_width(),
+            self.page_preview_before_label.winfo_height(),
+            self.page_preview_after_label.winfo_width(),
+            self.page_preview_after_label.winfo_height(),
+        )
+        if render_size == self.review_preview_render_size:
+            return
+        self.review_preview_render_size = render_size
+        mode = self.preview_mode_var.get()
+        if mode in {"Original", "Compare"} and self.page_preview_before_image is not None:
+            photo = self._to_ctk_photo_for_label(
+                self.page_preview_before_image,
+                self.page_preview_before_label,
+            )
+            self.page_preview_before_label.configure(image=photo, text="")
+            self.page_preview_before_photo = photo
+        if mode in {"Processed", "Compare"} and self.page_preview_after_image is not None:
+            photo = self._to_ctk_photo_for_label(
+                self.page_preview_after_image,
+                self.page_preview_after_label,
+            )
+            self.page_preview_after_label.configure(image=photo, text="")
+            self.page_preview_after_photo = photo
 
     def _cancel_review_page_preview(self) -> None:
         self.review_preview_generation = getattr(self, "review_preview_generation", 0) + 1
@@ -2379,6 +2447,18 @@ class UnifiedScanApp(ctk.CTk):
     ) -> None:
         self.review_preview_job = None
         if self._closing or generation != self.review_preview_generation:
+            return
+        active_thread = self.review_preview_thread
+        if active_thread is not None and active_thread.is_alive():
+            self.review_preview_job = self.after(
+                50,
+                lambda: self._launch_review_page_preview(
+                    generation,
+                    source,
+                    request,
+                    cancel_event,
+                ),
+            )
             return
 
         def run() -> None:
@@ -2429,6 +2509,7 @@ class UnifiedScanApp(ctk.CTk):
         after_photo = self._to_ctk_photo_for_label(image, self.page_preview_after_label)
         self.page_preview_after_label.configure(image=after_photo, text="")
         self.page_preview_after_photo = after_photo
+        self.page_preview_after_image = image
         if diagnostics is not None:
             dewarp = diagnostics.dewarp
             if dewarp.applied:

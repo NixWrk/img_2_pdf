@@ -140,6 +140,22 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.page_preview_before_frame.winfo_manager() == "grid"
         assert app.page_preview_after_frame.winfo_manager() == "grid"
         assert app.geometry_summary_var.get() != "Wave preview: pending"
+        app.deiconify()
+        _pump_until(app, lambda: app.review_preview_resize_job is None)
+        initial_preview_size = app.page_preview_after_photo.cget("size")
+        app.geometry("1560x980")
+        app.update()
+        _pump_until(
+            app,
+            lambda: (
+                app.review_preview_resize_job is None
+                and app.page_preview_after_photo.cget("size") != initial_preview_size
+            ),
+        )
+        resized_preview_size = app.page_preview_after_photo.cget("size")
+        assert resized_preview_size[0] > initial_preview_size[0]
+        assert resized_preview_size[1] > initial_preview_size[1]
+        app.withdraw()
         app.move_selected_up()
         assert app.session.entries[0].name == "second.png"
         app.move_selected_down()
@@ -179,6 +195,12 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         _pump_until(app, started.is_set)
         assert seen_shapes == [wide_entry.preview_original_image.shape]
         assert seen_shapes[0][1] < wide_source.shape[1]
+        app.update_page_preview()
+        overlap_deadline = time.monotonic() + 0.35
+        while time.monotonic() < overlap_deadline:
+            app.update()
+            time.sleep(0.01)
+        assert seen_shapes == [wide_entry.preview_original_image.shape]
         preview_release.set()
         _pump_until(
             app,
@@ -187,6 +209,10 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
                 and not any(thread.is_alive() for thread in app.review_preview_threads)
             ),
         )
+        assert seen_shapes == [
+            wide_entry.preview_original_image.shape,
+            wide_entry.preview_original_image.shape,
+        ]
         monkeypatch.setattr(app_module, "process_document_page", real_process)
 
         app.select_all_pages()
@@ -199,6 +225,9 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         worker.start()
         app.job_thread = worker
 
+        # The resize/concurrency checks make this smoke test long enough for
+        # the periodic autosave tick; reset it to isolate close-time behavior.
+        app.autosave_path.unlink(missing_ok=True)
         app._on_close()
         close_started = True
         assert app._close_wait_job is not None
