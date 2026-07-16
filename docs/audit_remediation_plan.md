@@ -94,6 +94,7 @@ Every closed item must have:
 | MEM-019 | Grayscale preview expands a one-channel full-resolution image to three channels before resizing. | Resize the single-channel proxy first and colourize only the bounded preview. | Preview output is equivalent within tolerance and peak temporary memory is bounded by the preview size rather than three full-resolution channels. |
 | MEM-020 | Burst capture retains all full-resolution frames and then all `PageResult` objects, so memory is `O(shots)` with no practical guard and a late failure loses the burst. | Set an explicit shot/byte budget and ingest/process incrementally with transactional publication and cancellation. | Excess requests are rejected before capture; peak memory stays within the budget; failure at any shot leaves either the old session or the fully committed burst. |
 | MEM-021 | GUI export snapshots, fully decodes, copies to a second temporary store, and then stages again. | Pass immutable snapshot assets directly to a single export transaction and stream/decode only when required by the encoder. | Export has one transaction owner/stage, output is byte/visual equivalent, and peak copies/decodes are demonstrated by instrumentation. |
+| MEM-022 | The default GUI crop-proposal path asks built-in contour detectors to construct a full-resolution perspective warp, then discards that array because source/export pixels remain unchanged until Apply. | Add an explicit proposal-only detector mode for built-in contour backends and defer the full-resolution warp to staged Apply; keep opt-in spread splitting on its existing rectification path. | Default import/capture/live proposal detection returns the source pixels plus contour/backend without calling the perspective-warp helper; raw/current remain identical until Apply; invalid proposal-only API combinations fail explicitly. |
 
 ## P1: persistence and concurrency
 
@@ -158,6 +159,7 @@ Every closed item must have:
 | QA-010 | Image-path export copies same-extension files without decoding/validation. | Validate trusted/untrusted source contracts and image integrity. | Corrupt/non-image input cannot be published as a page by the public API. |
 | QA-011 | Public PageStore methods accept arbitrary entry IDs that can form paths outside the page directory. | Validate UUID-like IDs at every public boundary. | Traversal and separator-containing IDs are rejected. |
 | QA-012 | Broad exception handlers sometimes erase error type/context. | Narrow expected exceptions and preserve causes in diagnostics. | User errors remain actionable; programming errors are not silently converted to fallback. |
+| QA-013 | The lossless-default regression used `PdfImage.get_px_size()`, which is absent from the declared minimum `pypdfium2` 4.30.0 API. | Verify embedded pixels through bitmap extraction available across the supported range and exercise the dependency floor. | The exact-pixel regression passes on `pypdfium2` 4.30.0 and the current development environment. |
 
 ## Delivery order and commit policy
 
@@ -194,3 +196,25 @@ engineering findings complete.
 |---|---|---|---|
 | 2026-07-16 | `ab29504` | Plan creation | Initial audit and owner requirements recorded; no code item closed. |
 | 2026-07-16 | `d654a1b` | Plan/candidate corpus update | Documentation and one tracked PDF added; provenance/licence and manifest linkage remain open; no code item closed. |
+| 2026-07-16 | `676e66b` | Plan reconciliation | Reconciled the audit against the `d654a1b` code baseline, corrected stale/inaccurate claims, and added missing findings and acceptance tests; no code item closed by documentation alone. |
+| 2026-07-16 | `06af2de` | COR-016, COR-017; AUTO-006 partial | Implemented opt-in processing/lossless defaults and journal-first recovery from recorded targets. COR-017 is complete. COR-016 implementation is complete and its minimum-version test portability is completed by `7612627`. Unselected split backends no longer run, but per-half attempted-backend/reason reporting remains open. |
+| 2026-07-16 | `a5ec349` | MEM-018 partial; MEM-019, QA-001, QA-010; REL-013 partial | Bounded two detector checks, resized grayscale before colour expansion, validated same-format export sources, restored formatting, and repaired semantic cache hits. MEM-019, QA-001, and QA-010 are complete; MEM-018 still needs 150 MP peak-memory/corpus evidence; durable cross-process poison quarantine remains open under REL-013. |
+| 2026-07-16 | `569309e` | COR-019, GUI-011, GUI-012; COR-012, COR-015, COR-018, GUI-004, GUI-013, MEM-020 partial | Preserved quarantine order and persisted/validated import options; Quick Export now preserves visible scope/DPI. Crop proposals have explicit persisted state and best-effort multi-page rollback; automatic dewarp is preview/Apply; camera/burst ownership is safer and burst is streamed with a 20-shot cap. The partial items still lack their full crash, Reject/report, blocked-read, or byte-budget acceptance evidence. |
+| 2026-07-16 | `7612627` | COR-016, QA-013 | Removed the post-minimum PDFium API dependency from the exact-pixel regression; the test passes on `pypdfium2` 4.30.0 and the current environment. COR-016 and QA-013 are complete. |
+| 2026-07-16 | `237f83f` | REL-002; REL-013 partial | Made LRU touch and temporary cleanup fail-soft, prevented a cleanup-locked rejected key from being reused in-process, and repaired it on a later successful write. REL-002 is complete; durable interprocess rejection remains part of REL-013/REL-001. |
+| 2026-07-16 | `5318d8f` | MEM-022 | Added validated proposal-only detection to import, capture, manual corner detection, and live detection; built-in contour backends no longer create a discarded full-resolution warp. MEM-022 is complete. |
+
+`Complete` above means the item-specific acceptance criteria has direct automated evidence. `Partial`
+means the implementation reduced the risk but the finding remains open. All findings not named as
+complete remain open.
+
+### Remaining acceptance gaps in this tranche
+
+- AUTO-006 still needs attempted backend and selection/rejection reason per split half.
+- MEM-018 still needs measured 150 MP peak-memory and corpus-decision evidence; MEM-020 still
+  needs an explicit byte budget and peak/failure measurements.
+- REL-013 still needs a durable cross-process rejection/quarantine mechanism coordinated with
+  REL-001 interprocess publication.
+- COR-012, COR-015, COR-018, GUI-004, and GUI-013 remain partial: manifest-inclusive crash
+  atomicity, explicit Reject/export reporting, byte-for-byte cancel/failure evidence, and a blocked
+  camera-read cancellation test are not yet complete.
