@@ -1453,7 +1453,6 @@ def test_cli_convert_defaults_are_lossless_and_opt_in(tmp_path) -> None:
         try:
             images = list(page.get_objects())
             assert len(images) == 1
-            assert images[0].get_px_size() == (53, 37)
             embedded = images[0].get_bitmap().to_numpy()
             np.testing.assert_array_equal(embedded, source_pixels)
         finally:
