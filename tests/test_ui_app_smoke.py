@@ -117,6 +117,9 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         app._reprocess_entry_from_original(selected_entry)
         app.clear_processing_cache()
         assert not list(app.processing_cache.root_dir.glob("*.png"))
+        app.page_listbox.selection_clear(0, app_module.tk.END)
+        app.page_listbox.selection_set(0)
+        app.on_page_select()
         app.open_manual_corners_editor()
         app.update()
         corner_editors = [
@@ -128,7 +131,57 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.grab_current() == corner_editors[0]
         assert app.corner_source_canvas.winfo_exists()
         assert app.corner_preview_canvas.winfo_exists()
+        _pump_until(app, lambda: app.corner_resize_job is None)
+        assert app.corner_meta_var.get().startswith("1/2  first.png")
+        assert app.corner_prev_button.cget("state") == "disabled"
+        assert app.corner_next_button.cget("state") == "normal"
+        source_bounds = app.corner_source_canvas.bbox("source-image")
+        preview_bounds = app.corner_preview_canvas.bbox("perspective-preview")
+        assert source_bounds is not None and preview_bounds is not None
+        initial_source_size = (
+            source_bounds[2] - source_bounds[0],
+            source_bounds[3] - source_bounds[1],
+        )
+        initial_corner_preview_size = (
+            preview_bounds[2] - preview_bounds[0],
+            preview_bounds[3] - preview_bounds[1],
+        )
+        corner_editors[0].geometry("1400x980")
+        app.update()
+        _pump_until(
+            app,
+            lambda: (
+                app.corner_resize_job is None
+                and app.corner_source_canvas.bbox("source-image") is not None
+                and (
+                    app.corner_source_canvas.bbox("source-image")[2]
+                    - app.corner_source_canvas.bbox("source-image")[0]
+                    > initial_source_size[0]
+                )
+            ),
+        )
+        resized_source_bounds = app.corner_source_canvas.bbox("source-image")
+        resized_preview_bounds = app.corner_preview_canvas.bbox("perspective-preview")
+        assert resized_source_bounds is not None and resized_preview_bounds is not None
+        assert resized_source_bounds[2] - resized_source_bounds[0] > initial_source_size[0]
+        assert resized_source_bounds[3] - resized_source_bounds[1] > initial_source_size[1]
+        assert (
+            resized_preview_bounds[2] - resized_preview_bounds[0]
+            > initial_corner_preview_size[0]
+        )
+        assert (
+            resized_preview_bounds[3] - resized_preview_bounds[1]
+            > initial_corner_preview_size[1]
+        )
+        app.corner_next_button.invoke()
+        app.update()
+        assert app.corner_meta_var.get().startswith("2/2  second.png")
+        assert app.corner_prev_button.cget("state") == "normal"
+        assert app.corner_next_button.cget("state") == "disabled"
         corner_editors[0].destroy()
+        app.page_listbox.selection_clear(0, app_module.tk.END)
+        app.page_listbox.selection_set(1)
+        app.on_page_select()
         app.open_dewarp_points_editor()
         app.update()
         dewarp_editors = [

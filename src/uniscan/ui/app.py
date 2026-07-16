@@ -257,6 +257,10 @@ class UnifiedScanApp(ctk.CTk):
         self.corner_editor_window: ctk.CTkToplevel | None = None
         self.corner_source_canvas: tk.Canvas | None = None
         self.corner_preview_canvas: tk.Canvas | None = None
+        self.corner_meta_var: tk.StringVar | None = None
+        self.corner_prev_button: ctk.CTkButton | None = None
+        self.corner_next_button: ctk.CTkButton | None = None
+        self.corner_resize_job: str | None = None
         self.page_drag_state: dict[str, object] | None = None
         self.live_detector = LiveContourDetector(backend=DEFAULT_LIVE_BACKEND)
 
@@ -996,6 +1000,22 @@ class UnifiedScanApp(ctk.CTk):
         if self.review_preview_resize_job is not None:
             self.after_cancel(self.review_preview_resize_job)
             self.review_preview_resize_job = None
+        if self.corner_resize_job is not None:
+            self.after_cancel(self.corner_resize_job)
+            self.corner_resize_job = None
+        corner_window = self.corner_editor_window
+        if corner_window is not None:
+            try:
+                if corner_window.winfo_exists():
+                    corner_window.destroy()
+            except tk.TclError:
+                pass
+            self.corner_editor_window = None
+            self.corner_source_canvas = None
+            self.corner_preview_canvas = None
+            self.corner_meta_var = None
+            self.corner_prev_button = None
+            self.corner_next_button = None
         self._set_status("Closing: waiting for background work to stop...")
         self._close_deadline = time.monotonic() + 5.0
         self._finish_close_when_idle()
@@ -2863,19 +2883,29 @@ class UnifiedScanApp(ctk.CTk):
             return None
         return points[:4]
 
-    def _open_corner_editor_dialog(self, indices: list[int], *, auto_detect: bool) -> None:
+    def _open_corner_editor_dialog(
+        self,
+        indices: list[int],
+        *,
+        auto_detect: bool,
+        initial_entry_index: int | None = None,
+    ) -> None:
         if not indices:
             self._set_status("Select page(s) for corner editing.")
             return
 
-        entries = [
-            self.session.entries[idx] for idx in indices if 0 <= idx < len(self.session.entries)
-        ]
+        indices = [idx for idx in indices if 0 <= idx < len(self.session.entries)]
+        entries = [self.session.entries[idx] for idx in indices]
         if not entries:
             self._set_status("No valid pages available for corner editing.")
             return
 
-        state = {"index": 0}
+        initial_position = (
+            indices.index(initial_entry_index)
+            if initial_entry_index is not None and initial_entry_index in indices
+            else 0
+        )
+        state = {"index": initial_position}
         points_by_entry: dict[str, np.ndarray] = {}
 
         if self.corner_editor_window is not None:
@@ -2902,6 +2932,7 @@ class UnifiedScanApp(ctk.CTk):
         header.pack(fill=ctk.X, padx=12, pady=(12, 6))
 
         meta_var = tk.StringVar(value="")
+        self.corner_meta_var = meta_var
         meta_label = ctk.CTkLabel(win, textvariable=meta_var, anchor="w")
         meta_label.pack(fill=ctk.X, padx=12, pady=(0, 8))
 
@@ -2919,9 +2950,9 @@ class UnifiedScanApp(ctk.CTk):
         )
 
         canvas = tk.Canvas(canvas_frame, bg="black", highlightthickness=0)
-        canvas.grid(row=1, column=0, padx=8, pady=(0, 8))
+        canvas.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
         corrected_canvas = tk.Canvas(canvas_frame, bg="black", highlightthickness=0)
-        corrected_canvas.grid(row=1, column=1, padx=8, pady=(0, 8))
+        corrected_canvas.grid(row=1, column=1, sticky="nsew", padx=8, pady=(0, 8))
         self.corner_source_canvas = canvas
         self.corner_preview_canvas = corrected_canvas
 
@@ -2933,11 +2964,15 @@ class UnifiedScanApp(ctk.CTk):
             "display_shape": None,
             "scale_x": 1.0,
             "scale_y": 1.0,
+            "offset_x": 0.0,
+            "offset_y": 0.0,
             "display_image": None,
+            "source_entry_id": None,
+            "source_image": None,
             "points": self._default_corner_points(
-                entries[0].preview_raw_image
+                entries[state["index"]].preview_raw_image
                 if self.lightweight_preview_var.get()
-                else entries[0].raw_image
+                else entries[state["index"]].raw_image
             ),
         }
 
@@ -2955,11 +2990,18 @@ class UnifiedScanApp(ctk.CTk):
             entry_index = indices[state["index"]]
             return entry_index, self.session.entries[entry_index]
 
-        def _display_image_for(entry) -> np.ndarray:
-            source = entry.raw_image
+        def _display_image_for(
+            source: np.ndarray,
+            *,
+            max_width: int,
+            max_height: int,
+        ) -> np.ndarray:
             source_h, source_w = source.shape[:2]
-            scale = min(500 / max(1, source_w), 650 / max(1, source_h), 1.0)
-            if scale >= 1.0:
+            scale = min(
+                max_width / max(1, source_w),
+                max_height / max(1, source_h),
+            )
+            if abs(scale - 1.0) < 0.01:
                 return source
             return cv2.resize(
                 source,
@@ -2967,7 +3009,7 @@ class UnifiedScanApp(ctk.CTk):
                     max(1, int(round(source_w * scale))),
                     max(1, int(round(source_h * scale))),
                 ),
-                interpolation=cv2.INTER_AREA,
+                interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC,
             )
 
         def _init_points_for(entry) -> np.ndarray:
@@ -3001,6 +3043,8 @@ class UnifiedScanApp(ctk.CTk):
             points = view_state["points"]
             scale_x = float(view_state["scale_x"])
             scale_y = float(view_state["scale_y"])
+            offset_x = float(view_state["offset_x"])
+            offset_y = float(view_state["offset_y"])
             display_w = (
                 int(view_state["display_shape"][1])
                 if view_state["display_shape"] is not None
@@ -3013,8 +3057,8 @@ class UnifiedScanApp(ctk.CTk):
             )
             line_points = []
             for pt in points:
-                x = float(pt[0]) / max(scale_x, 1e-6)
-                y = float(pt[1]) / max(scale_y, 1e-6)
+                x = float(pt[0]) / max(scale_x, 1e-6) + offset_x
+                y = float(pt[1]) / max(scale_y, 1e-6) + offset_y
                 line_points.extend([x, y])
             canvas.create_line(
                 *line_points,
@@ -3025,9 +3069,12 @@ class UnifiedScanApp(ctk.CTk):
                 tags="overlay",
             )
             for idx_p, pt in enumerate(points):
-                sx = float(pt[0]) / max(scale_x, 1e-6)
-                sy = float(pt[1]) / max(scale_y, 1e-6)
-                if 0 <= sx <= display_w and 0 <= sy <= display_h:
+                sx = float(pt[0]) / max(scale_x, 1e-6) + offset_x
+                sy = float(pt[1]) / max(scale_y, 1e-6) + offset_y
+                if (
+                    offset_x <= sx <= offset_x + display_w
+                    and offset_y <= sy <= offset_y + display_h
+                ):
                     r = 7
                     canvas.create_oval(
                         sx - r, sy - r, sx + r, sy + r, fill="#ff3355", outline="", tags="overlay"
@@ -3052,19 +3099,60 @@ class UnifiedScanApp(ctk.CTk):
                 if corrected.ndim == 2
                 else cv2.cvtColor(corrected, cv2.COLOR_BGR2RGB)
             )
+            available_w = max(200, corrected_canvas.winfo_width() - 16)
+            available_h = max(200, corrected_canvas.winfo_height() - 16)
+            corrected_h, corrected_w = corrected.shape[:2]
+            preview_scale = min(
+                available_w / max(1, corrected_w),
+                available_h / max(1, corrected_h),
+            )
+            if abs(preview_scale - 1.0) >= 0.01:
+                corrected = cv2.resize(
+                    corrected,
+                    (
+                        max(1, int(round(corrected_w * preview_scale))),
+                        max(1, int(round(corrected_h * preview_scale))),
+                    ),
+                    interpolation=(
+                        cv2.INTER_AREA if preview_scale < 1.0 else cv2.INTER_CUBIC
+                    ),
+                )
+                rgb = (
+                    cv2.cvtColor(corrected, cv2.COLOR_GRAY2RGB)
+                    if corrected.ndim == 2
+                    else cv2.cvtColor(corrected, cv2.COLOR_BGR2RGB)
+                )
             photo = ImageTk.PhotoImage(Image.fromarray(rgb))
-            corrected_canvas.configure(width=corrected.shape[1], height=corrected.shape[0])
+            preview_h, preview_w = corrected.shape[:2]
+            offset_x = max(0, (corrected_canvas.winfo_width() - preview_w) // 2)
+            offset_y = max(0, (corrected_canvas.winfo_height() - preview_h) // 2)
             corrected_canvas.delete("all")
-            corrected_canvas.create_image(0, 0, image=photo, anchor=tk.NW)
+            corrected_canvas.create_image(
+                offset_x,
+                offset_y,
+                image=photo,
+                anchor=tk.NW,
+                tags="perspective-preview",
+            )
             canvas_image_ref["corrected_photo"] = photo
 
         def _load_current_entry() -> None:
             entry_index, entry = _current_entry()
-            source_image = entry.raw_image
+            source_image = (
+                view_state["source_image"]
+                if view_state["source_entry_id"] == entry.entry_id
+                else entry.raw_image
+            )
             if source_image is None or source_image.size == 0:
                 raise RuntimeError(f"Selected page is empty: {entry.name}")
 
-            display_image = _display_image_for(entry)
+            available_w = max(200, canvas.winfo_width() - 16)
+            available_h = max(200, canvas.winfo_height() - 16)
+            display_image = _display_image_for(
+                source_image,
+                max_width=available_w,
+                max_height=available_h,
+            )
             display_h, display_w = display_image.shape[:2]
             source_h, source_w = source_image.shape[:2]
             view_h = max(1, int(display_h))
@@ -3075,9 +3163,16 @@ class UnifiedScanApp(ctk.CTk):
                 else cv2.cvtColor(display_image, cv2.COLOR_BGR2RGB)
             )
             tk_img = ImageTk.PhotoImage(Image.fromarray(rgb))
-            canvas.configure(width=view_w, height=view_h)
+            offset_x = max(0, (canvas.winfo_width() - view_w) // 2)
+            offset_y = max(0, (canvas.winfo_height() - view_h) // 2)
             canvas.delete("all")
-            canvas.create_image(0, 0, image=tk_img, anchor=tk.NW)
+            canvas.create_image(
+                offset_x,
+                offset_y,
+                image=tk_img,
+                anchor=tk.NW,
+                tags="source-image",
+            )
             canvas_image_ref["photo"] = tk_img
 
             points = _init_points_for(entry)
@@ -3086,8 +3181,20 @@ class UnifiedScanApp(ctk.CTk):
             view_state["display_shape"] = (display_h, display_w)
             view_state["scale_x"] = source_w / max(1, display_w)
             view_state["scale_y"] = source_h / max(1, display_h)
+            view_state["offset_x"] = float(offset_x)
+            view_state["offset_y"] = float(offset_y)
             view_state["display_image"] = display_image
+            view_state["source_entry_id"] = entry.entry_id
+            view_state["source_image"] = source_image
             meta_var.set(f"{state['index'] + 1}/{len(entries)}  {entry.name}")
+            if self.corner_prev_button is not None:
+                self.corner_prev_button.configure(
+                    state=tk.NORMAL if state["index"] > 0 else tk.DISABLED
+                )
+            if self.corner_next_button is not None:
+                self.corner_next_button.configure(
+                    state=tk.NORMAL if state["index"] < len(entries) - 1 else tk.DISABLED
+                )
             _redraw()
             _render_corrected_preview()
 
@@ -3095,11 +3202,13 @@ class UnifiedScanApp(ctk.CTk):
             points = view_state["points"]
             scale_x = float(view_state["scale_x"])
             scale_y = float(view_state["scale_y"])
+            offset_x = float(view_state["offset_x"])
+            offset_y = float(view_state["offset_y"])
             best_i = None
             best_d2 = 14.0 * 14.0
             for idx_p, pt in enumerate(points):
-                sx = float(pt[0]) / max(scale_x, 1e-6)
-                sy = float(pt[1]) / max(scale_y, 1e-6)
+                sx = float(pt[0]) / max(scale_x, 1e-6) + offset_x
+                sy = float(pt[1]) / max(scale_y, 1e-6) + offset_y
                 d2 = (sx - px) ** 2 + (sy - py) ** 2
                 if d2 <= best_d2:
                     best_i = idx_p
@@ -3115,9 +3224,11 @@ class UnifiedScanApp(ctk.CTk):
                 return
             scale_x = float(view_state["scale_x"])
             scale_y = float(view_state["scale_y"])
+            offset_x = float(view_state["offset_x"])
+            offset_y = float(view_state["offset_y"])
             source_h, source_w = view_state["source_shape"]
-            x = float(event.x) * max(scale_x, 1e-6)
-            y = float(event.y) * max(scale_y, 1e-6)
+            x = (float(event.x) - offset_x) * max(scale_x, 1e-6)
+            y = (float(event.y) - offset_y) * max(scale_y, 1e-6)
             x = max(0.0, min(float(source_w - 1), x))
             y = max(0.0, min(float(source_h - 1), y))
             points = view_state["points"]
@@ -3206,16 +3317,40 @@ class UnifiedScanApp(ctk.CTk):
                 state["index"] += 1
                 _load_current_entry()
 
+        def _resize_editor_preview() -> None:
+            self.corner_resize_job = None
+            if self.corner_editor_window is win and win.winfo_exists():
+                _load_current_entry()
+
+        def _schedule_editor_resize(_event=None) -> None:
+            if self.corner_resize_job is not None:
+                win.after_cancel(self.corner_resize_job)
+            self.corner_resize_job = win.after(
+                REVIEW_RESIZE_DEBOUNCE_MS,
+                _resize_editor_preview,
+            )
+
         canvas.bind("<Button-1>", _on_down)
         canvas.bind("<B1-Motion>", _on_move)
         canvas.bind("<ButtonRelease-1>", _on_up)
+        canvas_frame.bind("<Configure>", _schedule_editor_resize, add="+")
 
         controls = ctk.CTkFrame(win)
         controls.pack(fill=ctk.X, padx=12, pady=(0, 12))
-        ctk.CTkButton(controls, text="Prev", width=90, command=_prev_page).pack(side=ctk.LEFT)
-        ctk.CTkButton(controls, text="Next", width=90, command=_next_page).pack(
-            side=ctk.LEFT, padx=6
+        self.corner_prev_button = ctk.CTkButton(
+            controls,
+            text="Prev",
+            width=90,
+            command=_prev_page,
         )
+        self.corner_prev_button.pack(side=ctk.LEFT)
+        self.corner_next_button = ctk.CTkButton(
+            controls,
+            text="Next",
+            width=90,
+            command=_next_page,
+        )
+        self.corner_next_button.pack(side=ctk.LEFT, padx=6)
         ctk.CTkButton(controls, text="Auto Detect", width=110, command=_auto_detect_current).pack(
             side=ctk.LEFT,
             padx=6,
@@ -3230,9 +3365,15 @@ class UnifiedScanApp(ctk.CTk):
         )
 
         def _close_editor() -> None:
+            if self.corner_resize_job is not None:
+                win.after_cancel(self.corner_resize_job)
+                self.corner_resize_job = None
             self.corner_editor_window = None
             self.corner_source_canvas = None
             self.corner_preview_canvas = None
+            self.corner_meta_var = None
+            self.corner_prev_button = None
+            self.corner_next_button = None
             win.destroy()
 
         ctk.CTkButton(
@@ -3254,7 +3395,11 @@ class UnifiedScanApp(ctk.CTk):
         if entry is None or index is None:
             self._set_status("Select exactly one page for manual corner edit.")
             return
-        self._open_corner_editor_dialog([index], auto_detect=False)
+        self._open_corner_editor_dialog(
+            list(range(len(self.session.entries))),
+            auto_detect=False,
+            initial_entry_index=index,
+        )
 
     def open_auto_crop_editor(self) -> None:
         indices = self._selected_entry_indices()
