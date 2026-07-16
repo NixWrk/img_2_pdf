@@ -180,6 +180,41 @@ def _split_spread_pair(
     return raw_halves, warped_halves
 
 
+def _split_at_ratio(image: np.ndarray, ratio: float) -> tuple[np.ndarray, np.ndarray]:
+    width = image.shape[1]
+    cut = max(1, min(width - 1, int(round(width * float(ratio)))))
+    return image[:, :cut], image[:, cut:]
+
+
+def _compose_split_preview(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    """Place two output pages side by side with a stable visible separator."""
+    if left.ndim != right.ndim:
+        if left.ndim == 2:
+            left = cv2.cvtColor(left, cv2.COLOR_GRAY2BGR)
+        if right.ndim == 2:
+            right = cv2.cvtColor(right, cv2.COLOR_GRAY2BGR)
+    target_height = max(left.shape[0], right.shape[0])
+
+    def fit_height(image: np.ndarray) -> np.ndarray:
+        if image.shape[0] == target_height:
+            return image
+        width = max(1, int(round(image.shape[1] * target_height / image.shape[0])))
+        return cv2.resize(image, (width, target_height), interpolation=cv2.INTER_AREA)
+
+    left = fit_height(left)
+    right = fit_height(right)
+    gap_width = max(8, int(round((left.shape[1] + right.shape[1]) * 0.012)))
+    gap_shape = (
+        (target_height, gap_width) if left.ndim == 2 else (target_height, gap_width, left.shape[2])
+    )
+    gap = np.full(gap_shape, 48, dtype=left.dtype)
+    return np.concatenate((left, gap, right), axis=1)
+
+
+def _perspective_source_image(entry, *, from_current_geometry: bool) -> np.ndarray:
+    return entry.original_image if from_current_geometry else entry.raw_image
+
+
 def _detection_summary(results: list[PageResult]) -> str:
     """Describe detector outcomes without calling fallback pages detected."""
     fallback = sum(result.fallback_reason is not None for result in results)
@@ -248,6 +283,9 @@ class UnifiedScanApp(ctk.CTk):
         self.page_preview_after_photo: ctk.CTkImage | None = None
         self.page_preview_before_image: np.ndarray | None = None
         self.page_preview_after_image: np.ndarray | None = None
+        self.pending_split_entry_id: str | None = None
+        self.pending_split_ratio: float | None = None
+        self.pending_split_revision: int | None = None
         self.review_preview_resize_job: str | None = None
         self.review_preview_render_size: tuple[int, int, int, int] | None = None
         self.review_preview_job: str | None = None
@@ -307,6 +345,7 @@ class UnifiedScanApp(ctk.CTk):
         self.lighting_summary_var = tk.StringVar(value="Lighting: not analyzed")
         self.dewarp_method_var = tk.StringVar(value="Automatic (validated)")
         self.geometry_summary_var = tk.StringVar(value="Wave preview: pending")
+        self.split_preview_var = tk.StringVar(value="Split: not previewed")
         self.deskew_method_var = tk.StringVar(value="Hybrid (recommended)")
         self.import_folder_var = tk.StringVar()
         self.import_files_var = tk.StringVar()
@@ -687,21 +726,6 @@ class UnifiedScanApp(ctk.CTk):
             command=self.clear_page_selection,
         ).pack(side=ctk.LEFT)
 
-        ctk.CTkButton(
-            left,
-            text="More page tools...",
-            fg_color="transparent",
-            border_width=1,
-            command=self.open_page_tools_dialog,
-        ).pack(fill=ctk.X, padx=10, pady=(2, 10))
-        ctk.CTkLabel(
-            left,
-            text="Del delete  •  Ctrl+←/→ rotate\nAlt+↑/↓ move  •  Ctrl+A select all",
-            justify="left",
-            text_color=("#60646c", "#a0a4ab"),
-            font=ctk.CTkFont(size=11),
-        ).pack(fill=ctk.X, padx=10, pady=(0, 10))
-
         preview = ctk.CTkFrame(tab)
         preview.grid(row=0, column=1, sticky="nsew", padx=6, pady=10)
         preview.grid_rowconfigure(1, weight=1)
@@ -726,9 +750,10 @@ class UnifiedScanApp(ctk.CTk):
         self.page_preview_before_frame = ctk.CTkFrame(preview)
         self.page_preview_before_frame.grid_rowconfigure(1, weight=1)
         self.page_preview_before_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(self.page_preview_before_frame, text="Original").grid(
-            row=0, column=0, sticky="w", padx=8, pady=(8, 4)
+        self.page_preview_before_title = ctk.CTkLabel(
+            self.page_preview_before_frame, text="Original"
         )
+        self.page_preview_before_title.grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
         self.page_preview_before_label = ctk.CTkLabel(
             self.page_preview_before_frame,
             text="No page selected",
@@ -738,9 +763,10 @@ class UnifiedScanApp(ctk.CTk):
         self.page_preview_after_frame = ctk.CTkFrame(preview)
         self.page_preview_after_frame.grid_rowconfigure(1, weight=1)
         self.page_preview_after_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(self.page_preview_after_frame, text="Processed preview").grid(
-            row=0, column=0, sticky="w", padx=8, pady=(8, 4)
+        self.page_preview_after_title = ctk.CTkLabel(
+            self.page_preview_after_frame, text="Processed preview"
         )
+        self.page_preview_after_title.grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
         self.page_preview_after_label = ctk.CTkLabel(
             self.page_preview_after_frame,
             text="No page selected",
@@ -760,6 +786,104 @@ class UnifiedScanApp(ctk.CTk):
 
         processing = ctk.CTkScrollableFrame(tab, width=270, label_text="Processing")
         processing.grid(row=0, column=2, sticky="nsew", padx=(6, 10), pady=10)
+
+        ctk.CTkLabel(
+            processing,
+            text="Geometry workflow",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            anchor="w",
+        ).pack(fill=ctk.X, padx=6, pady=(4, 6))
+        ctk.CTkButton(
+            processing,
+            text="1  Correct spread perspective...",
+            command=self.open_manual_corners_editor,
+        ).pack(fill=ctk.X, padx=6, pady=(0, 4))
+        split_actions = ctk.CTkFrame(processing, fg_color="transparent")
+        split_actions.pack(fill=ctk.X, padx=6, pady=(0, 4))
+        ctk.CTkButton(
+            split_actions,
+            text="2  Preview split",
+            width=118,
+            command=self.preview_selected_spread_split,
+        ).pack(side=ctk.LEFT, padx=(0, 4))
+        self.apply_split_button = ctk.CTkButton(
+            split_actions,
+            text="Create 2 pages",
+            width=104,
+            state=tk.DISABLED,
+            command=self.apply_previewed_spread_split,
+        )
+        self.apply_split_button.pack(side=ctk.LEFT)
+        ctk.CTkLabel(
+            processing,
+            textvariable=self.split_preview_var,
+            anchor="w",
+            text_color=("#60646c", "#a0a4ab"),
+        ).pack(fill=ctk.X, padx=6, pady=(0, 5))
+        ctk.CTkButton(
+            processing,
+            text="3  Page perspective...",
+            fg_color="transparent",
+            border_width=1,
+            command=self.open_current_geometry_corners_editor,
+        ).pack(fill=ctk.X, padx=6, pady=(0, 4))
+        ctk.CTkButton(
+            processing,
+            text="4  Remove waves",
+            fg_color="transparent",
+            border_width=1,
+            command=self.remove_waves_selected,
+        ).pack(fill=ctk.X, padx=6, pady=(0, 4))
+        ctk.CTkButton(
+            processing,
+            text="Adjust wave curve...",
+            fg_color="transparent",
+            border_width=1,
+            command=self.open_dewarp_points_editor,
+        ).pack(fill=ctk.X, padx=6, pady=(0, 10))
+        geometry_utilities = ctk.CTkFrame(processing, fg_color="transparent")
+        geometry_utilities.pack(fill=ctk.X, padx=6, pady=(0, 4))
+        ctk.CTkButton(
+            geometry_utilities,
+            text="Auto orient",
+            width=108,
+            fg_color="transparent",
+            border_width=1,
+            command=self.auto_orient_selected,
+        ).pack(side=ctk.LEFT, padx=(0, 4))
+        ctk.CTkButton(
+            geometry_utilities,
+            text="Auto deskew",
+            width=108,
+            fg_color="transparent",
+            border_width=1,
+            command=self.auto_deskew_selected,
+        ).pack(side=ctk.LEFT)
+        ctk.CTkButton(
+            processing,
+            text="Detect page boundaries...",
+            fg_color="transparent",
+            border_width=1,
+            command=self.open_auto_crop_editor,
+        ).pack(fill=ctk.X, padx=6, pady=(0, 4))
+        source_actions = ctk.CTkFrame(processing, fg_color="transparent")
+        source_actions.pack(fill=ctk.X, padx=6, pady=(0, 10))
+        ctk.CTkButton(
+            source_actions,
+            text="Replace...",
+            width=108,
+            fg_color="transparent",
+            border_width=1,
+            command=self.replace_selected_page_from_file,
+        ).pack(side=ctk.LEFT, padx=(0, 4))
+        ctk.CTkButton(
+            source_actions,
+            text="Retake",
+            width=108,
+            fg_color="transparent",
+            border_width=1,
+            command=self.retake_selected_page_from_camera,
+        ).pack(side=ctk.LEFT)
 
         ctk.CTkLabel(processing, text="Document type", anchor="w").pack(
             fill=ctk.X, padx=6, pady=(4, 2)
@@ -818,24 +942,6 @@ class UnifiedScanApp(ctk.CTk):
             variable=self.dewarp_method_var,
             command=self._on_dewarp_method_change,
         ).pack(fill=ctk.X, padx=6, pady=(0, 5))
-        geometry_actions = ctk.CTkFrame(processing, fg_color="transparent")
-        geometry_actions.pack(fill=ctk.X, padx=6, pady=(0, 5))
-        ctk.CTkButton(
-            geometry_actions,
-            text="Perspective...",
-            width=108,
-            fg_color="transparent",
-            border_width=1,
-            command=self.open_manual_corners_editor,
-        ).pack(side=ctk.LEFT, padx=(0, 4))
-        ctk.CTkButton(
-            geometry_actions,
-            text="Wave curve...",
-            width=108,
-            fg_color="transparent",
-            border_width=1,
-            command=self.open_dewarp_points_editor,
-        ).pack(side=ctk.LEFT)
         ctk.CTkLabel(
             processing,
             textvariable=self.geometry_summary_var,
@@ -1151,59 +1257,6 @@ class UnifiedScanApp(ctk.CTk):
             return
         self.import_folder_var.set(str(folder))
         self._import_paths(paths=paths)
-
-    def open_page_tools_dialog(self) -> None:
-        window = ctk.CTkToplevel(self)
-        window.title("Page tools")
-        window.geometry("440x510")
-        window.resizable(False, False)
-        window.transient(self)
-
-        ctk.CTkLabel(
-            window,
-            text="Page tools",
-            font=ctk.CTkFont(size=18, weight="bold"),
-        ).pack(anchor="w", padx=16, pady=(16, 2))
-        ctk.CTkLabel(
-            window,
-            text="These actions use the selection in Workspace.",
-            text_color=("#60646c", "#a0a4ab"),
-        ).pack(anchor="w", padx=16, pady=(0, 12))
-
-        body = ctk.CTkFrame(window)
-        body.pack(fill=ctk.BOTH, expand=True, padx=16, pady=(0, 12))
-        body.grid_columnconfigure(0, weight=1)
-        body.grid_columnconfigure(1, weight=1)
-
-        def add(row: int, column: int, text: str, command) -> None:
-            ctk.CTkButton(
-                body,
-                text=text,
-                fg_color="transparent",
-                border_width=1,
-                command=command,
-            ).grid(row=row, column=column, sticky="ew", padx=6, pady=6)
-
-        ctk.CTkLabel(body, text="Deskew estimator", anchor="w").grid(
-            row=0, column=0, sticky="w", padx=6, pady=6
-        )
-        ctk.CTkOptionMenu(
-            body,
-            values=list(DESKEW_UI_METHODS),
-            variable=self.deskew_method_var,
-        ).grid(row=0, column=1, sticky="ew", padx=6, pady=6)
-
-        add(1, 0, "Perspective corners", self.open_manual_corners_editor)
-        add(1, 1, "Auto crop", self.open_auto_crop_editor)
-        add(2, 0, "Auto orient", self.auto_orient_selected)
-        add(2, 1, "Auto deskew", self.auto_deskew_selected)
-        add(3, 0, "Replace from file", self.replace_selected_page_from_file)
-        add(3, 1, "Retake with camera", self.retake_selected_page_from_camera)
-        add(4, 0, "Split book spread", self.split_selected_as_spread)
-        add(4, 1, "Auto remove waves", self.remove_waves_selected)
-        add(5, 0, "Adjust wave curve", self.open_dewarp_points_editor)
-        add(5, 1, "Refresh pages", self.refresh_page_list)
-        add(6, 1, "Close", window.destroy)
 
     def _sync_lens_mode_from_controls(self) -> None:
         inferred = infer_lens_mode(self.preprocess_preset_var.get(), self.postprocess_var.get())
@@ -2375,6 +2428,17 @@ class UnifiedScanApp(ctk.CTk):
             button = getattr(self, name, None)
             if button is not None:
                 button.configure(state=state)
+        split_button = getattr(self, "apply_split_button", None)
+        if split_button is not None:
+            split_ready = False
+            if len(selected) == 1:
+                selected_entry = self.session.entries[next(iter(selected))]
+                split_ready = bool(
+                    self.pending_split_entry_id == selected_entry.entry_id
+                    and self.pending_split_ratio is not None
+                    and self.pending_split_revision == selected_entry.revision
+                )
+            split_button.configure(state=tk.NORMAL if split_ready else tk.DISABLED)
         menu = getattr(self, "page_context_menu", None)
         if menu is not None:
             menu.entryconfigure(0, state=tk.NORMAL if can_move_up else tk.DISABLED)
@@ -2409,13 +2473,19 @@ class UnifiedScanApp(ctk.CTk):
 
     def _on_page_drag_start(self, event) -> None:
         index = self._page_index_at_y(event.y)
+        selected_indexes = self._selected_entry_indices()
+        if index is not None and index not in selected_indexes:
+            selected_indexes = [index]
         self.page_drag_state = (
             None
             if index is None
             else {
                 "index": index,
                 "start_y": event.y,
-                "entry_ids": (),
+                "entry_ids": tuple(
+                    self.session.entries[selected_index].entry_id
+                    for selected_index in selected_indexes
+                ),
                 "dragged": False,
                 "moved": False,
             }
@@ -2426,11 +2496,6 @@ class UnifiedScanApp(ctk.CTk):
         if state is None or abs(event.y - int(state["start_y"])) < 5:
             return None
         if not state["dragged"]:
-            indexes = self._selected_entry_indices()
-            start_index = int(state["index"])
-            if start_index not in indexes:
-                indexes = [start_index]
-            state["entry_ids"] = tuple(self.session.entries[index].entry_id for index in indexes)
             state["dragged"] = True
             self.page_listbox.configure(cursor="fleur")
         drop_position = self._page_drop_position(event.y)
@@ -2447,9 +2512,7 @@ class UnifiedScanApp(ctk.CTk):
             state["moved"] = True
             self.refresh_page_list(keep_entry_ids=entry_ids)
             direction = "after" if place_after else "before"
-            self._set_status(
-                f"Moving {len(entry_ids)} page(s) {direction} page {target_index + 1}"
-            )
+            self._set_status(f"Moving {len(entry_ids)} page(s) {direction} page {target_index + 1}")
         return "break"
 
     def _on_page_drag_end(self, event) -> str | None:
@@ -2549,6 +2612,17 @@ class UnifiedScanApp(ctk.CTk):
 
         entry = self.session.entries[index]
         mode = self.preview_mode_var.get()
+        split_ratio = (
+            self.pending_split_ratio
+            if self.pending_split_entry_id == entry.entry_id
+            and self.pending_split_revision == entry.revision
+            else None
+        )
+        self.page_preview_after_title.configure(
+            text="Processed preview · 2 output pages"
+            if split_ratio is not None
+            else "Processed preview"
+        )
         try:
             before = self._review_before_image(entry)
         except Exception as exc:
@@ -2604,6 +2678,7 @@ class UnifiedScanApp(ctk.CTk):
                     source,
                     request,
                     cancel_event,
+                    split_ratio,
                 ),
             )
         else:
@@ -2670,6 +2745,7 @@ class UnifiedScanApp(ctk.CTk):
         source: np.ndarray,
         request: PageProcessingRequest,
         cancel_event: threading.Event,
+        split_ratio: float | None = None,
     ) -> None:
         self.review_preview_job = None
         if self._closing or generation != self.review_preview_generation:
@@ -2683,16 +2759,27 @@ class UnifiedScanApp(ctk.CTk):
                     source,
                     request,
                     cancel_event,
+                    split_ratio,
                 ),
             )
             return
 
         def run() -> None:
             try:
-                result = process_document_page(
-                    source,
-                    replace(request, cancel_cb=cancel_event.is_set),
-                )
+                processing_request = replace(request, cancel_cb=cancel_event.is_set)
+                if split_ratio is None:
+                    result = process_document_page(source, processing_request)
+                    result_image = result.image
+                    diagnostics = result.diagnostics
+                else:
+                    left_source, right_source = _split_at_ratio(source, split_ratio)
+                    left_result = process_document_page(left_source, processing_request)
+                    right_result = process_document_page(right_source, processing_request)
+                    result_image = _compose_split_preview(
+                        left_result.image,
+                        right_result.image,
+                    )
+                    diagnostics = right_result.diagnostics
             except Exception as exc:
                 if cancel_event.is_set():
                     return
@@ -2700,7 +2787,7 @@ class UnifiedScanApp(ctk.CTk):
             else:
                 if not cancel_event.is_set():
                     self.job_queue.put(
-                        ("review_preview", (generation, result.image, result.diagnostics, None))
+                        ("review_preview", (generation, result_image, diagnostics, None))
                     )
 
         self.review_preview_thread = threading.Thread(
@@ -2826,7 +2913,9 @@ class UnifiedScanApp(ctk.CTk):
             self._set_status("No selected pages to delete")
             self._update_page_action_states()
             return
-        keep_index = min(indices[0], len(self.session.entries) - 1) if self.session.entries else None
+        keep_index = (
+            min(indices[0], len(self.session.entries) - 1) if self.session.entries else None
+        )
         self.refresh_page_list(keep_index=keep_index)
         self._set_status(f"Deleted {removed} page(s). Session pages: {len(self.session)}")
 
@@ -2943,6 +3032,7 @@ class UnifiedScanApp(ctk.CTk):
         *,
         auto_detect: bool,
         initial_entry_index: int | None = None,
+        from_current_geometry: bool = False,
     ) -> None:
         if not indices:
             self._set_status("Select page(s) for corner editing.")
@@ -2961,6 +3051,13 @@ class UnifiedScanApp(ctk.CTk):
         )
         state = {"index": initial_position}
         points_by_entry: dict[str, np.ndarray] = {}
+        source_images_by_entry = {
+            entry.entry_id: _perspective_source_image(
+                entry,
+                from_current_geometry=from_current_geometry,
+            )
+            for entry in entries
+        }
         selected_entry_ids = tuple(
             entry.entry_id for entry in self.session.entries if entry.selected
         )
@@ -2983,7 +3080,11 @@ class UnifiedScanApp(ctk.CTk):
 
         header = ctk.CTkLabel(
             win,
-            text="Browse pages, adjust corners on the raw source, then apply to the current page or all pages in this editor.",
+            text=(
+                "Adjust corners on the corrected page geometry, then apply to the current page or all pages in this editor."
+                if from_current_geometry
+                else "Adjust corners on the raw source, then apply to the current page or all pages in this editor."
+            ),
             anchor="w",
         )
         header.pack(fill=ctk.X, padx=12, pady=(12, 6))
@@ -3027,9 +3128,7 @@ class UnifiedScanApp(ctk.CTk):
             "source_entry_id": None,
             "source_image": None,
             "points": self._default_corner_points(
-                entries[state["index"]].preview_raw_image
-                if self.lightweight_preview_var.get()
-                else entries[state["index"]].raw_image
+                source_images_by_entry[entries[state["index"]].entry_id]
             ),
         }
 
@@ -3074,24 +3173,24 @@ class UnifiedScanApp(ctk.CTk):
             if cached is not None:
                 return cached
 
+            source_image = source_images_by_entry[entry.entry_id]
             # Prefer the already-detected contour from import / previous edit.
             existing = entry.detected_contour
-            if existing is not None and not auto_detect:
+            if existing is not None and not auto_detect and not from_current_geometry:
                 points = np.asarray(existing, dtype=np.float32).reshape(-1, 2).copy()
                 points_by_entry[entry.entry_id] = points
                 return points
 
             detected: np.ndarray | None = None
             if auto_detect:
-                detected = self._detect_corner_points(entry.raw_image)
-                if detected is None and existing is not None:
+                detected = self._detect_corner_points(source_image)
+                if detected is None and existing is not None and not from_current_geometry:
                     detected = np.asarray(existing, dtype=np.float32).reshape(-1, 2)
 
             if detected is not None:
                 points = np.asarray(detected, dtype=np.float32).reshape(-1, 2).copy()
             else:
-                # Default points already live in source coordinates of the raw image.
-                points = self._default_corner_points(entry.raw_image)
+                points = self._default_corner_points(source_image)
             points_by_entry[entry.entry_id] = points
             return points
 
@@ -3170,9 +3269,7 @@ class UnifiedScanApp(ctk.CTk):
                         max(1, int(round(corrected_w * preview_scale))),
                         max(1, int(round(corrected_h * preview_scale))),
                     ),
-                    interpolation=(
-                        cv2.INTER_AREA if preview_scale < 1.0 else cv2.INTER_CUBIC
-                    ),
+                    interpolation=(cv2.INTER_AREA if preview_scale < 1.0 else cv2.INTER_CUBIC),
                 )
                 rgb = (
                     cv2.cvtColor(corrected, cv2.COLOR_GRAY2RGB)
@@ -3198,7 +3295,7 @@ class UnifiedScanApp(ctk.CTk):
             source_image = (
                 view_state["source_image"]
                 if view_state["source_entry_id"] == entry.entry_id
-                else entry.raw_image
+                else source_images_by_entry[entry.entry_id]
             )
             if source_image is None or source_image.size == 0:
                 raise RuntimeError(f"Selected page is empty: {entry.name}")
@@ -3308,7 +3405,7 @@ class UnifiedScanApp(ctk.CTk):
 
         def _auto_detect_current():
             entry_index, entry = _current_entry()
-            detected = self._detect_corner_points(entry.raw_image)
+            detected = self._detect_corner_points(source_images_by_entry[entry.entry_id])
             if detected is None:
                 messagebox.showwarning(
                     "Auto Crop", f"Document boundaries were not detected for {entry.name}."
@@ -3321,7 +3418,7 @@ class UnifiedScanApp(ctk.CTk):
             _render_corrected_preview()
 
         def _apply_entry(entry_index: int, entry, points: np.ndarray) -> None:
-            source_image = entry.raw_image
+            source_image = source_images_by_entry[entry.entry_id]
             if source_image is None or source_image.size == 0:
                 raise RuntimeError(f"Selected page is empty: {entry.name}")
             warped = warp_perspective_from_points(source_image, points.astype(np.float32))
@@ -3447,6 +3544,18 @@ class UnifiedScanApp(ctk.CTk):
             initial_entry_index=index,
         )
 
+    def open_current_geometry_corners_editor(self) -> None:
+        index, entry = self._single_selected_entry()
+        if entry is None or index is None:
+            self._set_status("Select exactly one page for additional perspective correction.")
+            return
+        self._open_corner_editor_dialog(
+            list(range(len(self.session.entries))),
+            auto_detect=False,
+            initial_entry_index=index,
+            from_current_geometry=True,
+        )
+
     def open_auto_crop_editor(self) -> None:
         indices = self._selected_entry_indices()
         if not indices:
@@ -3565,68 +3674,93 @@ class UnifiedScanApp(ctk.CTk):
         self.refresh_page_list(keep_entry_ids=entry_ids)
         self._set_status(f"Rotated {len(indices)} page(s) right.")
 
-    def split_selected_as_spread(self) -> None:
-        indices = self._selected_entry_indices()
-        if not indices:
-            self._set_status("Select page(s) to split as spread.")
+    def _clear_pending_split_preview(self) -> None:
+        self.pending_split_entry_id = None
+        self.pending_split_ratio = None
+        self.pending_split_revision = None
+        self.split_preview_var.set("Split: not previewed")
+        button = getattr(self, "apply_split_button", None)
+        if button is not None:
+            button.configure(state=tk.DISABLED)
+        title = getattr(self, "page_preview_after_title", None)
+        if title is not None:
+            title.configure(text="Processed preview")
+
+    def preview_selected_spread_split(self) -> None:
+        index, entry = self._single_selected_entry()
+        if entry is None or index is None:
+            self._set_status("Select exactly one spread to preview its split.")
             return
+        split_pair = _split_spread_pair(entry.raw_image, entry.original_image)
+        if split_pair is None:
+            self._clear_pending_split_preview()
+            self._set_status("No confident spread gutter was found; the page was not changed.")
+            self.split_preview_var.set("Split: no confident gutter")
+            return
+        _raw_halves, warped_halves = split_pair
+        ratio = warped_halves[0].shape[1] / max(1, entry.original_image.shape[1])
+        self.pending_split_entry_id = entry.entry_id
+        self.pending_split_ratio = ratio
+        self.pending_split_revision = entry.revision
+        self.split_preview_var.set(f"Split: 2 pages at {ratio * 100:.1f}%")
+        self.apply_split_button.configure(state=tk.NORMAL)
+        self.preview_mode_var.set("Compare")
+        self._layout_page_previews()
+        self.update_page_preview()
+        self._set_status("Split preview ready: original spread and two output pages.")
 
+    def _commit_entry_split(self, index: int, entry, ratio: float):
+        previous_committed = entry.committed_processing
+        left_raw, right_raw = _split_at_ratio(entry.raw_image, ratio)
+        left_warped, right_warped = _split_at_ratio(entry.original_image, ratio)
+        base_name = re.sub(r" \[[LR]\]$", "", entry.name)
+        self.session.replace_entry_image(
+            entry.entry_id,
+            raw_image=left_raw,
+            original_image=left_warped,
+            current_image=left_warped,
+            name=f"{base_name} [L]",
+            contour=None,
+            backend=None,
+        )
+        right_entry = self.session.add_image_with_contour(
+            name=f"{base_name} [R]",
+            raw_image=right_raw,
+            warped_image=right_warped,
+            contour=None,
+            backend=None,
+        )
+        self._reprocess_after_geometry_change(entry, previous_committed)
+        self._reprocess_after_geometry_change(right_entry, previous_committed)
+        from_index = self.session.entries.index(right_entry)
+        while from_index > index + 1:
+            if not self.session.move(right_entry.entry_id, -1):
+                break
+            from_index -= 1
+        return right_entry
+
+    def apply_previewed_spread_split(self) -> None:
+        index, entry = self._single_selected_entry()
+        if entry is None or index is None:
+            self._set_status("Select the spread used for the split preview.")
+            return
+        if (
+            self.pending_split_entry_id != entry.entry_id
+            or self.pending_split_ratio is None
+            or self.pending_split_revision != entry.revision
+        ):
+            self._clear_pending_split_preview()
+            self._set_status("Split preview is stale; preview the spread again.")
+            return
         try:
-            split_count = 0
-            untouched_count = 0
-            selected_entry_ids = {
-                self.session.entries[idx].entry_id for idx in indices
-            }
-            # Process from the end backwards so insertion indices stay stable.
-            for idx in sorted(indices, reverse=True):
-                entry = self.session.entries[idx]
-                raw = entry.raw_image
-                warped = entry.original_image
-                split_pair = _split_spread_pair(raw, warped)
-                if split_pair is None:
-                    untouched_count += 1
-                    continue
-                raw_halves, warped_halves = split_pair
-
-                # Replace existing entry with the left half, append the right half after it.
-                left_raw, right_raw = raw_halves
-                left_warped, right_warped = warped_halves
-                previous_committed = entry.committed_processing
-                self.session.replace_entry_image(
-                    entry.entry_id,
-                    raw_image=left_raw,
-                    original_image=left_warped,
-                    current_image=left_warped,
-                    name=f"{entry.name} [L]",
-                    contour=None,
-                    backend=None,
-                )
-                right_entry = self.session.add_image_with_contour(
-                    name=f"{entry.name} [R]",
-                    raw_image=right_raw,
-                    warped_image=right_warped,
-                    contour=None,
-                    backend=None,
-                )
-                self._reprocess_after_geometry_change(entry, previous_committed)
-                self._reprocess_after_geometry_change(right_entry, previous_committed)
-                selected_entry_ids.add(right_entry.entry_id)
-                # New entry is at the end of the list; move it to right after the original.
-                from_index = self.session.entries.index(right_entry)
-                target_index = idx + 1
-                while from_index > target_index:
-                    if not self.session.move(right_entry.entry_id, -1):
-                        break
-                    from_index -= 1
-                split_count += 1
-
-            self.refresh_page_list(keep_entry_ids=selected_entry_ids)
-            msg = f"Split {split_count} page(s) at the detected gutter."
-            if untouched_count:
-                msg += (
-                    f" {untouched_count} page(s) had no confident gutter and were left untouched."
-                )
-            self._set_status(msg)
+            right_entry = self._commit_entry_split(index, entry, self.pending_split_ratio)
+            self._clear_pending_split_preview()
+            self.preview_mode_var.set("Processed")
+            self._layout_page_previews()
+            self.refresh_page_list(keep_entry_ids=(entry.entry_id,))
+            self._set_status(
+                f"Created pages {entry.name} and {right_entry.name}; left page selected."
+            )
         except Exception as exc:
             messagebox.showerror("Split Spread Error", str(exc))
             self._set_status("Split spread failed")
@@ -4353,9 +4487,7 @@ class UnifiedScanApp(ctk.CTk):
 
         scope = "all pages" if self.apply_changes_to_all_var.get() else "selected pages"
         keep_index = target_entries[-1][0]
-        selected_entry_ids = tuple(
-            self.session.entries[idx].entry_id for idx in indices
-        )
+        selected_entry_ids = tuple(self.session.entries[idx].entry_id for idx in indices)
 
         def worker(emit, is_cancelled):
             return self._stage_apply_pages(

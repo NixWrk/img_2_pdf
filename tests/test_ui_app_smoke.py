@@ -170,12 +170,10 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert resized_source_bounds[2] - resized_source_bounds[0] > initial_source_size[0]
         assert resized_source_bounds[3] - resized_source_bounds[1] > initial_source_size[1]
         assert (
-            resized_preview_bounds[2] - resized_preview_bounds[0]
-            > initial_corner_preview_size[0]
+            resized_preview_bounds[2] - resized_preview_bounds[0] > initial_corner_preview_size[0]
         )
         assert (
-            resized_preview_bounds[3] - resized_preview_bounds[1]
-            > initial_corner_preview_size[1]
+            resized_preview_bounds[3] - resized_preview_bounds[1] > initial_corner_preview_size[1]
         )
         app.corner_next_button.invoke()
         app.update()
@@ -389,3 +387,46 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
             close_started = True
         if not close_completed:
             _pump_until(app, lambda: app._close_wait_job is None)
+
+
+def test_split_workflow_previews_two_pages_before_mutating_session(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("UNISCAN_STATE_DIR", str(tmp_path / "split-state"))
+    from uniscan.ui import app as app_module
+
+    app = app_module.UnifiedScanApp()
+    try:
+        app.withdraw()
+        spread = np.full((360, 720, 3), 235, np.uint8)
+        spread[:, 350:370] = 25
+        for x0, x1 in ((40, 330), (390, 680)):
+            for y in range(50, 330, 28):
+                app_module.cv2.line(spread, (x0, y), (x1, y), (50, 50, 50), 3)
+        app.session.add_image(name="spread", image=spread)
+        app.refresh_page_list(keep_index=0)
+        app.update()
+
+        app.preview_selected_spread_split()
+
+        assert len(app.session.entries) == 1
+        assert app.preview_mode_var.get() == "Compare"
+        assert app.apply_split_button.cget("state") == "normal"
+        assert app.split_preview_var.get().startswith("Split: 2 pages")
+        _pump_until(
+            app,
+            lambda: (
+                app.page_preview_after_image is not None
+                and "2 output pages" in app.page_preview_after_title.cget("text")
+            ),
+        )
+        assert app.page_preview_before_image.shape[:2] == spread.shape[:2]
+        assert app.page_preview_after_image.shape[1] > spread.shape[1]
+
+        app.apply_previewed_spread_split()
+
+        assert [entry.name for entry in app.session.entries] == ["spread [L]", "spread [R]"]
+        assert app.page_listbox.curselection() == (0,)
+        assert app.apply_split_button.cget("state") == "disabled"
+        assert app.preview_mode_var.get() == "Processed"
+    finally:
+        app._on_close()
+        _pump_until(app, lambda: app._close_wait_job is None)

@@ -24,7 +24,10 @@ from uniscan.ui.app import (
     UnifiedScanApp,
     _ApplyPageSnapshot,
     _StagedAppliedPage,
+    _compose_split_preview,
     _detection_summary,
+    _perspective_source_image,
+    _split_at_ratio,
     _split_spread_pair,
     run_app,
 )
@@ -424,9 +427,7 @@ def test_preview_reports_applied_and_rejected_wave_correction() -> None:
         )
     )
     app._handle_review_preview_result(1, image, rejected, None)
-    assert app.geometry_summary_var.get() == (
-        "Wave preview unchanged: insufficient line evidence"
-    )
+    assert app.geometry_summary_var.get() == ("Wave preview unchanged: insufficient line evidence")
 
 
 def test_gui_spread_split_replays_warped_ratio_on_raw(monkeypatch) -> None:
@@ -447,6 +448,67 @@ def test_gui_spread_split_replays_warped_ratio_on_raw(monkeypatch) -> None:
     assert len(calls) == 1 and calls[0] is warped
     assert [part.shape[1] for part in warped_halves] == [480, 320]
     assert [part.shape[1] for part in raw_halves] == [600, 400]
+
+
+def test_split_preview_composes_two_pages_without_changing_source() -> None:
+    source = np.full((100, 240, 3), 180, np.uint8)
+    left, right = _split_at_ratio(source, 0.4)
+
+    composed = _compose_split_preview(left, right)
+
+    assert source.shape == (100, 240, 3)
+    assert left.shape == (100, 96, 3)
+    assert right.shape == (100, 144, 3)
+    assert composed.shape[0] == 100
+    assert composed.shape[1] > source.shape[1]
+    assert np.all(composed[:, 96:104] == 48)
+
+
+def test_second_perspective_pass_uses_corrected_page_geometry() -> None:
+    raw = np.zeros((80, 120, 3), np.uint8)
+    corrected = np.zeros((60, 90, 3), np.uint8)
+    entry = SimpleNamespace(raw_image=raw, original_image=corrected)
+
+    assert _perspective_source_image(entry, from_current_geometry=False) is raw
+    assert _perspective_source_image(entry, from_current_geometry=True) is corrected
+
+
+def test_committing_previewed_split_creates_adjacent_pages_with_prior_appearance(tmp_path) -> None:
+    app = _app_for_processing()
+    app.session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
+    image = np.zeros((60, 100, 3), np.uint8)
+    image[:, :, 1] = 120
+    image[:, :, 2] = 230
+    entry = app.session.add_image(name="spread", image=image)
+    app.postprocess_var.set("Grayscale")
+    app._reprocess_entry_from_original(entry)
+
+    right_entry = app._commit_entry_split(0, entry, 0.45)
+
+    assert [item.name for item in app.session.entries] == ["spread [L]", "spread [R]"]
+    assert entry.original_image.shape[1] == 45
+    assert right_entry.original_image.shape[1] == 55
+    assert entry.current_image.ndim == 2
+    assert right_entry.current_image.ndim == 2
+    assert entry.committed_processing.recipe.postprocess_name == "Grayscale"
+    assert right_entry.committed_processing.recipe.postprocess_name == "Grayscale"
+
+
+def test_drag_captures_selected_page_ids_before_listbox_changes_selection() -> None:
+    app = object.__new__(UnifiedScanApp)
+    app.session = SimpleNamespace(
+        entries=[
+            SimpleNamespace(entry_id="a"),
+            SimpleNamespace(entry_id="b"),
+            SimpleNamespace(entry_id="c"),
+        ]
+    )
+    app._page_index_at_y = lambda _y: 1
+    app._selected_entry_indices = lambda: [0, 1]
+
+    app._on_page_drag_start(SimpleNamespace(y=25))
+
+    assert app.page_drag_state["entry_ids"] == ("a", "b")
 
 
 def test_detection_summary_never_calls_fallback_detected() -> None:
