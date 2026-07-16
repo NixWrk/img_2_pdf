@@ -150,7 +150,7 @@ def test_pre_split_rotation_still_splits_real_spread() -> None:
 def test_portrait_source_rejects_false_gutter_from_bad_landscape_crop(monkeypatch) -> None:
     upright = np.full((900, 600, 3), 245, dtype=np.uint8)
     sideways = cv2.rotate(upright, cv2.ROTATE_90_CLOCKWISE)
-    bad_crop = np.full((900, 300, 3), 235, dtype=np.uint8)
+    bad_crop = np.full((900, 100, 3), 235, dtype=np.uint8)
     bad_crop[445:455, :] = 25
 
     monkeypatch.setattr(
@@ -184,7 +184,7 @@ def test_portrait_source_rejects_false_gutter_from_bad_landscape_crop(monkeypatc
 def test_strict_detection_rejects_bad_landscape_crop_from_portrait(monkeypatch) -> None:
     upright = np.full((900, 600, 3), 245, dtype=np.uint8)
     sideways = cv2.rotate(upright, cv2.ROTATE_90_CLOCKWISE)
-    bad_crop = np.full((900, 300, 3), 235, dtype=np.uint8)
+    bad_crop = np.full((900, 100, 3), 235, dtype=np.uint8)
     monkeypatch.setattr(
         "uniscan.core.pipeline.scan_with_document_detector",
         lambda _image, **_kwargs: ScanOutput(
@@ -206,6 +206,90 @@ def test_strict_detection_rejects_bad_landscape_crop_from_portrait(monkeypatch) 
                 pre_split_rotation_degrees=270,
             ),
         )
+
+
+def test_large_landscape_crop_inside_portrait_canvas_can_split(monkeypatch) -> None:
+    upright_source = np.full((900, 600, 3), 245, dtype=np.uint8)
+    sideways_source = cv2.rotate(upright_source, cv2.ROTATE_90_CLOCKWISE)
+    upright_spread = _spread_image()
+    sideways_spread = cv2.rotate(upright_spread, cv2.ROTATE_90_CLOCKWISE)
+    monkeypatch.setattr(
+        "uniscan.core.pipeline.scan_with_document_detector",
+        lambda _image, **_kwargs: ScanOutput(
+            warped=sideways_spread,
+            contour=None,
+            backend="fake",
+            detected=True,
+            raw_result=None,
+        ),
+    )
+
+    pages = process_loaded_items(
+        [("pdf-page.png", sideways_source)],
+        options=PipelineOptions(
+            detect_document=True,
+            two_page_mode=True,
+            pre_split_rotation_degrees=270,
+        ),
+    )
+
+    assert len(pages) == 2
+    assert all(page.spread_detected for page in pages)
+    assert all(page.detected for page in pages)
+
+
+def test_embedded_spread_inside_portrait_canvas_can_split() -> None:
+    canvas = np.full((900, 600, 3), 255, dtype=np.uint8)
+    photo = np.full((360, 600, 3), 35, dtype=np.uint8)
+    cv2.rectangle(photo, (20, 15), (294, 345), (235, 235, 235), -1)
+    cv2.rectangle(photo, (306, 15), (580, 345), (235, 235, 235), -1)
+    for y in range(60, 320, 40):
+        cv2.line(photo, (45, y), (270, y), (80, 80, 80), 3)
+        cv2.line(photo, (330, y), (555, y), (80, 80, 80), 3)
+    canvas[270:630, :] = photo
+
+    pages = process_loaded_items(
+        [("embedded-spread.png", canvas)],
+        options=PipelineOptions(detect_document=False, two_page_mode=True),
+    )
+
+    assert len(pages) == 2
+    assert all(page.spread_detected for page in pages)
+    assert all(page.current.shape[0] < 400 for page in pages)
+
+
+def test_embedded_spread_is_checked_after_rejecting_bad_detector_crop(monkeypatch) -> None:
+    canvas = np.full((900, 600, 3), 255, dtype=np.uint8)
+    photo = np.full((360, 600, 3), 35, dtype=np.uint8)
+    cv2.rectangle(photo, (20, 15), (294, 345), (235, 235, 235), -1)
+    cv2.rectangle(photo, (306, 15), (580, 345), (235, 235, 235), -1)
+    for y in range(60, 320, 40):
+        cv2.line(photo, (45, y), (270, y), (80, 80, 80), 3)
+        cv2.line(photo, (330, y), (555, y), (80, 80, 80), 3)
+    canvas[270:630, :] = photo
+    bad_crop = np.full((100, 600, 3), 255, dtype=np.uint8)
+    monkeypatch.setattr(
+        "uniscan.core.pipeline.scan_with_document_detector",
+        lambda _image, **_kwargs: ScanOutput(
+            warped=bad_crop,
+            contour=None,
+            backend="fake",
+            detected=True,
+            raw_result=None,
+        ),
+    )
+
+    pages = process_loaded_items(
+        [("embedded-spread.png", canvas)],
+        options=PipelineOptions(detect_document=True, two_page_mode=True),
+    )
+
+    assert len(pages) == 2
+    assert all(page.spread_detected for page in pages)
+    assert all(page.detected is False for page in pages)
+    assert all(
+        page.fallback_reason == "rejected landscape crop from portrait source" for page in pages
+    )
 
 
 def test_build_pdf_uses_fixed_dpi_layout_and_atomically_publishes(tmp_path, monkeypatch) -> None:

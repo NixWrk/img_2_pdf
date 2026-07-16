@@ -229,7 +229,7 @@ orientation is configured with `--two-page`, that known rotation is applied befo
 decision. GUI Apply and headless conversion then share
 `PageProcessingRequest -> process_document_page() -> PageProcessingResult` for:
 
-1. conservative non-OCR 0/90/180/270 orientation;
+1. conservative non-OCR 0/90/270 orientation (180 is explicit-only);
 2. small-angle deskew: `hybrid`, `hough`, or `min_area`;
 3. local dewarp;
 4. cleanup/postprocess;
@@ -242,8 +242,10 @@ avoid inherently ambiguous 180-degree text-direction guesses.
 Spread mode is conservative: the oriented source frame must itself have spread-like landscape
 geometry, a wide detector crop alone is not sufficient, and an uncertain image is kept as one page
 instead of being cut at its midpoint. The report records `spreadDetected`, `spreadConfidence`, and
-`spreadReason` for each produced page. A boundary crop that changes a portrait source into a wide
-strip is rejected as destructive and recorded as a detection fallback.
+`spreadReason` for each produced page. A small boundary crop that changes a portrait source into a
+wide strip is rejected as destructive and recorded as a detection fallback; a substantial
+landscape crop can still represent a real spread inside a portrait PDF canvas. When boundary
+detection leaves that canvas intact, a large horizontal content region is checked separately.
 
 `--dewarp textline` uses the built-in text-line geometry estimator and needs no optional model
 runtime. `--dewarp auto` is a conservative policy when explicitly selected: it tries text-line

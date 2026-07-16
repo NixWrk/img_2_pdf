@@ -5,6 +5,7 @@ import pytest
 from uniscan.core.orientation import (
     ORIENTATION_METHOD_AUTO,
     ORIENTATION_METHOD_NONE,
+    _LayoutEvidence,
     estimate_page_orientation,
     orient_document,
 )
@@ -40,7 +41,6 @@ def _text_page() -> np.ndarray:
     [
         (None, 0),
         (cv2.ROTATE_90_CLOCKWISE, 270),
-        (cv2.ROTATE_180, 180),
         (cv2.ROTATE_90_COUNTERCLOCKWISE, 90),
     ],
 )
@@ -103,6 +103,26 @@ def test_orientation_is_noop_for_ambiguous_and_disabled_images() -> None:
     assert np.array_equal(unchanged, ambiguous)
     assert disabled is ambiguous
     assert disabled_diagnostics.reason == "disabled"
+
+
+def test_orientation_never_guesses_180_degree_correction(monkeypatch) -> None:
+    evidence = {
+        0: _LayoutEvidence(0, 0.8, 0.10, 8),
+        90: _LayoutEvidence(90, 0.1, 0.10, 8),
+        180: _LayoutEvidence(180, 0.8, 0.9, 8),
+        270: _LayoutEvidence(270, 0.1, 0.10, 8),
+    }
+    monkeypatch.setattr(
+        "uniscan.core.orientation._layout_evidence",
+        lambda _image, angle: evidence[angle],
+    )
+
+    diagnostics = estimate_page_orientation(_text_page())
+
+    assert diagnostics.applied is False
+    assert diagnostics.angle_degrees == 0
+    assert diagnostics.confidence > 0.5
+    assert diagnostics.reason == "ambiguous_half_turn"
 
 
 def test_orientation_rejects_unknown_method() -> None:

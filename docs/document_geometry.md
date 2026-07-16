@@ -31,7 +31,7 @@ and latency comparisons reproducible.
 ## Orientation
 
 Orientation correction is disabled by default (`--orientation none`). When explicitly selected,
-`--orientation auto` performs conservative 0/90/180/270-degree correction without OCR. It compares
+`--orientation auto` performs conservative 0/90/270-degree correction without OCR. It compares
 horizontal line-layout evidence and glyph baseline asymmetry. Sparse, graphical, or ambiguous
 pages remain unchanged and the reason is recorded. EXIF orientation is still applied while loading,
 and manual 90-degree rotation remains available in Page tools.
@@ -40,8 +40,12 @@ With `--two-page`, a forced `--orientation 90|180|270` is applied before spread 
 a sideways portrait page is evaluated in its actual portrait geometry. The oriented source frame
 must be landscape before a detector crop can be considered a spread. A spread is split only when
 the central-gutter detector is confident; no midpoint fallback is used for uncertain frames. A
-boundary result that changes a portrait source into a landscape strip is rejected so an internal
-table or diagram cannot become a destructive page crop.
+small boundary result that changes a portrait source into a landscape strip is rejected so an
+internal table or diagram cannot become a destructive page crop. A large landscape crop is still
+eligible for gutter detection because imported portrait PDF pages can contain photographed spreads.
+If boundary detection leaves the PDF canvas intact, a horizontal content box covering at least 30%
+of it is also eligible. Automatic 180-degree correction is intentionally disabled because page
+direction cannot be established reliably without OCR; use explicit `--orientation 180` when known.
 
 ## Deskew
 

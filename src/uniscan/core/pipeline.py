@@ -13,6 +13,7 @@ import cv2
 import img2pdf
 import numpy as np
 
+from uniscan.core.layout import detect_content_box
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.orientation import rotate_right_angle
 from uniscan.core.scanner_adapter import (
@@ -161,7 +162,14 @@ def process_loaded_items(
         warped_height, warped_width = oriented_warped.shape[:2]
         source_aspect = raw_width / max(1, raw_height)
         warped_aspect = warped_width / max(1, warped_height)
-        if options.two_page_mode and source_aspect < 1.3 <= warped_aspect:
+        crop_area_ratio = (warped_width * warped_height) / max(1, raw_width * raw_height)
+        landscape_crop_from_portrait = source_aspect < 1.3 <= warped_aspect
+        trusted_landscape_crop = landscape_crop_from_portrait and crop_area_ratio >= 0.30
+        if (
+            options.two_page_mode
+            and landscape_crop_from_portrait
+            and not trusted_landscape_crop
+        ):
             # A table or other internal rectangle can fool boundary detection
             # into turning a portrait source into a wide strip. Keep the full
             # source rather than splitting or publishing a destructive crop.
@@ -171,24 +179,57 @@ def process_loaded_items(
             fallback_reason = "rejected landscape crop from portrait source"
             if options.strict_detect:
                 raise RuntimeError(f"Document detection failed for {name}: {fallback_reason}")
+            warped_height, warped_width = oriented_warped.shape[:2]
+            warped_aspect = warped_width / max(1, warped_height)
+
+        spread_input = oriented_warped
+        raw_split_input = oriented_raw
+        embedded_landscape_crop = False
+        if options.two_page_mode and source_aspect < 1.3 and warped_aspect < 1.3:
+            content_box, content_confidence, _content_reason = detect_content_box(oriented_warped)
+            content_aspect = content_box.width / max(1, content_box.height)
+            content_area_ratio = (content_box.width * content_box.height) / max(
+                1, warped_width * warped_height
+            )
+            if (
+                content_confidence >= 0.5
+                and content_aspect >= 1.3
+                and content_area_ratio >= 0.30
+            ):
+                x0 = content_box.x
+                y0 = content_box.y
+                x1 = x0 + content_box.width
+                y1 = y0 + content_box.height
+                spread_input = oriented_warped[y0:y1, x0:x1]
+
+                raw_x0 = int(round(x0 * raw_width / max(1, warped_width)))
+                raw_y0 = int(round(y0 * raw_height / max(1, warped_height)))
+                raw_x1 = int(round(x1 * raw_width / max(1, warped_width)))
+                raw_y1 = int(round(y1 * raw_height / max(1, warped_height)))
+                raw_split_input = oriented_raw[raw_y0:raw_y1, raw_x0:raw_x1]
+                embedded_landscape_crop = True
 
         if options.two_page_mode:
-            if source_aspect < 1.3:
+            if (
+                source_aspect < 1.3
+                and not trusted_landscape_crop
+                and not embedded_landscape_crop
+            ):
                 spread = SpreadSplitResult(
                     (oriented_warped,),
                     None,
                     "source_aspect_not_spread",
                 )
             else:
-                spread = split_spread_analyzed(oriented_warped, fallback="none")
+                spread = split_spread_analyzed(spread_input, fallback="none")
             warped_halves = spread.pages
             _check_cancelled(cancel_cb)
             if len(warped_halves) == 2:
                 # Estimate split ratio from the warped result and replay it on raw
-                warped_width = oriented_warped.shape[1]
+                warped_width = spread_input.shape[1]
                 left_warped_width = warped_halves[0].shape[1]
                 ratio = left_warped_width / max(1, warped_width)
-                raw_halves = _safe_split_proportional(oriented_raw, ratio=ratio)
+                raw_halves = _safe_split_proportional(raw_split_input, ratio=ratio)
                 for half_index, (raw_half, warped_half) in enumerate(
                     zip(raw_halves, warped_halves)
                 ):

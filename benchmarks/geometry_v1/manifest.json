@@ -16,7 +16,7 @@
     {
       "id": "upside-down",
       "image": "upside-down.png",
-      "expectedOrientationAngle": 180
+      "expectedOrientationAngle": 0
     },
     {
       "id": "sideways-ccw",

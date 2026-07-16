@@ -253,6 +253,14 @@ def estimate_page_orientation(
         )
 
     angle = best.angle_degrees
+    if angle == 180:
+        return OrientationDiagnostics(
+            method=ORIENTATION_METHOD_AUTO,
+            applied=False,
+            confidence=round(confidence, 3),
+            line_count=best.line_count,
+            reason="ambiguous_half_turn",
+        )
     return OrientationDiagnostics(
         method=ORIENTATION_METHOD_AUTO,
         applied=angle != 0,

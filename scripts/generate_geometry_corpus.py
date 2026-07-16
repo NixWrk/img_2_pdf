@@ -100,7 +100,7 @@ def generate(output_dir: Path) -> None:
         "cases": [
             {"id": "upright", "image": "upright.png", "expectedOrientationAngle": 0},
             {"id": "sideways-cw", "image": "sideways-cw.png", "expectedOrientationAngle": 270},
-            {"id": "upside-down", "image": "upside-down.png", "expectedOrientationAngle": 180},
+            {"id": "upside-down", "image": "upside-down.png", "expectedOrientationAngle": 0},
             {"id": "sideways-ccw", "image": "sideways-ccw.png", "expectedOrientationAngle": 90},
             {
                 "id": "skewed",
