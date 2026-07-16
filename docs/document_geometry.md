@@ -144,8 +144,10 @@ text-line method; it does not enable the UVDoc fallback. Workspace Processing ex
 **Page perspective** and **Edit page waves** directly. The inline perspective editor shows
 draggable corner handles beside a live rectified result. The inline wave editor shows the source
 curve and corrected result; points can be added, removed, moved horizontally or vertically, and
-shifted together by dragging the center curve. Its normalized points are saved with the page and
-immediately reprocessed at full resolution when **Apply points** is pressed. Corner, split-line,
+the working curve can be moved vertically onto a contrasting page edge without changing its
+deformation values. The two auxiliary curves may move outside the image. Normalized point values
+are saved with the page and immediately reprocessed at full resolution when **Apply points** is
+pressed. Corner, split-line,
 and wave-curve drags display a magnifier from the full-resolution
 source. Perspective and wave previews are also calculated from that source, then resized only for
 the screen. **Adjust split** opens the same inline layout: drag the gutter line, choose **Preview

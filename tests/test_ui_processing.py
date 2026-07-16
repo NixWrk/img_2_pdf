@@ -28,10 +28,10 @@ from uniscan.ui.app import (
     _compose_split_preview,
     _detection_summary,
     _fit_image_to_box,
+    _move_dewarp_guide_anchor,
     _move_dewarp_control_point,
     _perspective_source_image,
     _remove_dewarp_control_point,
-    _shift_dewarp_control_points,
     _split_at_ratio,
     _split_spread_pair,
     run_app,
@@ -503,7 +503,7 @@ def test_import_sources_accept_files_and_multiple_folders_without_duplicates(tmp
     assert sources == [first_image, second_pdf]
 
 
-def test_dewarp_points_can_be_added_moved_removed_and_shifted_as_a_line() -> None:
+def test_dewarp_points_and_visual_guide_can_be_moved_independently() -> None:
     points = [(0.0, 0.0), (0.5, 0.02), (1.0, 0.0)]
 
     added = _add_dewarp_control_point(points, 0.25, -0.05)
@@ -516,10 +516,15 @@ def test_dewarp_points_can_be_added_moved_removed_and_shifted_as_a_line() -> Non
     assert points[1][0] < points[2][0]
     assert points[1][1] == 0.24
 
-    before = [value for _x, value in points]
-    applied = _shift_dewarp_control_points(points, -0.08)
-    assert applied == pytest.approx(-0.08)
-    assert [value for _x, value in points] == pytest.approx([value - 0.08 for value in before])
+    before = list(points)
+    anchor = _move_dewarp_guide_anchor(points, 0.5, -0.48)
+    assert anchor == pytest.approx(0.02)
+    assert points == before
+
+    top_anchor = _move_dewarp_guide_anchor([(0.0, -0.08), (1.0, 0.04)], 0.5, -1.0)
+    bottom_anchor = _move_dewarp_guide_anchor([(0.0, -0.08), (1.0, 0.04)], 0.5, 1.0)
+    assert top_anchor == pytest.approx(0.08)
+    assert bottom_anchor == pytest.approx(0.96)
 
     assert _remove_dewarp_control_point(points, 1) is True
     assert len(points) == 3

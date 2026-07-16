@@ -80,7 +80,8 @@ behind progressive disclosure.
   capture window.
 - Perspective, boundary detection, wave editing, and advanced processing replace the Workspace
   content while active instead of opening modal processing windows.
-- Wave control points support add, remove, horizontal/vertical drag, and whole-curve vertical drag.
+- Wave control points support add, remove, and horizontal/vertical drag. The working curve has an
+  independent vertical anchor so it can follow a contrasting page edge without changing dewarp.
 - Spread splitting has an inline draggable gutter with a full-resolution magnifier. Its preview
   remains in Original/Processed/Compare and creates pages only after explicit confirmation.
 4. Run the manual workflow with a real camera and record task time/click count for common jobs.

@@ -353,17 +353,16 @@ def _remove_dewarp_control_point(points: list[tuple[float, float]], index: int) 
     return True
 
 
-def _shift_dewarp_control_points(
+def _move_dewarp_guide_anchor(
     points: list[tuple[float, float]],
+    anchor: float,
     delta: float,
 ) -> float:
     if not points:
-        return 0.0
+        return float(np.clip(anchor + delta, 0.0, 1.0))
     minimum = min(value for _x, value in points)
     maximum = max(value for _x, value in points)
-    applied = float(np.clip(delta, -0.24 - minimum, 0.24 - maximum))
-    points[:] = [(x_value, value + applied) for x_value, value in points]
-    return applied
+    return float(np.clip(anchor + delta, -minimum, 1.0 - maximum))
 
 
 def _detection_summary(results: list[PageResult]) -> str:
@@ -4275,7 +4274,8 @@ class UnifiedScanApp(ctk.CTk):
             "selected": None,
             "drag_mode": None,
             "drag_start_y": 0.0,
-            "drag_start_points": None,
+            "drag_start_anchor": 0.5,
+            "guide_anchor": 0.5,
             "add_mode": False,
             "display_width": source_width,
             "display_height": source_height,
@@ -4307,24 +4307,28 @@ class UnifiedScanApp(ctk.CTk):
             point_y = np.asarray([point[1] for point in state["points"]], dtype=np.float32)
             guide_x = np.linspace(0.0, 1.0, 160, dtype=np.float32)
             guide_y = np.interp(guide_x, point_x, point_y)
-            for anchor in (0.25, 0.5, 0.75):
+            guide_anchor = float(state["guide_anchor"])
+            for guide_offset in (-0.25, 0.0, 0.25):
                 coords: list[float] = []
                 for x_value, displacement in zip(guide_x, guide_y):
                     coords.extend(
                         [
                             offset_x + float(x_value * (display_width - 1)),
-                            offset_y + float((anchor + displacement) * display_height),
+                            offset_y
+                            + float(
+                                (guide_anchor + guide_offset + displacement) * display_height
+                            ),
                         ]
                     )
                 left_canvas.create_line(
                     *coords,
                     fill="#36a3ff",
-                    width=2 if anchor == 0.5 else 1,
+                    width=3 if guide_offset == 0.0 else 1,
                     tags="dewarp-overlay",
                 )
             for point_index, (x_value, displacement) in enumerate(state["points"]):
                 x_pos = offset_x + x_value * (display_width - 1)
-                y_pos = offset_y + (0.5 + displacement) * display_height
+                y_pos = offset_y + (guide_anchor + displacement) * display_height
                 selected = point_index == state["selected"]
                 radius = 8 if selected else 6
                 left_canvas.create_oval(
@@ -4430,11 +4434,12 @@ class UnifiedScanApp(ctk.CTk):
             display_height = int(state["display_height"])
             offset_x = float(state["offset_x"])
             offset_y = float(state["offset_y"])
+            guide_anchor = float(state["guide_anchor"])
             best_index = None
             best_distance = 16.0
             for point_index, (x_value, displacement) in enumerate(state["points"]):
                 px = offset_x + x_value * (display_width - 1)
-                py = offset_y + (0.5 + displacement) * display_height
+                py = offset_y + (guide_anchor + displacement) * display_height
                 distance = float(np.hypot(x_pos - px, y_pos - py))
                 if distance < best_distance:
                     best_distance = distance
@@ -4445,7 +4450,10 @@ class UnifiedScanApp(ctk.CTk):
             local_x = float(x_pos) - float(state["offset_x"])
             local_y = float(y_pos) - float(state["offset_y"])
             x_value = local_x / max(1, int(state["display_width"]) - 1)
-            displacement = local_y / max(1, int(state["display_height"])) - 0.5
+            displacement = (
+                local_y / max(1, int(state["display_height"]))
+                - float(state["guide_anchor"])
+            )
             return (
                 float(np.clip(x_value, 0.0, 1.0)),
                 float(np.clip(displacement, -0.24, 0.24)),
@@ -4456,7 +4464,9 @@ class UnifiedScanApp(ctk.CTk):
             point_x = np.asarray([point[0] for point in state["points"]], dtype=np.float32)
             point_y = np.asarray([point[1] for point in state["points"]], dtype=np.float32)
             curve_y = float(np.interp(x_value, point_x, point_y))
-            expected_y = float(state["offset_y"]) + (0.5 + curve_y) * int(state["display_height"])
+            expected_y = float(state["offset_y"]) + (
+                float(state["guide_anchor"]) + curve_y
+            ) * int(state["display_height"])
             return abs(float(y_pos) - expected_y) <= 12.0
 
         def show_magnifier(x_pos: float, y_pos: float) -> None:
@@ -4465,7 +4475,7 @@ class UnifiedScanApp(ctk.CTk):
                 left_canvas,
                 source,
                 x_value * (source_width - 1),
-                (0.5 + displacement) * source_height,
+                (float(state["guide_anchor"]) + displacement) * source_height,
                 x_pos,
                 state,
             )
@@ -4494,7 +4504,7 @@ class UnifiedScanApp(ctk.CTk):
             elif near_center_curve(event.x, event.y):
                 state["drag_mode"] = "line"
                 state["drag_start_y"] = float(event.y)
-                state["drag_start_points"] = list(state["points"])
+                state["drag_start_anchor"] = float(state["guide_anchor"])
             else:
                 state["drag_mode"] = None
             draw_overlay()
@@ -4511,14 +4521,14 @@ class UnifiedScanApp(ctk.CTk):
                     displacement,
                 )
             elif state["drag_mode"] == "line":
-                original = state["drag_start_points"]
-                if original is None:
-                    return
-                state["points"] = list(original)
                 delta = (float(event.y) - float(state["drag_start_y"])) / max(
                     1, int(state["display_height"])
                 )
-                _shift_dewarp_control_points(state["points"], delta)
+                state["guide_anchor"] = _move_dewarp_guide_anchor(
+                    state["points"],
+                    float(state["drag_start_anchor"]),
+                    delta,
+                )
             else:
                 return
             draw_overlay()
@@ -4527,12 +4537,17 @@ class UnifiedScanApp(ctk.CTk):
         def on_up(_event) -> None:
             if state["drag_mode"] is None:
                 return
+            completed_mode = state["drag_mode"]
             state["active"] = None
             state["drag_mode"] = None
-            state["drag_start_points"] = None
             _hide_canvas_magnifier(left_canvas, state)
-            render_corrected()
-            status.set("User-adjusted preview. Apply to save these points for the page.")
+            if completed_mode == "point":
+                render_corrected()
+                status.set("User-adjusted preview. Apply to save these points for the page.")
+            else:
+                status.set(
+                    "Working line moved for easier tracing; page correction is unchanged."
+                )
 
         def begin_add_point() -> None:
             state["add_mode"] = True

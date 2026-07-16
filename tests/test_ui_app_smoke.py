@@ -266,6 +266,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert len(app.dewarp_editor_state["points"]) == initial_point_count
 
         before_shift = list(app.dewarp_editor_state["points"])
+        before_anchor = float(app.dewarp_editor_state["guide_anchor"])
         curve_x = 0.44
         curve_y = float(
             np.interp(
@@ -279,16 +280,23 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         app.dewarp_source_canvas.event_generate("<ButtonPress-1>", x=press_x, y=press_y)
         app.update()
         assert app.dewarp_source_canvas.bbox("geometry-magnifier") is not None
+        target_y = offset_y
         app.dewarp_source_canvas.event_generate(
-            "<B1-Motion>", x=press_x, y=press_y + 20, state=0x0100
+            "<B1-Motion>", x=press_x, y=target_y, state=0x0100
         )
         app.update()
         assert app.dewarp_source_canvas.bbox("geometry-magnifier") is not None
-        app.dewarp_source_canvas.event_generate("<ButtonRelease-1>", x=press_x, y=press_y + 20)
+        app.dewarp_source_canvas.event_generate("<ButtonRelease-1>", x=press_x, y=target_y)
         app.update()
         assert app.dewarp_source_canvas.bbox("geometry-magnifier") is None
-        shifted = app.dewarp_editor_state["points"]
-        assert all(after[1] > before[1] for before, after in zip(before_shift, shifted))
+        assert app.dewarp_editor_state["points"] == before_shift
+        guide_anchor = float(app.dewarp_editor_state["guide_anchor"])
+        assert guide_anchor < before_anchor
+        assert min(guide_anchor + point[1] for point in before_shift) == pytest.approx(
+            0.0, abs=0.01
+        )
+        overlay_bounds = app.dewarp_source_canvas.bbox("dewarp-overlay")
+        assert overlay_bounds is not None and overlay_bounds[1] < offset_y
 
         app.geometry("1500x920")
         app.update()

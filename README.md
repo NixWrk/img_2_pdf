@@ -87,8 +87,9 @@ four-corner perspective correction with a live corrected pane, automatic crop, 9
 orientation, deskew, an adjustable spread-split line, automatic wave removal, and an editable wave
 curve. All processing editors replace the Workspace content instead of opening another window.
 Corner, split-line, and wave-point drags show a magnifier sampled from the full-resolution source.
-Wave points can be added, removed, and moved in both axes; dragging the center curve moves the
-complete model vertically. Processing controls cover document type,
+Wave points can be added, removed, and moved in both axes; the working curve can be placed over a
+contrasting upper or lower page edge without changing the correction model. Its two auxiliary
+guides may leave the image while the working curve is moved. Processing controls cover document type,
 grayscale/B&W output, contrast, brightness, denoise, thresholding, illumination correction,
 binarization, despeckle, A4/Letter layout, margins, alignment, and lighting analysis.
 
