@@ -27,6 +27,8 @@ Record Windows version, artifact SHA-256, camera model, and operator in the rele
 - [ ] Move perspective corners, switch pages without an Apply Current step, and verify the previous
       page was saved. Change the last page, choose Done, and verify it was saved too. Check Reset
       and Auto Detect still replace the current corners.
+- [ ] Drag a perspective corner, split line, and wave point. Verify the magnifier remains circular,
+      centered directly on the cursor, and follows it without jumping to a canvas corner.
 - [ ] Open Adjust split, drag the gutter line using the full-resolution magnifier, preview both
       output pages in Compare, and confirm Create 2 pages preserves the chosen position.
 - [ ] In inline wave editing, select Top, Middle, and Bottom in turn. Give each curve a visibly

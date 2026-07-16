@@ -30,6 +30,16 @@ def _pump_until(app, predicate, *, timeout: float = 5.0) -> None:
     raise AssertionError("Timed out waiting for GUI background work.")
 
 
+def _assert_round_magnifier_at(canvas, x_pos: int, y_pos: int) -> None:
+    rings = canvas.find_withtag("geometry-magnifier-ring")
+    assert len(rings) == 1
+    assert canvas.type(rings[0]) == "oval"
+    left, top, right, bottom = canvas.coords(rings[0])
+    assert (left + right) / 2 == pytest.approx(x_pos, abs=1)
+    assert (top + bottom) / 2 == pytest.approx(y_pos, abs=1)
+    assert right - left == pytest.approx(bottom - top, abs=1)
+
+
 def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("UNISCAN_STATE_DIR", str(tmp_path / "state"))
     from uniscan.ui import app as app_module
@@ -182,11 +192,15 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         )
         app.update()
         assert app.corner_source_canvas.bbox("geometry-magnifier") is not None
+        _assert_round_magnifier_at(app.corner_source_canvas, corner_x, corner_y)
         app.corner_source_canvas.event_generate(
             "<B1-Motion>", x=corner_x + 8, y=corner_y + 8, state=0x0100
         )
         app.update()
         assert app.corner_source_canvas.bbox("geometry-magnifier") is not None
+        _assert_round_magnifier_at(
+            app.corner_source_canvas, corner_x + 8, corner_y + 8
+        )
         app.corner_source_canvas.event_generate(
             "<ButtonRelease-1>", x=corner_x + 8, y=corner_y + 8
         )
@@ -311,12 +325,14 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         app.dewarp_source_canvas.event_generate("<ButtonPress-1>", x=press_x, y=press_y)
         app.update()
         assert app.dewarp_source_canvas.bbox("geometry-magnifier") is not None
+        _assert_round_magnifier_at(app.dewarp_source_canvas, press_x, press_y)
         target_y = offset_y
         app.dewarp_source_canvas.event_generate(
             "<B1-Motion>", x=press_x, y=target_y, state=0x0100
         )
         app.update()
         assert app.dewarp_source_canvas.bbox("geometry-magnifier") is not None
+        _assert_round_magnifier_at(app.dewarp_source_canvas, press_x, target_y)
         app.dewarp_source_canvas.event_generate("<ButtonRelease-1>", x=press_x, y=target_y)
         app.update()
         assert app.dewarp_source_canvas.bbox("geometry-magnifier") is None
@@ -587,12 +603,14 @@ def test_split_workflow_previews_two_pages_before_mutating_session(tmp_path, mon
         app.split_source_canvas.event_generate("<ButtonPress-1>", x=line_x, y=drag_y)
         app.update()
         assert app.split_source_canvas.bbox("geometry-magnifier") is not None
+        _assert_round_magnifier_at(app.split_source_canvas, line_x, drag_y)
         app.split_source_canvas.event_generate(
             "<B1-Motion>", x=target_x, y=drag_y, state=0x0100
         )
         app.update()
         assert float(app.split_editor_state["ratio"]) == pytest.approx(0.4, abs=0.01)
         assert app.split_source_canvas.bbox("geometry-magnifier") is not None
+        _assert_round_magnifier_at(app.split_source_canvas, target_x, drag_y)
         app.split_source_canvas.event_generate("<ButtonRelease-1>", x=target_x, y=drag_y)
         app.update()
         assert app.split_source_canvas.bbox("geometry-magnifier") is None

@@ -86,7 +86,8 @@ The Workspace supports page selection, reorder and deletion, replacement or came
 four-corner perspective correction with a live corrected pane, automatic crop, 90-degree
 orientation, deskew, an adjustable spread-split line, automatic wave removal, and an editable wave
 curve. All processing editors replace the Workspace content instead of opening another window.
-Corner, split-line, and wave-point drags show a magnifier sampled from the full-resolution source.
+Corner, split-line, and wave-point drags show a circular magnifier centered on the cursor and
+sampled from the full-resolution source.
 Perspective point changes are saved automatically when moving to another page or choosing Done;
 Reset and Auto Detect replace the current point positions without an extra Apply Current step.
 Wave points can be added, removed, and moved in both axes on three independent Top, Middle, and

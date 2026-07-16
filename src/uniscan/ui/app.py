@@ -242,13 +242,12 @@ def _show_canvas_magnifier(
     source_x: float,
     source_y: float,
     canvas_x: float,
+    canvas_y: float,
     photo_refs: dict[str, object],
 ) -> None:
-    """Draw a full-resolution crop opposite the active drag position."""
+    """Draw a circular full-resolution lens centered on the active cursor."""
     canvas.delete("geometry-magnifier")
-    canvas_width = max(1, canvas.winfo_width())
-    canvas_height = max(1, canvas.winfo_height())
-    lens_size = max(96, min(180, canvas_width // 3, canvas_height // 3))
+    lens_size = 160
     source_height, source_width = source.shape[:2]
     crop_size = max(24, int(round(min(source_width, source_height) * 0.06)))
     crop_size = min(crop_size, max(2, source_width), max(2, source_height))
@@ -261,30 +260,40 @@ def _show_canvas_magnifier(
         ),
     )
     enlarged = cv2.resize(crop, (lens_size, lens_size), interpolation=cv2.INTER_CUBIC)
-    photo = _image_to_tk_photo(enlarged)
-    margin = 12
-    left = margin if canvas_x > canvas_width / 2 else canvas_width - lens_size - margin
-    left = max(margin, left)
-    top = margin
-    canvas.create_rectangle(
-        left - 3,
-        top - 3,
-        left + lens_size + 3,
-        top + lens_size + 3,
+    if enlarged.ndim == 2:
+        rgb = cv2.cvtColor(enlarged, cv2.COLOR_GRAY2RGB)
+    elif enlarged.shape[2] == 4:
+        rgb = cv2.cvtColor(enlarged, cv2.COLOR_BGRA2RGB)
+    else:
+        rgb = cv2.cvtColor(enlarged, cv2.COLOR_BGR2RGB)
+    coordinates = np.arange(lens_size, dtype=np.float32) - (lens_size - 1) / 2
+    grid_x, grid_y = np.meshgrid(coordinates, coordinates)
+    radius = lens_size / 2 - 2
+    alpha = np.clip((radius - np.hypot(grid_x, grid_y)) * 255.0, 0.0, 255.0).astype(
+        np.uint8
+    )
+    rgba = np.dstack((rgb, alpha))
+    photo = ImageTk.PhotoImage(Image.fromarray(rgba))
+    center_x = float(canvas_x)
+    center_y = float(canvas_y)
+    ring_radius = lens_size / 2 + 2
+    canvas.create_oval(
+        center_x - ring_radius,
+        center_y - ring_radius,
+        center_x + ring_radius,
+        center_y + ring_radius,
         fill="#111111",
         outline="#ffffff",
         width=2,
-        tags="geometry-magnifier",
+        tags=("geometry-magnifier", "geometry-magnifier-ring"),
     )
     canvas.create_image(
-        left,
-        top,
+        center_x,
+        center_y,
         image=photo,
-        anchor=tk.NW,
+        anchor=tk.CENTER,
         tags="geometry-magnifier",
     )
-    center_x = left + lens_size / 2
-    center_y = top + lens_size / 2
     canvas.create_line(
         center_x - 14,
         center_y,
@@ -304,11 +313,13 @@ def _show_canvas_magnifier(
         tags="geometry-magnifier",
     )
     photo_refs["magnifier_photo"] = photo
+    photo_refs["magnifier_center"] = (center_x, center_y)
 
 
 def _hide_canvas_magnifier(canvas: tk.Canvas, photo_refs: dict[str, object]) -> None:
     canvas.delete("geometry-magnifier")
     photo_refs["magnifier_photo"] = None
+    photo_refs["magnifier_center"] = None
 
 
 def _perspective_source_image(entry, *, from_current_geometry: bool) -> np.ndarray:
@@ -3442,6 +3453,7 @@ class UnifiedScanApp(ctk.CTk):
                     float(point[0]),
                     float(point[1]),
                     float(event.x),
+                    float(event.y),
                     canvas_image_ref,
                 )
 
@@ -3470,6 +3482,7 @@ class UnifiedScanApp(ctk.CTk):
                 x,
                 y,
                 float(event.x),
+                float(event.y),
                 canvas_image_ref,
             )
 
@@ -3977,6 +3990,7 @@ class UnifiedScanApp(ctk.CTk):
                 ratio * (source_width - 1),
                 float(source_y),
                 float(event.x),
+                float(event.y),
                 state,
             )
 
@@ -4559,6 +4573,7 @@ class UnifiedScanApp(ctk.CTk):
                 x_value * (source_width - 1),
                 (float(state["guide_anchor"]) + displacement) * source_height,
                 x_pos,
+                y_pos,
                 state,
             )
 

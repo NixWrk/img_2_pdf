@@ -150,7 +150,7 @@ curvature can be traced in three page regions; the remap interpolates smoothly b
 Normalized anchors and point values are saved with the page and immediately reprocessed at full
 resolution when **Apply points** is
 pressed. Corner, split-line,
-and wave-curve drags display a magnifier from the full-resolution
+and wave-curve drags display a circular cursor-centered magnifier from the full-resolution
 source. Perspective and wave previews are also calculated from that source, then resized only for
 the screen. **Adjust split** opens the same inline layout: drag the gutter line, choose **Preview
 split** to inspect two processed pages in Compare, and choose **Create 2 pages** only after the
