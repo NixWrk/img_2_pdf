@@ -82,7 +82,8 @@ PREPROCESS_PRESETS: dict[str, PreprocessSettings] = {
 
 
 LENS_MODE_PROFILES: dict[str, LensModeProfile] = {
-    "Document": LensModeProfile(preset_name="Document", postprocess_name="Grayscale"),
+    "Document": LensModeProfile(preset_name="Document", postprocess_name="None"),
+    "Grayscale": LensModeProfile(preset_name="Document", postprocess_name="Grayscale"),
     # Marker colour is meaningful whiteboard content; the cleanup preset adjusts
     # luminance/contrast without forcing a lossy grayscale conversion.
     "Whiteboard": LensModeProfile(preset_name="Whiteboard", postprocess_name="None"),

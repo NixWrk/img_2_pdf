@@ -43,14 +43,19 @@ def test_resolve_lens_mode_profile_handles_custom() -> None:
     profile = resolve_lens_mode_profile("Document")
     assert profile is not None
     assert profile.preset_name == "Document"
-    assert profile.postprocess_name == "Grayscale"
+    assert profile.postprocess_name == "None"
+    grayscale = resolve_lens_mode_profile("Grayscale")
+    assert grayscale is not None
+    assert grayscale.preset_name == "Document"
+    assert grayscale.postprocess_name == "Grayscale"
     whiteboard = resolve_lens_mode_profile("Whiteboard")
     assert whiteboard is not None
     assert whiteboard.postprocess_name == "None"
 
 
 def test_infer_lens_mode_returns_custom_for_non_profile_combo() -> None:
-    assert infer_lens_mode("Document", "None") == LENS_MODE_CUSTOM
+    assert infer_lens_mode("Document", "None") == "Document"
+    assert infer_lens_mode("Document", "Grayscale") == "Grayscale"
     assert infer_lens_mode("Photo", "None") == "Photo"
 
 

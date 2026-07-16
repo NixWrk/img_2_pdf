@@ -68,7 +68,7 @@ from uniscan.io import (
 from uniscan.storage import ProcessingStageCache
 
 
-LENS_MODE_CHOICES = ("none", "document", "whiteboard", "photo", "b/w")
+LENS_MODE_CHOICES = ("none", "document", "grayscale", "whiteboard", "photo", "b/w")
 IMAGE_FORMAT_CHOICES = ("png", "jpg", "jpeg", "webp", "tif", "tiff")
 DETECTOR_POLICY_CHOICES = (
     "auto",
@@ -217,7 +217,7 @@ def _resolve_processing(mode: str):
         name.lower(): profile
         for name, profile in (
             (name, resolve_lens_mode_profile(name))
-            for name in ("Document", "Whiteboard", "Photo", "B/W")
+            for name in ("Document", "Grayscale", "Whiteboard", "Photo", "B/W")
         )
     }
     profile = profiles_by_key.get(normalized)

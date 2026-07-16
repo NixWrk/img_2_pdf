@@ -46,6 +46,10 @@ eligible for gutter detection because imported portrait PDF pages can contain ph
 If boundary detection leaves the PDF canvas intact, a horizontal content box covering at least 30%
 of it is also eligible. Automatic 180-degree correction is intentionally disabled because page
 direction cannot be established reliably without OCR; use explicit `--orientation 180` when known.
+After splitting, each half is perspective-corrected independently. The candidate quadrilateral
+must cover at least 60% of the half, span at least 80% of its width, reach safe top/bottom bands,
+and have plausible page proportions; otherwise the uncut half is retained. This second pass
+corrects planar camera perspective, not cylindrical paper curl.
 
 ## Deskew
 
@@ -100,7 +104,9 @@ angle, confidence, and reason for each page, plus the spread decision and confid
 
 ## Document cleanup and lighting evidence
 
-The cleanup stage exposes global `fixed`/`otsu` thresholding and local `sauvola`/`wolf`
+The `document` cleanup profile preserves colour. Monochrome conversion is explicit through
+`--mode grayscale`, while `--mode b/w` additionally binarizes. The cleanup stage exposes global
+`fixed`/`otsu` thresholding and local `sauvola`/`wolf`
 binarization. Sauvola and Wolf use local mean and standard deviation, so they tolerate smooth page
 shadows better than one document-wide threshold. `--despeckle` removes only tiny connected
 components that have no nearby ink; punctuation-like dots close to a text body are counted as
@@ -178,8 +184,9 @@ orientations, small-angle skew, curved/straight lines, sparse graphics, a synthe
 blank page. `uniscan benchmark-geometry` compares accuracy and p95 latency with its committed
 baseline.
 
-OCR is explicitly out of scope. The existing geometry-based orientation handles all four
-right-angle candidates; a future dedicated image-classifier backend may improve ambiguous cases,
+OCR is explicitly out of scope. The existing geometry-based orientation handles automatic
+0/90/270-degree candidates plus explicit 180-degree rotation; a future dedicated image-classifier
+backend may improve ambiguous cases,
 but it must not introduce text recognition or searchable-document assembly into this pipeline.
 
 No ScanTailor GPL source was copied. The implementation uses an independent OpenCV/NumPy design;

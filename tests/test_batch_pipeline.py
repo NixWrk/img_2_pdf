@@ -289,7 +289,7 @@ def test_report_records_complete_effective_processing_configuration(tmp_path) ->
     assert report["twoPageMode"] is True
     assert report["lensMode"] == "document"
     assert report["preprocessPreset"] == "Document"
-    assert report["postprocessName"] == "Grayscale"
+    assert report["postprocessName"] == "None"
     assert report["preprocessEnabled"] is True
     assert report["contrast"] == 1.25
     assert report["brightness"] == 10
@@ -297,6 +297,34 @@ def test_report_records_complete_effective_processing_configuration(tmp_path) ->
     assert report["threshold"] == 170
     assert report["applyThreshold"] is False
     assert report["detectorBackends"] == []
+
+
+def test_document_mode_preserves_color_and_grayscale_is_explicit(tmp_path) -> None:
+    source = tmp_path / "color.png"
+    image = np.zeros((80, 120, 3), dtype=np.uint8)
+    image[:, :] = (20, 90, 180)
+    assert cv2.imwrite(str(source), image)
+
+    color_result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "color.pdf",
+        images_dir=tmp_path / "color-pages",
+        detect_document=False,
+        lens_mode="document",
+    )
+    gray_result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "gray.pdf",
+        images_dir=tmp_path / "gray-pages",
+        detect_document=False,
+        lens_mode="grayscale",
+    )
+
+    color = cv2.imread(str(color_result.image_outputs[0]), cv2.IMREAD_UNCHANGED)
+    gray = cv2.imread(str(gray_result.image_outputs[0]), cv2.IMREAD_UNCHANGED)
+    assert color is not None and color.ndim == 3
+    assert not np.array_equal(color[:, :, 0], color[:, :, 2])
+    assert gray is not None and gray.ndim == 2
 
 
 @pytest.mark.parametrize("dpi", (72, 300))

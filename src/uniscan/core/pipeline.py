@@ -18,6 +18,7 @@ from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.orientation import rotate_right_angle
 from uniscan.core.scanner_adapter import (
     DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
+    DETECTOR_BACKEND_OPENCV_HOUGH,
     _find_quad_contour,
     scan_with_document_detector,
 )
@@ -42,6 +43,7 @@ class PipelineOptions:
     detector_backends: tuple[str, ...] | None = None
     strict_detect: bool = False
     pre_split_rotation_degrees: int = 0
+    rectify_split_pages: bool = True
 
 
 @dataclass(slots=True)
@@ -109,6 +111,55 @@ def _augment_overlay_contour(scan_output, raw_image: np.ndarray) -> np.ndarray |
         return _find_quad_contour(raw_image)
     except Exception:
         return None
+
+
+def _is_trusted_page_rectification(source: np.ndarray, scan_output) -> bool:
+    """Reject internal tables and strips found during split-page rectification."""
+    if not scan_output.detected or scan_output.warped is None or scan_output.contour is None:
+        return False
+    source_height, source_width = source.shape[:2]
+    warped_height, warped_width = scan_output.warped.shape[:2]
+    contour_area_ratio = abs(float(cv2.contourArea(scan_output.contour))) / max(
+        1, source_width * source_height
+    )
+    x, y, box_width, box_height = cv2.boundingRect(
+        np.asarray(scan_output.contour, dtype=np.float32)
+    )
+    horizontal_coverage = box_width / max(1, source_width)
+    top_position = y / max(1, source_height)
+    bottom_position = (y + box_height) / max(1, source_height)
+    warped_aspect = warped_width / max(1, warped_height)
+    return (
+        contour_area_ratio >= 0.60
+        and horizontal_coverage >= 0.80
+        and top_position <= 0.12
+        and bottom_position >= 0.95
+        and 0.45 <= warped_aspect <= 1.25
+    )
+
+
+def _rectify_split_page(
+    image: np.ndarray,
+    *,
+    detector_backends: tuple[str, ...],
+    scanner_root: Path | None,
+    uvdoc_cache_home: Path | None,
+):
+    attempted: set[str] = set()
+    for backend in (*detector_backends, DETECTOR_BACKEND_OPENCV_HOUGH):
+        if backend in attempted:
+            continue
+        attempted.add(backend)
+        scan_output = scan_with_document_detector(
+            image,
+            enabled=True,
+            backends=(backend,),
+            scanner_root=scanner_root,
+            uvdoc_cache_home=uvdoc_cache_home,
+        )
+        if _is_trusted_page_rectification(image, scan_output):
+            return scan_output
+    return None
 
 
 def process_loaded_items(
@@ -233,6 +284,23 @@ def process_loaded_items(
                 for half_index, (raw_half, warped_half) in enumerate(
                     zip(raw_halves, warped_halves)
                 ):
+                    half_backend = backend
+                    half_detected = detected
+                    half_fallback_reason = fallback_reason
+                    if options.detect_document and options.rectify_split_pages:
+                        half_scan = _rectify_split_page(
+                            warped_half,
+                            detector_backends=(
+                                options.detector_backends or DEFAULT_ACTIVE_DOCUMENT_BACKENDS
+                            ),
+                            scanner_root=scanner_root,
+                            uvdoc_cache_home=uvdoc_cache_home,
+                        )
+                        if half_scan is not None:
+                            warped_half = half_scan.warped
+                            half_backend = half_scan.backend
+                            half_detected = True
+                            half_fallback_reason = None
                     current_half = postprocess_fn(warped_half)
                     _check_cancelled(cancel_cb)
                     suffix = "L" if half_index == 0 else "R"
@@ -243,9 +311,9 @@ def process_loaded_items(
                             warped=warped_half,
                             current=current_half,
                             contour=None,
-                            backend=backend,
-                            detected=detected,
-                            fallback_reason=fallback_reason,
+                            backend=half_backend,
+                            detected=half_detected,
+                            fallback_reason=half_fallback_reason,
                             spread_detected=True,
                             spread_confidence=spread.candidate.confidence,
                             spread_reason=spread.reason,

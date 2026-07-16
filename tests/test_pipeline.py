@@ -292,6 +292,106 @@ def test_embedded_spread_is_checked_after_rejecting_bad_detector_crop(monkeypatc
     )
 
 
+def test_split_pages_receive_individual_perspective_rectification(monkeypatch) -> None:
+    spread = _spread_image()
+
+    def detector(image, **_kwargs):
+        height, width = image.shape[:2]
+        contour = np.array(
+            [[20, 20], [width - 20, 20], [width - 20, height - 20], [20, height - 20]],
+            dtype=np.float32,
+        )
+        if width > 600:
+            warped = image
+        else:
+            warped = image[20:-20, 20:-20]
+        return ScanOutput(
+            warped=warped,
+            contour=contour,
+            backend="fake",
+            detected=True,
+            raw_result=None,
+        )
+
+    monkeypatch.setattr("uniscan.core.pipeline.scan_with_document_detector", detector)
+
+    pages = process_loaded_items(
+        [("spread.png", spread)],
+        options=PipelineOptions(detect_document=True, two_page_mode=True),
+    )
+
+    assert len(pages) == 2
+    assert all(page.warped.shape[0] == spread.shape[0] - 40 for page in pages)
+    assert all(page.warped.shape[1] < spread.shape[1] // 2 for page in pages)
+
+
+def test_split_page_rectification_rejects_internal_column_crop(monkeypatch) -> None:
+    spread = _spread_image()
+
+    def detector(image, **_kwargs):
+        height, width = image.shape[:2]
+        if width > 600:
+            return ScanOutput(
+                warped=image,
+                contour=np.array(
+                    [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]],
+                    dtype=np.float32,
+                ),
+                backend="fake",
+                detected=True,
+                raw_result=None,
+            )
+        strip_width = max(2, width // 5)
+        return ScanOutput(
+            warped=image[:, :strip_width],
+            contour=np.array(
+                [[0, 0], [strip_width, 0], [strip_width, height - 1], [0, height - 1]],
+                dtype=np.float32,
+            ),
+            backend="fake",
+            detected=True,
+            raw_result=None,
+        )
+
+    monkeypatch.setattr("uniscan.core.pipeline.scan_with_document_detector", detector)
+
+    pages = process_loaded_items(
+        [("spread.png", spread)],
+        options=PipelineOptions(detect_document=True, two_page_mode=True),
+    )
+
+    assert len(pages) == 2
+    assert all(page.warped.shape[1] > 350 for page in pages)
+
+
+def test_split_page_rectification_rejects_crop_that_loses_page_bottom(monkeypatch) -> None:
+    spread = _spread_image()
+
+    def detector(image, **_kwargs):
+        height, width = image.shape[:2]
+        if width > 600:
+            contour = np.array(
+                [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]],
+                dtype=np.float32,
+            )
+            return ScanOutput(image, contour, "fake", True, None)
+        contour = np.array(
+            [[10, 0], [width - 10, 0], [width - 10, height * 0.90], [10, height * 0.90]],
+            dtype=np.float32,
+        )
+        return ScanOutput(image[: int(height * 0.90), 10:-10], contour, "fake", True, None)
+
+    monkeypatch.setattr("uniscan.core.pipeline.scan_with_document_detector", detector)
+
+    pages = process_loaded_items(
+        [("spread.png", spread)],
+        options=PipelineOptions(detect_document=True, two_page_mode=True),
+    )
+
+    assert len(pages) == 2
+    assert all(page.warped.shape[0] == spread.shape[0] for page in pages)
+
+
 def test_build_pdf_uses_fixed_dpi_layout_and_atomically_publishes(tmp_path, monkeypatch) -> None:
     output = tmp_path / "output.pdf"
     output.write_bytes(b"previous")

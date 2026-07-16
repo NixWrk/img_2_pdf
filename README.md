@@ -194,7 +194,7 @@ Important defaults and controls:
 
 | Area | Options and actual default |
 |---|---|
-| Cleanup | `--mode {none,document,whiteboard,photo,b/w}`; default `document` |
+| Cleanup | `--mode {none,document,grayscale,whiteboard,photo,b/w}`; default `document` |
 | Detection | enabled; `--backend auto` means the local OpenCV `cv_hybrid` backend |
 | Detector choices | `auto`, `office_lens_onnx`, `cv_hybrid`, `opencv_quad`, `opencv_hough`, `opencv_minrect` |
 | Detection failure | keep the unchanged page by default; `--strict-detect` fails the whole atomic job |
@@ -239,6 +239,9 @@ decision. GUI Apply and headless conversion then share
 rotation is known, use `--orientation 90`, `180`, or `270` to force that clockwise correction and
 avoid inherently ambiguous 180-degree text-direction guesses.
 
+`document` preserves source colour while applying document contrast and denoise settings;
+`grayscale` is the explicit monochrome document profile.
+
 Spread mode is conservative: the oriented source frame must itself have spread-like landscape
 geometry, a wide detector crop alone is not sufficient, and an uncertain image is kept as one page
 instead of being cut at its midpoint. The report records `spreadDetected`, `spreadConfidence`, and
@@ -246,6 +249,9 @@ instead of being cut at its midpoint. The report records `spreadDetected`, `spre
 wide strip is rejected as destructive and recorded as a detection fallback; a substantial
 landscape crop can still represent a real spread inside a portrait PDF canvas. When boundary
 detection leaves that canvas intact, a large horizontal content region is checked separately.
+After a confident split, each half receives its own perspective pass. A second-pass quadrilateral
+must cover at least 60% of the half, span at least 80% of its width, reach safe top/bottom bands,
+and have page-like proportions, so table columns and partial crops are rejected.
 
 `--dewarp textline` uses the built-in text-line geometry estimator and needs no optional model
 runtime. `--dewarp auto` is a conservative policy when explicitly selected: it tries text-line
