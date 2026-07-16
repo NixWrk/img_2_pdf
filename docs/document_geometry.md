@@ -66,8 +66,9 @@ action because it uses layout evidence rather than a small-angle line estimate.
 
 ## Removing page waves
 
-Page dewarping is disabled by default (`--dewarp none`, and **None** in the GUI). When explicitly
-selected, `--dewarp auto` is the conservative automatic policy. It measures curvature, blank
+Page dewarping is disabled by default in the CLI (`--dewarp none`). The GUI starts with
+**Automatic (validated)** so photographed pages immediately show a conservative corrected preview;
+the preview must still be applied before export. `--dewarp auto` measures curvature, blank
 borders, edge ink, and aspect ratio before and after correction, and rejects a candidate that does
 not improve the measurable geometry or introduces artifacts. It tries the built-in text-line
 method first. Without `--auto-dewarp-uvdoc`, automatic mode never invokes UVDoc. Explicit
@@ -139,11 +140,13 @@ their own applicable terms; UniScan neither distributes those weights nor record
 binary identity in a processing recipe.
 
 The GUI offers **None**, validated automatic text-line correction, and the explicit offline
-text-line method; it does not enable the UVDoc fallback. Use Workspace → Processing → Remove page
-waves or Page tools → Auto remove waves. If the automatic curve needs correction, Page tools →
-Adjust dewarp points opens the source model and a live corrected preview. The points are normalized
-and saved with the page; `Apply processing` commits the full-resolution result, and export publishes
-that committed generation without replaying different global settings.
+text-line method; it does not enable the UVDoc fallback. Workspace → Processing exposes
+**Perspective...** and **Wave curve...** directly. The perspective editor shows draggable corner
+handles beside a live rectified result. The wave editor shows the source curve and corrected result;
+its normalized points are saved with the page and immediately reprocessed at full resolution when
+**Apply points** is pressed. For automatic settings, **Apply preview to pages** commits the
+full-resolution result, and export publishes that committed generation without replaying different
+global settings.
 
 ## Automation and source policy
 

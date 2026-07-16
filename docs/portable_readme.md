@@ -43,7 +43,7 @@ Processing is local. Recoverable GUI sessions and the processing cache are store
 `%LOCALAPPDATA%\UniScan`. Only one UniScan process can own the shared autosave session at a time;
 a second instance exits with a clear startup error instead of writing the same state concurrently.
 
-Fast preview is approximate. `Apply processing` computes and commits the full-resolution result
+Fast preview is approximate. `Apply preview to pages` computes and commits the full-resolution result
 in the background. Export uses the last committed pixels for each page, so changing processing
 controls without applying them does not silently alter an export. If A4 or Letter layout was
 applied at one DPI, reapply it before exporting at another DPI.

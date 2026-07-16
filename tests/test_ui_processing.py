@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import cv2
 import numpy as np
 import pytest
@@ -94,7 +96,7 @@ def test_export_uses_each_pages_committed_current_not_pending_global_settings(tm
     assert committed_color.ndim == 3
 
     # This is only a pending preview setting.  Export must not reapply it to
-    # pages that were committed independently with Apply processing.
+    # pages that were committed independently with Apply preview.
     app.postprocess_var.set("Black and White")
     snapshot_dir, snapshots = app._snapshot_entries_for_export([grayscale_entry, color_entry])
     # Concurrent UI edits cannot change the generation selected for export.
@@ -322,14 +324,52 @@ def test_preview_error_is_explicit_and_stale_generation_is_ignored() -> None:
 
     app.page_preview_after_label = _Label()
 
-    app._handle_review_preview_result(1, None, "stale failure")
+    app._handle_review_preview_result(1, None, None, "stale failure")
     assert app.page_preview_after_label.text == "old"
     assert app.page_preview_after_photo == "old-photo"
 
-    app._handle_review_preview_result(2, None, "new failure")
+    app._handle_review_preview_result(2, None, None, "new failure")
     assert app.page_preview_after_label.text == "Preview failed: new failure"
     assert app.page_preview_after_photo is None
     assert statuses == ["Preview failed: new failure"]
+
+
+def test_preview_reports_applied_and_rejected_wave_correction() -> None:
+    app = _app_for_processing()
+    app._closing = False
+    app.review_preview_generation = 1
+    app.review_preview_threads = []
+    app.page_preview_after_photo = None
+    app.page_preview_after_label = SimpleNamespace(configure=lambda **_kwargs: None)
+    app.geometry_summary_var = _Var("Wave preview: pending")
+    app._to_ctk_photo_for_label = lambda _image, _label: "preview-photo"
+    image = np.zeros((4, 5, 3), dtype=np.uint8)
+
+    applied = SimpleNamespace(
+        dewarp=SimpleNamespace(
+            applied=True,
+            selected_method="textline",
+            line_count=7,
+            max_displacement_px=4.25,
+            reason=None,
+        )
+    )
+    app._handle_review_preview_result(1, image, applied, None)
+    assert app.geometry_summary_var.get() == "Wave preview: textline, 7 lines, 4.2px"
+
+    rejected = SimpleNamespace(
+        dewarp=SimpleNamespace(
+            applied=False,
+            selected_method="none",
+            line_count=0,
+            max_displacement_px=0.0,
+            reason="insufficient_line_evidence",
+        )
+    )
+    app._handle_review_preview_result(1, image, rejected, None)
+    assert app.geometry_summary_var.get() == (
+        "Wave preview unchanged: insufficient line evidence"
+    )
 
 
 def test_gui_spread_split_replays_warped_ratio_on_raw(monkeypatch) -> None:

@@ -62,8 +62,8 @@ behind progressive disclosure.
   shortcuts for delete, rotate, reorder, and select all.
 - Processing exposes offline page-wave removal with a live preview. Page tools exposes the
   hybrid, Hough-line, and foreground-box deskew estimators instead of hiding one fixed algorithm.
-- Page tools also exposes persisted dewarp control points with source and corrected panes, while
-  keeping the automatic model as the default starting point.
+- Processing directly exposes perspective corners and persisted wave-curve points with source and
+  corrected panes, while keeping the validated automatic model as the default preview.
 - Workspace processing now exposes Otsu/Sauvola/Wolf, safe despeckle, and A4/Letter layout. Rare
   numeric parameters (adaptive window/k, margins, alignment) remain in Advanced, and lighting
   analysis runs only on request instead of slowing every preview.

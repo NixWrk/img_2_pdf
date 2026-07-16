@@ -46,7 +46,9 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.status_var.get() == "Ready"
         assert len(app.session) == 0
         assert app.preprocess_preset_var.get() == "Document"
-        assert app.dewarp_method_var.get() == "None"
+        assert app.dewarp_method_var.get() == "Automatic (validated)"
+        assert app.geometry_summary_var.get() == "Wave preview: pending"
+        assert app.apply_processing_button.cget("text") == "Apply preview to pages"
         assert app.deskew_method_var.get() == "Hybrid (recommended)"
         assert app.binarization_method_var.get() == "None"
         assert app.despeckle_strength_var.get() == "None"
@@ -107,12 +109,24 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         app._reprocess_entry_from_original(selected_entry)
         app.clear_processing_cache()
         assert not list(app.processing_cache.root_dir.glob("*.png"))
+        app.open_manual_corners_editor()
+        app.update()
+        corner_editors = [
+            child
+            for child in app.winfo_children()
+            if hasattr(child, "title") and child.title() == "Perspective corners"
+        ]
+        assert len(corner_editors) == 1
+        assert app.grab_current() == corner_editors[0]
+        assert app.corner_source_canvas.winfo_exists()
+        assert app.corner_preview_canvas.winfo_exists()
+        corner_editors[0].destroy()
         app.open_dewarp_points_editor()
         app.update()
         dewarp_editors = [
             child
             for child in app.winfo_children()
-            if hasattr(child, "title") and child.title() == "Adjust dewarp control points"
+            if hasattr(child, "title") and child.title() == "Wave correction"
         ]
         assert len(dewarp_editors) == 1
         dewarp_editors[0].destroy()
@@ -125,6 +139,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         _pump_until(app, lambda: app.page_preview_after_photo is not None)
         assert app.page_preview_before_frame.winfo_manager() == "grid"
         assert app.page_preview_after_frame.winfo_manager() == "grid"
+        assert app.geometry_summary_var.get() != "Wave preview: pending"
         app.move_selected_up()
         assert app.session.entries[0].name == "second.png"
         app.move_selected_down()

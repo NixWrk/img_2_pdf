@@ -83,8 +83,10 @@ You can acquire pages from:
 - clipboard images or clipboard file paths.
 
 The Workspace supports page selection, reorder and deletion, replacement or camera retake, manual
-four-corner correction, automatic crop, 90-degree orientation, deskew, spread splitting, automatic
-wave removal, and editable dewarp control points. Processing controls cover document type,
+four-corner perspective correction with a live corrected pane, automatic crop, 90-degree
+orientation, deskew, spread splitting, automatic wave removal, and an editable wave curve. The
+perspective and wave editors are available directly in the Processing panel. Processing controls
+cover document type,
 grayscale/B&W output, contrast, brightness, denoise, thresholding, illumination correction,
 binarization, despeckle, A4/Letter layout, margins, alignment, and lighting analysis.
 
@@ -94,8 +96,8 @@ These controls intentionally have different meanings:
 
 1. **Preview** shows what the current controls would do. It does not change exported pixels.
 2. **Fast preview** uses a smaller display proxy. It is responsive but approximate.
-3. **Apply processing** runs the canonical pipeline on the full-resolution stored page and commits
-   that result.
+3. **Apply preview to pages** runs the canonical pipeline on the full-resolution stored page and
+   commits that result. The wave diagnostic is explicitly labelled as a preview until then.
 4. **Export** reads each page's latest committed pixels. It never silently replays whatever global
    controls happen to be visible later.
 
@@ -381,7 +383,7 @@ Common failures:
   different `UNISCAN_STATE_DIR`.
 - **Input exceeds the safe pixel limit** - lower `--input-pdf-dpi`, crop/resample the source, or
   deliberately adjust `--max-input-pixels` if the machine can safely handle it.
-- **A4/Letter DPI mismatch in the GUI** - set the target PDF DPI and Apply processing again.
+- **A4/Letter DPI mismatch in the GUI** - set the target PDF DPI and apply the preview again.
 - **No boundary found** - inspect the unchanged fallback page, try a specific OpenCV backend or
   manual corners, or use `--strict-detect` when fallback is unacceptable.
 - **Office Lens disabled** - configure the external quad model and install `onnxruntime`; add the
