@@ -35,8 +35,9 @@ from uniscan.core.dewarp import (
 )
 from uniscan.core.pipeline import PageResult, PipelineOptions, process_loaded_items
 from uniscan.core.processing import PageProcessingRequest, process_document_page
-from uniscan.core.orientation import ORIENTATION_METHOD_AUTO
+from uniscan.core.orientation import ORIENTATION_METHOD_AUTO, ORIENTATION_METHOD_NONE
 from uniscan.core.preprocess import (
+    DESKEW_METHOD_NONE,
     DESKEW_METHOD_HOUGH,
     DESKEW_METHOD_HYBRID,
     DESKEW_METHOD_MIN_AREA,
@@ -209,10 +210,11 @@ class UnifiedScanApp(ctk.CTk):
                 lock = None
             if lock is not None:
                 lock.release()
-            try:
-                self.destroy()
-            except Exception:
-                pass
+            if "tk" in object.__getattribute__(self, "__dict__"):
+                try:
+                    self.destroy()
+                except Exception:
+                    pass
             raise
 
     def _initialize(self) -> None:
@@ -261,6 +263,10 @@ class UnifiedScanApp(ctk.CTk):
         self.corner_prev_button: ctk.CTkButton | None = None
         self.corner_next_button: ctk.CTkButton | None = None
         self.corner_resize_job: str | None = None
+        self.dewarp_editor_window: ctk.CTkToplevel | None = None
+        self.dewarp_source_canvas: tk.Canvas | None = None
+        self.dewarp_preview_canvas: tk.Canvas | None = None
+        self.dewarp_resize_job: str | None = None
         self.page_drag_state: dict[str, object] | None = None
         self.live_detector = LiveContourDetector(backend=DEFAULT_LIVE_BACKEND)
 
@@ -322,6 +328,7 @@ class UnifiedScanApp(ctk.CTk):
         self._close_wait_job: str | None = None
         self._close_deadline: float | None = None
         self.autosave_job: str | None = None
+        self._last_autosave_signature: tuple[object, ...] | None = None
         self.tab_review_name = "Workspace"
         self.tab_scan_name = "Camera"
         self.tab_import_name = "Import options"
@@ -1003,6 +1010,9 @@ class UnifiedScanApp(ctk.CTk):
         if self.corner_resize_job is not None:
             self.after_cancel(self.corner_resize_job)
             self.corner_resize_job = None
+        if self.dewarp_resize_job is not None:
+            self.after_cancel(self.dewarp_resize_job)
+            self.dewarp_resize_job = None
         corner_window = self.corner_editor_window
         if corner_window is not None:
             try:
@@ -1016,6 +1026,16 @@ class UnifiedScanApp(ctk.CTk):
             self.corner_meta_var = None
             self.corner_prev_button = None
             self.corner_next_button = None
+        dewarp_window = self.dewarp_editor_window
+        if dewarp_window is not None:
+            try:
+                if dewarp_window.winfo_exists():
+                    dewarp_window.destroy()
+            except tk.TclError:
+                pass
+            self.dewarp_editor_window = None
+            self.dewarp_source_canvas = None
+            self.dewarp_preview_canvas = None
         self._set_status("Closing: waiting for background work to stop...")
         self._close_deadline = time.monotonic() + 5.0
         self._finish_close_when_idle()
@@ -1048,10 +1068,22 @@ class UnifiedScanApp(ctk.CTk):
 
     def _autosave_tick(self) -> None:
         try:
-            if self.session.has_recoverable_state:
-                self.session.save_manifest(self.autosave_path)
-            else:
-                self.autosave_path.unlink(missing_ok=True)
+            signature = tuple(
+                (
+                    entry.entry_id,
+                    entry.revision,
+                    entry.name,
+                    entry.selected,
+                    entry.detected_backend,
+                )
+                for entry in self.session.entries
+            )
+            if signature != self._last_autosave_signature:
+                if self.session.has_recoverable_state:
+                    self.session.save_manifest(self.autosave_path)
+                else:
+                    self.autosave_path.unlink(missing_ok=True)
+                self._last_autosave_signature = signature
         except Exception as exc:
             self._set_status(f"Autosave failed: {exc}")
         finally:
@@ -1194,18 +1226,24 @@ class UnifiedScanApp(ctk.CTk):
 
         self.preprocess_preset_var.set(profile.preset_name)
         self.postprocess_var.set(profile.postprocess_name)
-        self.on_preprocess_preset_change(profile.preset_name)
+        self._apply_preprocess_preset_values(profile.preset_name)
+        self._sync_lens_mode_from_controls()
         self._set_status(f"Lens mode set to {mode_name}.")
         self.update_page_preview()
 
-    def on_preprocess_preset_change(self, preset_name: str) -> None:
+    def _apply_preprocess_preset_values(self, preset_name: str) -> bool:
         preset = PREPROCESS_PRESETS.get(preset_name)
         if preset is None:
-            return
+            return False
         self.preprocess_contrast_var.set(float(preset.contrast))
         self.preprocess_brightness_var.set(int(preset.brightness))
         self.preprocess_denoise_var.set(int(preset.denoise))
         self.preprocess_threshold_var.set(int(preset.threshold))
+        return True
+
+    def on_preprocess_preset_change(self, preset_name: str) -> None:
+        if not self._apply_preprocess_preset_values(preset_name):
+            return
 
         # Keep preset selection aligned with the canonical lens profiles.  In
         # particular, Whiteboard must retain marker colour (`postprocess=None`).
@@ -1238,7 +1276,7 @@ class UnifiedScanApp(ctk.CTk):
             self._set_status(" | ".join(parts))
 
     def _start_background_job(self, name: str, worker, on_done, *, on_error=None) -> bool:
-        if self.job_thread is not None and self.job_thread.is_alive():
+        if self.job_thread is not None:
             messagebox.showwarning("Busy", "Another background job is already running.")
             return False
 
@@ -1273,6 +1311,7 @@ class UnifiedScanApp(ctk.CTk):
                     self._set_job_display(stage=stage, current=current, progress=progress)
                 elif kind == "done":
                     on_done, result, name = payload
+                    self.job_thread = None
                     try:
                         on_done(result)
                     except Exception as exc:
@@ -1282,6 +1321,7 @@ class UnifiedScanApp(ctk.CTk):
                         self.cancel_task_button.configure(state=tk.DISABLED)
                 elif kind == "error":
                     self.cancel_task_button.configure(state=tk.DISABLED)
+                    self.job_thread = None
                     name, text, on_error = payload
                     if on_error is not None:
                         on_error()
@@ -1297,14 +1337,13 @@ class UnifiedScanApp(ctk.CTk):
                 elif kind == "diagnostics":
                     report = payload
                     if not report.ok:
-                        report = replace(
-                            report,
-                            checks=tuple(check for check in report.checks if check.blocking),
+                        failed = ", ".join(
+                            check.name for check in report.checks if check.blocking and not check.ok
                         )
-                        failed = ", ".join(check.name for check in report.checks if not check.ok)
-                        self._set_status(
-                            f"Startup diagnostics failed: {failed}. Run 'uniscan doctor'."
-                        )
+                        if failed:
+                            self._set_status(
+                                f"Startup diagnostics failed: {failed}. Run 'uniscan doctor'."
+                            )
                 elif kind == "review_preview":
                     generation, image, diagnostics, error = payload
                     self._handle_review_preview_result(generation, image, diagnostics, error)
@@ -1995,7 +2034,14 @@ class UnifiedScanApp(ctk.CTk):
             padx=(0, 6),
             pady=10,
         )
-        ctk.CTkButton(row_pdf, text="Export PDF", width=120, command=self.export_to_pdf).grid(
+        self.export_tab_pdf_button = ctk.CTkButton(
+            row_pdf,
+            text="Export PDF",
+            width=120,
+            command=self.export_to_pdf,
+            state=tk.NORMAL if len(self.session) else tk.DISABLED,
+        )
+        self.export_tab_pdf_button.grid(
             row=0,
             column=2,
             padx=(0, 10),
@@ -2026,12 +2072,14 @@ class UnifiedScanApp(ctk.CTk):
             variable=self.export_format_var,
             width=100,
         ).grid(row=0, column=2, padx=(0, 6), pady=10)
-        ctk.CTkButton(
+        self.export_tab_files_button = ctk.CTkButton(
             row_files,
             text="Export Files",
             width=120,
             command=self.export_to_files,
-        ).grid(row=0, column=3, padx=(0, 10), pady=10)
+            state=tk.NORMAL if len(self.session) else tk.DISABLED,
+        )
+        self.export_tab_files_button.grid(row=0, column=3, padx=(0, 10), pady=10)
 
         row_note = ctk.CTkFrame(tab)
         row_note.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 10))
@@ -2283,6 +2331,8 @@ class UnifiedScanApp(ctk.CTk):
             "toolbar_export_button",
             "workspace_export_pdf_button",
             "workspace_export_files_button",
+            "export_tab_pdf_button",
+            "export_tab_files_button",
         ):
             button = getattr(self, button_name, None)
             if button is not None:
@@ -2789,7 +2839,7 @@ class UnifiedScanApp(ctk.CTk):
         path = filedialog.askopenfilename(
             title="Replace selected page from image",
             filetypes=[
-                ("Image files", "*.jpg;*.jpeg;*.png;*.tif;*.tiff;*.webp;*.bmp"),
+                ("Image files", "*.jpg *.jpeg *.png *.tif *.tiff *.webp *.bmp"),
                 ("All files", "*.*"),
             ],
         )
@@ -2803,6 +2853,7 @@ class UnifiedScanApp(ctk.CTk):
                 raise RuntimeError(f"Cannot read image: {image_path}")
 
             result = self._detect_single_page(image, name=image_path.name)
+            previous_committed = entry.committed_processing
             ok = self.session.replace_entry_image(
                 entry.entry_id,
                 raw_image=result.raw,
@@ -2814,6 +2865,7 @@ class UnifiedScanApp(ctk.CTk):
             )
             if not ok:
                 raise RuntimeError("Selected page was not found in session.")
+            self._reprocess_after_geometry_change(entry, previous_committed)
 
             self.refresh_page_list(keep_index=index)
             self._set_status(f"Replaced page {index + 1} from {image_path.name}.")
@@ -2835,6 +2887,7 @@ class UnifiedScanApp(ctk.CTk):
 
             item_name = datetime.now().strftime(r"retake_%Y%m%d_%H%M%S")
             result = self._detect_single_page(frame, name=item_name)
+            previous_committed = entry.committed_processing
             ok = self.session.replace_entry_image(
                 entry.entry_id,
                 raw_image=result.raw,
@@ -2845,6 +2898,7 @@ class UnifiedScanApp(ctk.CTk):
             )
             if not ok:
                 raise RuntimeError("Selected page was not found in session.")
+            self._reprocess_after_geometry_change(entry, previous_committed)
 
             self.refresh_page_list(keep_index=index)
             self._set_status(f"Retook page {index + 1} from camera.")
@@ -2907,6 +2961,9 @@ class UnifiedScanApp(ctk.CTk):
         )
         state = {"index": initial_position}
         points_by_entry: dict[str, np.ndarray] = {}
+        selected_entry_ids = tuple(
+            entry.entry_id for entry in self.session.entries if entry.selected
+        )
 
         if self.corner_editor_window is not None:
             try:
@@ -2926,7 +2983,7 @@ class UnifiedScanApp(ctk.CTk):
 
         header = ctk.CTkLabel(
             win,
-            text="Browse pages, adjust corners on the raw source, then apply to the current page or all loaded pages.",
+            text="Browse pages, adjust corners on the raw source, then apply to the current page or all pages in this editor.",
             anchor="w",
         )
         header.pack(fill=ctk.X, padx=12, pady=(12, 6))
@@ -3270,10 +3327,11 @@ class UnifiedScanApp(ctk.CTk):
             warped = warp_perspective_from_points(source_image, points.astype(np.float32))
             if warped is None or warped.size == 0:
                 raise RuntimeError("Perspective transform returned empty image.")
+            previous_committed = entry.committed_processing
             entry.original_image = warped
             entry.detected_contour = points.astype(np.float32).reshape(-1, 2).copy()
             entry.detected_backend = "manual"
-            self._reprocess_entry_from_original(entry)
+            self._reprocess_after_geometry_change(entry, previous_committed)
 
         def _apply_current():
             try:
@@ -3288,21 +3346,9 @@ class UnifiedScanApp(ctk.CTk):
         def _apply_all():
             try:
                 for idx_offset, entry in enumerate(entries):
-                    points = points_by_entry.get(entry.entry_id)
-                    if points is None:
-                        detected = self._detect_corner_points(entry.raw_image)
-                        if detected is not None:
-                            points = np.asarray(detected, dtype=np.float32).reshape(-1, 2).copy()
-                        elif entry.detected_contour is not None:
-                            points = (
-                                np.asarray(entry.detected_contour, dtype=np.float32)
-                                .reshape(-1, 2)
-                                .copy()
-                            )
-                        else:
-                            points = self._default_corner_points(entry.raw_image)
+                    points = _init_points_for(entry)
                     _apply_entry(indices[idx_offset], entry, points)
-                self.refresh_page_list(keep_index=indices[min(state["index"], len(indices) - 1)])
+                self.refresh_page_list(keep_entry_ids=selected_entry_ids)
                 self._set_status(f"Applied crop to {len(entries)} page(s).")
             except Exception as exc:
                 messagebox.showerror("Auto Crop Error", str(exc))
@@ -3412,6 +3458,9 @@ class UnifiedScanApp(ctk.CTk):
 
     def _reprocess_entry_from_original(self, entry):
         request = self._processing_request(entry=entry, preview=False)
+        return self._commit_processing_request(entry, request)
+
+    def _commit_processing_request(self, entry, request: PageProcessingRequest):
         result = process_document_page(entry.original_image, request)
         committed = CommittedPageProcessing.from_result(
             request,
@@ -3422,6 +3471,42 @@ class UnifiedScanApp(ctk.CTk):
         entry.committed_processing = committed
         self._last_processing_cache_hits = result.diagnostics.cache_hits
         return result.diagnostics.dewarp
+
+    def _reprocess_after_geometry_change(self, entry, previous_committed) -> None:
+        """Replay durable appearance settings without adopting pending GUI controls."""
+        if previous_committed is None:
+            return
+        previous_request = previous_committed.recipe.to_request()
+        request = replace(
+            previous_request,
+            orientation_method=ORIENTATION_METHOD_NONE,
+            deskew_method=DESKEW_METHOD_NONE,
+            dewarp_method=DEWARP_METHOD_NONE,
+            dewarp_model=None,
+            dewarp_already_applied=False,
+            stage_cache=self.processing_cache,
+            source_fingerprint=None,
+            cancel_cb=None,
+        )
+        self._commit_processing_request(entry, request)
+
+    def _reprocess_with_dewarp(self, entry, previous_committed, *, method: str):
+        """Change only dewarp while preserving the page's committed appearance recipe."""
+        request = (
+            previous_committed.recipe.to_request()
+            if previous_committed is not None
+            else PageProcessingRequest()
+        )
+        request = replace(
+            request,
+            dewarp_method=method,
+            dewarp_model=self._entry_dewarp_model(entry),
+            dewarp_already_applied=False,
+            stage_cache=self.processing_cache,
+            source_fingerprint=None,
+            cancel_cb=None,
+        )
+        return self._commit_processing_request(entry, request)
 
     def analyze_selected_page_lighting(self) -> None:
         _index, entry = self._single_selected_entry()
@@ -3458,9 +3543,11 @@ class UnifiedScanApp(ctk.CTk):
         for idx in indices:
             entry = self.session.entries[idx]
             rotated = cv2.rotate(entry.original_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            previous_committed = entry.committed_processing
             entry.original_image = rotated
-            self._reprocess_entry_from_original(entry)
-        self.refresh_page_list(keep_index=indices[-1])
+            self._reprocess_after_geometry_change(entry, previous_committed)
+        entry_ids = tuple(self.session.entries[idx].entry_id for idx in indices)
+        self.refresh_page_list(keep_entry_ids=entry_ids)
         self._set_status(f"Rotated {len(indices)} page(s) left.")
 
     def rotate_selected_right(self) -> None:
@@ -3471,9 +3558,11 @@ class UnifiedScanApp(ctk.CTk):
         for idx in indices:
             entry = self.session.entries[idx]
             rotated = cv2.rotate(entry.original_image, cv2.ROTATE_90_CLOCKWISE)
+            previous_committed = entry.committed_processing
             entry.original_image = rotated
-            self._reprocess_entry_from_original(entry)
-        self.refresh_page_list(keep_index=indices[-1])
+            self._reprocess_after_geometry_change(entry, previous_committed)
+        entry_ids = tuple(self.session.entries[idx].entry_id for idx in indices)
+        self.refresh_page_list(keep_entry_ids=entry_ids)
         self._set_status(f"Rotated {len(indices)} page(s) right.")
 
     def split_selected_as_spread(self) -> None:
@@ -3485,6 +3574,9 @@ class UnifiedScanApp(ctk.CTk):
         try:
             split_count = 0
             untouched_count = 0
+            selected_entry_ids = {
+                self.session.entries[idx].entry_id for idx in indices
+            }
             # Process from the end backwards so insertion indices stay stable.
             for idx in sorted(indices, reverse=True):
                 entry = self.session.entries[idx]
@@ -3499,6 +3591,7 @@ class UnifiedScanApp(ctk.CTk):
                 # Replace existing entry with the left half, append the right half after it.
                 left_raw, right_raw = raw_halves
                 left_warped, right_warped = warped_halves
+                previous_committed = entry.committed_processing
                 self.session.replace_entry_image(
                     entry.entry_id,
                     raw_image=left_raw,
@@ -3515,8 +3608,9 @@ class UnifiedScanApp(ctk.CTk):
                     contour=None,
                     backend=None,
                 )
-                self._reprocess_entry_from_original(entry)
-                self._reprocess_entry_from_original(right_entry)
+                self._reprocess_after_geometry_change(entry, previous_committed)
+                self._reprocess_after_geometry_change(right_entry, previous_committed)
+                selected_entry_ids.add(right_entry.entry_id)
                 # New entry is at the end of the list; move it to right after the original.
                 from_index = self.session.entries.index(right_entry)
                 target_index = idx + 1
@@ -3526,7 +3620,7 @@ class UnifiedScanApp(ctk.CTk):
                     from_index -= 1
                 split_count += 1
 
-            self.refresh_page_list(keep_index=indices[0])
+            self.refresh_page_list(keep_entry_ids=selected_entry_ids)
             msg = f"Split {split_count} page(s) at the detected gutter."
             if untouched_count:
                 msg += (
@@ -3544,21 +3638,23 @@ class UnifiedScanApp(ctk.CTk):
             return
 
         angles: list[float] = []
+        entry_ids = tuple(self.session.entries[idx].entry_id for idx in indices)
         method = DESKEW_UI_METHODS.get(
             self.deskew_method_var.get(),
             DESKEW_METHOD_HYBRID,
         )
         for idx in indices:
             entry = self.session.entries[idx]
+            previous_committed = entry.committed_processing
             stage_result = process_document_page(
                 entry.original_image,
                 PageProcessingRequest(deskew_method=method),
             )
             entry.original_image = stage_result.image
-            self._reprocess_entry_from_original(entry)
+            self._reprocess_after_geometry_change(entry, previous_committed)
             angles.append(stage_result.diagnostics.deskew_angle_degrees)
 
-        self.refresh_page_list(keep_index=indices[-1])
+        self.refresh_page_list(keep_entry_ids=entry_ids)
         mean_angle = sum(angles) / max(1, len(angles))
         self._set_status(f"Deskewed {len(indices)} page(s), avg angle {mean_angle:.1f} deg.")
 
@@ -3569,8 +3665,10 @@ class UnifiedScanApp(ctk.CTk):
             return
 
         diagnostics = []
+        entry_ids = tuple(self.session.entries[idx].entry_id for idx in indices)
         for idx in indices:
             entry = self.session.entries[idx]
+            previous_committed = entry.committed_processing
             stage_result = process_document_page(
                 entry.original_image,
                 PageProcessingRequest(orientation_method=ORIENTATION_METHOD_AUTO),
@@ -3579,10 +3677,10 @@ class UnifiedScanApp(ctk.CTk):
             item = stage_result.diagnostics.orientation
             if item.applied:
                 entry.original_image = oriented
-                self._reprocess_entry_from_original(entry)
+                self._reprocess_after_geometry_change(entry, previous_committed)
             diagnostics.append(item)
 
-        self.refresh_page_list(keep_index=indices[-1])
+        self.refresh_page_list(keep_entry_ids=entry_ids)
         applied = sum(item.applied for item in diagnostics)
         uncertain = sum(item.reason not in {None, "already_upright"} for item in diagnostics)
         self._set_status(
@@ -3598,11 +3696,19 @@ class UnifiedScanApp(ctk.CTk):
 
         self.dewarp_method_var.set("Automatic (validated)")
         diagnostics = []
+        entry_ids = tuple(self.session.entries[idx].entry_id for idx in indices)
         for idx in indices:
             entry = self.session.entries[idx]
+            previous_committed = entry.committed_processing
             entry.clear_dewarp_control_points()
-            diagnostics.append(self._reprocess_entry_from_original(entry))
-        self.refresh_page_list(keep_index=indices[-1])
+            diagnostics.append(
+                self._reprocess_with_dewarp(
+                    entry,
+                    previous_committed,
+                    method=DEWARP_METHOD_AUTO,
+                )
+            )
+        self.refresh_page_list(keep_entry_ids=entry_ids)
         applied = sum(item.applied for item in diagnostics)
         max_displacement = max((item.max_displacement_px for item in diagnostics), default=0.0)
         self._set_status(
@@ -3618,17 +3724,17 @@ class UnifiedScanApp(ctk.CTk):
         if entry is None or index is None:
             self._set_status("Select exactly one page to adjust dewarp points.")
             return
+        if self.dewarp_editor_window is not None:
+            try:
+                if self.dewarp_editor_window.winfo_exists():
+                    self.dewarp_editor_window.lift()
+                    return
+            except tk.TclError:
+                pass
+            self.dewarp_editor_window = None
 
         source = entry.original_image
         source_height, source_width = source.shape[:2]
-        scale = min(450 / max(1, source_width), 520 / max(1, source_height), 1.0)
-        display_width = max(1, int(round(source_width * scale)))
-        display_height = max(1, int(round(source_height * scale)))
-        display_source = cv2.resize(
-            source,
-            (display_width, display_height),
-            interpolation=cv2.INTER_AREA,
-        )
 
         if entry.dewarp_control_points is not None:
             initial_points = list(entry.dewarp_control_points)
@@ -3650,8 +3756,9 @@ class UnifiedScanApp(ctk.CTk):
                 )
 
         window = ctk.CTkToplevel(self)
+        self.dewarp_editor_window = window
         window.title("Wave correction")
-        window.geometry(f"{max(980, display_width * 2 + 80)}x{max(700, display_height + 150)}")
+        window.geometry("1120x820")
         window.minsize(960, 680)
         window.transient(self)
 
@@ -3683,22 +3790,20 @@ class UnifiedScanApp(ctk.CTk):
 
         left_canvas = tk.Canvas(
             panes,
-            width=display_width,
-            height=display_height,
             bg="#202225",
             highlightthickness=1,
             highlightbackground="#45484d",
         )
         right_canvas = tk.Canvas(
             panes,
-            width=display_width,
-            height=display_height,
             bg="#202225",
             highlightthickness=1,
             highlightbackground="#45484d",
         )
-        left_canvas.grid(row=1, column=0, padx=8, pady=(0, 8))
-        right_canvas.grid(row=1, column=1, padx=8, pady=(0, 8))
+        left_canvas.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        right_canvas.grid(row=1, column=1, sticky="nsew", padx=8, pady=(0, 8))
+        self.dewarp_source_canvas = left_canvas
+        self.dewarp_preview_canvas = right_canvas
 
         def to_photo(image: np.ndarray) -> ImageTk.PhotoImage:
             if image.ndim == 2:
@@ -3710,10 +3815,14 @@ class UnifiedScanApp(ctk.CTk):
         state = {
             "points": initial_points,
             "active": None,
-            "source_photo": to_photo(display_source),
+            "display_source": source,
+            "display_width": source_width,
+            "display_height": source_height,
+            "offset_x": 0.0,
+            "offset_y": 0.0,
+            "source_photo": None,
             "corrected_photo": None,
         }
-        left_canvas.create_image(0, 0, anchor=tk.NW, image=state["source_photo"])
         status = tk.StringVar(value=initial_message)
 
         def current_model(*, source_name: str = "user") -> DewarpModel:
@@ -3725,6 +3834,10 @@ class UnifiedScanApp(ctk.CTk):
 
         def draw_overlay() -> None:
             left_canvas.delete("dewarp-overlay")
+            display_width = int(state["display_width"])
+            display_height = int(state["display_height"])
+            offset_x = float(state["offset_x"])
+            offset_y = float(state["offset_y"])
             point_x = np.asarray([point[0] for point in state["points"]], dtype=np.float32)
             point_y = np.asarray([point[1] for point in state["points"]], dtype=np.float32)
             guide_x = np.linspace(0.0, 1.0, 160, dtype=np.float32)
@@ -3734,8 +3847,8 @@ class UnifiedScanApp(ctk.CTk):
                 for x_value, displacement in zip(guide_x, guide_y):
                     coords.extend(
                         [
-                            float(x_value * (display_width - 1)),
-                            float((anchor + displacement) * display_height),
+                            offset_x + float(x_value * (display_width - 1)),
+                            offset_y + float((anchor + displacement) * display_height),
                         ]
                     )
                 left_canvas.create_line(
@@ -3745,8 +3858,8 @@ class UnifiedScanApp(ctk.CTk):
                     tags="dewarp-overlay",
                 )
             for point_index, (x_value, displacement) in enumerate(state["points"]):
-                x_pos = x_value * (display_width - 1)
-                y_pos = (0.5 + displacement) * display_height
+                x_pos = offset_x + x_value * (display_width - 1)
+                y_pos = offset_y + (0.5 + displacement) * display_height
                 radius = 6
                 left_canvas.create_oval(
                     x_pos - radius,
@@ -3761,7 +3874,7 @@ class UnifiedScanApp(ctk.CTk):
 
         def render_corrected() -> None:
             corrected = process_document_page(
-                display_source,
+                state["display_source"],
                 PageProcessingRequest(
                     dewarp_method=DEWARP_METHOD_TEXTLINE,
                     dewarp_model=current_model(),
@@ -3769,19 +3882,87 @@ class UnifiedScanApp(ctk.CTk):
             ).image
             state["corrected_photo"] = to_photo(corrected)
             right_canvas.delete("all")
+            offset_x = max(
+                0,
+                (right_canvas.winfo_width() - int(state["display_width"])) // 2,
+            )
+            offset_y = max(
+                0,
+                (right_canvas.winfo_height() - int(state["display_height"])) // 2,
+            )
             right_canvas.create_image(
-                0,
-                0,
+                offset_x,
+                offset_y,
                 anchor=tk.NW,
                 image=state["corrected_photo"],
+                tags="dewarp-preview",
+            )
+
+        def render_views() -> None:
+            self.dewarp_resize_job = None
+            if self.dewarp_editor_window is not window or not window.winfo_exists():
+                return
+            available_width = max(
+                200,
+                min(left_canvas.winfo_width(), right_canvas.winfo_width()) - 16,
+            )
+            available_height = max(
+                200,
+                min(left_canvas.winfo_height(), right_canvas.winfo_height()) - 16,
+            )
+            scale = min(
+                available_width / max(1, source_width),
+                available_height / max(1, source_height),
+            )
+            display_width = max(1, int(round(source_width * scale)))
+            display_height = max(1, int(round(source_height * scale)))
+            interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+            display_source = cv2.resize(
+                source,
+                (display_width, display_height),
+                interpolation=interpolation,
+            )
+            offset_x = max(0, (left_canvas.winfo_width() - display_width) // 2)
+            offset_y = max(0, (left_canvas.winfo_height() - display_height) // 2)
+            state.update(
+                {
+                    "display_source": display_source,
+                    "display_width": display_width,
+                    "display_height": display_height,
+                    "offset_x": float(offset_x),
+                    "offset_y": float(offset_y),
+                    "source_photo": to_photo(display_source),
+                }
+            )
+            left_canvas.delete("all")
+            left_canvas.create_image(
+                offset_x,
+                offset_y,
+                anchor=tk.NW,
+                image=state["source_photo"],
+                tags="dewarp-source",
+            )
+            draw_overlay()
+            render_corrected()
+
+        def schedule_resize(_event=None) -> None:
+            if self.dewarp_resize_job is not None:
+                window.after_cancel(self.dewarp_resize_job)
+            self.dewarp_resize_job = window.after(
+                REVIEW_RESIZE_DEBOUNCE_MS,
+                render_views,
             )
 
         def nearest_point(x_pos: float, y_pos: float) -> int | None:
+            display_width = int(state["display_width"])
+            display_height = int(state["display_height"])
+            offset_x = float(state["offset_x"])
+            offset_y = float(state["offset_y"])
             best_index = None
             best_distance = 16.0
             for point_index, (x_value, displacement) in enumerate(state["points"]):
-                px = x_value * (display_width - 1)
-                py = (0.5 + displacement) * display_height
+                px = offset_x + x_value * (display_width - 1)
+                py = offset_y + (0.5 + displacement) * display_height
                 distance = float(np.hypot(x_pos - px, y_pos - py))
                 if distance < best_distance:
                     best_distance = distance
@@ -3796,7 +3977,10 @@ class UnifiedScanApp(ctk.CTk):
             if active is None:
                 return
             x_value, _old_displacement = state["points"][active]
-            displacement = float(np.clip((event.y / display_height) - 0.5, -0.2, 0.2))
+            local_y = float(event.y) - float(state["offset_y"])
+            displacement = float(
+                np.clip((local_y / max(1, int(state["display_height"]))) - 0.5, -0.2, 0.2)
+            )
             state["points"][active] = (x_value, displacement)
             draw_overlay()
 
@@ -3825,10 +4009,15 @@ class UnifiedScanApp(ctk.CTk):
 
         def apply_points() -> None:
             try:
+                previous_committed = entry.committed_processing
                 entry.set_dewarp_control_points(state["points"])
                 self.dewarp_method_var.set("Text lines (offline)")
-                diagnostics = self._reprocess_entry_from_original(entry)
-                self.refresh_page_list(keep_index=index)
+                diagnostics = self._reprocess_with_dewarp(
+                    entry,
+                    previous_committed,
+                    method=DEWARP_METHOD_TEXTLINE,
+                )
+                self.refresh_page_list(keep_entry_ids=(entry.entry_id,))
                 self._set_status(
                     f"Saved {len(entry.dewarp_control_points or ())} dewarp points; "
                     f"max correction {diagnostics.max_displacement_px:.1f}px."
@@ -3837,15 +4026,23 @@ class UnifiedScanApp(ctk.CTk):
                     f"Wave applied: user curve, {len(entry.dewarp_control_points or ())} points, "
                     f"{diagnostics.max_displacement_px:.1f}px"
                 )
-                window.destroy()
+                close_editor()
             except Exception as exc:
                 messagebox.showerror("Dewarp Control Points", str(exc))
+
+        def close_editor() -> None:
+            if self.dewarp_resize_job is not None:
+                window.after_cancel(self.dewarp_resize_job)
+                self.dewarp_resize_job = None
+            self.dewarp_editor_window = None
+            self.dewarp_source_canvas = None
+            self.dewarp_preview_canvas = None
+            window.destroy()
 
         left_canvas.bind("<Button-1>", on_down)
         left_canvas.bind("<B1-Motion>", on_move)
         left_canvas.bind("<ButtonRelease-1>", on_up)
-        draw_overlay()
-        render_corrected()
+        panes.bind("<Configure>", schedule_resize, add="+")
 
         ctk.CTkLabel(window, textvariable=status, anchor="w").pack(fill=ctk.X, padx=16, pady=(0, 8))
         actions = ctk.CTkFrame(window, fg_color="transparent")
@@ -3864,9 +4061,11 @@ class UnifiedScanApp(ctk.CTk):
             text="Cancel",
             fg_color="transparent",
             border_width=1,
-            command=window.destroy,
+            command=close_editor,
         ).pack(side=ctk.RIGHT, padx=8)
+        window.protocol("WM_DELETE_WINDOW", close_editor)
         window.grab_set()
+        window.after_idle(render_views)
 
     def _on_review_processing_slider_change(self, _value: float) -> None:
         self.update_page_preview()
@@ -4154,6 +4353,9 @@ class UnifiedScanApp(ctk.CTk):
 
         scope = "all pages" if self.apply_changes_to_all_var.get() else "selected pages"
         keep_index = target_entries[-1][0]
+        selected_entry_ids = tuple(
+            self.session.entries[idx].entry_id for idx in indices
+        )
 
         def worker(emit, is_cancelled):
             return self._stage_apply_pages(
@@ -4165,7 +4367,10 @@ class UnifiedScanApp(ctk.CTk):
         def on_done(staged):
             try:
                 cache_hit_count = self._commit_staged_apply(snapshots, staged)
-                self.refresh_page_list(keep_index=keep_index)
+                if selected_entry_ids:
+                    self.refresh_page_list(keep_entry_ids=selected_entry_ids)
+                else:
+                    self.refresh_page_list(keep_index=keep_index)
                 cache_note = f" Stage cache hits: {cache_hit_count}." if cache_hit_count else ""
                 self._set_status(f"Reprocessed {len(target_entries)} {scope}.{cache_note}")
             finally:

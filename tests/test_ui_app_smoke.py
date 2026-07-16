@@ -61,6 +61,8 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.import_files_entry.winfo_exists()
         assert app._drag_drop_error is None
         assert app.toolbar_export_button.cget("state") == "disabled"
+        assert app.export_tab_pdf_button.cget("state") == "disabled"
+        assert app.export_tab_files_button.cget("state") == "disabled"
         assert app.cancel_task_button.cget("state") == "disabled"
         assert app.move_pages_up_button.cget("state") == "disabled"
         assert app.move_pages_down_button.cget("state") == "disabled"
@@ -91,6 +93,8 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         app.update()
         assert app.page_count_var.get() == "2 pages"
         assert app.toolbar_export_button.cget("state") == "normal"
+        assert app.export_tab_pdf_button.cget("state") == "normal"
+        assert app.export_tab_files_button.cget("state") == "normal"
         assert app._single_selected_entry()[1].name == "second.png"
         assert app.move_pages_up_button.cget("state") == "normal"
         assert app.move_pages_down_button.cget("state") == "disabled"
@@ -190,6 +194,33 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
             if hasattr(child, "title") and child.title() == "Wave correction"
         ]
         assert len(dewarp_editors) == 1
+        _pump_until(app, lambda: app.dewarp_resize_job is None)
+        initial_dewarp_bounds = app.dewarp_source_canvas.bbox("dewarp-source")
+        assert initial_dewarp_bounds is not None
+        initial_dewarp_size = (
+            initial_dewarp_bounds[2] - initial_dewarp_bounds[0],
+            initial_dewarp_bounds[3] - initial_dewarp_bounds[1],
+        )
+        dewarp_editors[0].geometry("1400x980")
+        app.update()
+        _pump_until(
+            app,
+            lambda: (
+                app.dewarp_resize_job is None
+                and app.dewarp_source_canvas.bbox("dewarp-source") is not None
+                and (
+                    app.dewarp_source_canvas.bbox("dewarp-source")[2]
+                    - app.dewarp_source_canvas.bbox("dewarp-source")[0]
+                    > initial_dewarp_size[0]
+                )
+            ),
+        )
+        resized_dewarp_bounds = app.dewarp_source_canvas.bbox("dewarp-source")
+        resized_dewarp_preview_bounds = app.dewarp_preview_canvas.bbox("dewarp-preview")
+        assert resized_dewarp_bounds is not None
+        assert resized_dewarp_preview_bounds is not None
+        assert resized_dewarp_bounds[2] - resized_dewarp_bounds[0] > initial_dewarp_size[0]
+        assert resized_dewarp_bounds[3] - resized_dewarp_bounds[1] > initial_dewarp_size[1]
         dewarp_editors[0].destroy()
         app.preview_mode_var.set("Original")
         app._on_preview_mode_change()

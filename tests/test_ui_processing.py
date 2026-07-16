@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 from types import SimpleNamespace
 
 import cv2
@@ -243,6 +244,62 @@ def test_whiteboard_preset_handler_preserves_colour_and_lens_mode() -> None:
     colour = np.zeros((12, 16, 3), dtype=np.uint8)
     colour[:, :, 2] = 220
     assert app._apply_postprocess(colour).ndim == 3
+
+
+def test_grayscale_lens_mode_is_not_reset_to_document_colour() -> None:
+    app = _app_for_processing()
+    app.update_page_preview = lambda: None
+    statuses: list[str] = []
+    app._set_status = statuses.append
+
+    app.on_lens_mode_change("Grayscale")
+
+    assert app.preprocess_preset_var.get() == "Document"
+    assert app.postprocess_var.get() == "Grayscale"
+    assert app.lens_mode_var.get() == "Grayscale"
+    assert statuses == ["Lens mode set to Grayscale."]
+
+
+def test_geometry_change_replays_committed_appearance_not_pending_controls(tmp_path) -> None:
+    app = _app_for_processing()
+    session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
+    image = np.zeros((30, 50, 3), dtype=np.uint8)
+    image[:, :, 0] = 20
+    image[:, :, 1] = 110
+    image[:, :, 2] = 230
+    entry = session.add_image(name="page", image=image)
+    app.postprocess_var.set("Grayscale")
+    app._reprocess_entry_from_original(entry)
+    previous_committed = entry.committed_processing
+    assert previous_committed is not None
+
+    app.postprocess_var.set("Black and White")
+    app.page_layout_var.set("A4")
+    app.dewarp_method_var.set("Automatic (validated)")
+    entry.original_image = cv2.rotate(entry.original_image, cv2.ROTATE_90_CLOCKWISE)
+    app._reprocess_after_geometry_change(entry, previous_committed)
+
+    assert entry.current_image.ndim == 2
+    assert entry.committed_processing is not None
+    recipe = entry.committed_processing.recipe
+    assert recipe.postprocess_name == "Grayscale"
+    assert recipe.page_layout == "none"
+    assert recipe.orientation_method == "none"
+    assert recipe.deskew_method == "none"
+    assert recipe.dewarp_method == "none"
+
+
+def test_geometry_change_without_committed_processing_keeps_new_original(tmp_path) -> None:
+    app = _app_for_processing()
+    session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
+    entry = session.add_image(name="page", image=np.zeros((20, 30, 3), np.uint8))
+    rotated = np.full((30, 20, 3), 123, np.uint8)
+
+    entry.original_image = rotated
+    app._reprocess_after_geometry_change(entry, None)
+
+    np.testing.assert_array_equal(entry.current_image, rotated)
+    assert entry.committed_processing is None
 
 
 def test_fast_preview_request_is_lightweight_but_export_stays_full_dpi() -> None:
@@ -695,6 +752,70 @@ def test_staged_apply_honors_cancellation_after_result_encode(tmp_path, monkeypa
             emit=lambda **_kwargs: None,
             is_cancelled=lambda: cancelled,
         )
+
+
+def test_background_job_stays_busy_until_queued_completion_is_consumed(monkeypatch) -> None:
+    app = object.__new__(UnifiedScanApp)
+    app.job_thread = SimpleNamespace(is_alive=lambda: False)
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "uniscan.ui.app.messagebox.showwarning",
+        lambda title, text: warnings.append((title, text)),
+    )
+
+    started = app._start_background_job("second", lambda *_args: None, lambda _result: None)
+
+    assert started is False
+    assert warnings == [("Busy", "Another background job is already running.")]
+
+
+def test_background_completion_releases_slot_before_callback() -> None:
+    app = object.__new__(UnifiedScanApp)
+    app._closing = False
+    app.job_thread = SimpleNamespace(is_alive=lambda: False)
+    app.job_queue = queue.Queue()
+    app.winfo_exists = lambda: False
+    app.cancel_task_button = SimpleNamespace(configure=lambda **_kwargs: None)
+    app._set_status = lambda _text: None
+    callback_state: list[object] = []
+    app.job_queue.put(
+        (
+            "done",
+            (lambda _result: callback_state.append(app.job_thread), "result", "test"),
+        )
+    )
+
+    app._poll_job_queue()
+
+    assert callback_state == [None]
+
+
+def test_autosave_tick_skips_unchanged_manifest(tmp_path) -> None:
+    app = object.__new__(UnifiedScanApp)
+    entry = SimpleNamespace(
+        entry_id="page",
+        revision=0,
+        name="page",
+        selected=False,
+        detected_backend=None,
+    )
+    saves: list[object] = []
+    app.session = SimpleNamespace(
+        entries=[entry],
+        has_recoverable_state=True,
+        save_manifest=lambda path: saves.append(path),
+    )
+    app.autosave_path = tmp_path / "autosave.json"
+    app._last_autosave_signature = None
+    app.winfo_exists = lambda: False
+    app._set_status = lambda _text: None
+
+    app._autosave_tick()
+    app._autosave_tick()
+    entry.selected = True
+    app._autosave_tick()
+
+    assert saves == [app.autosave_path, app.autosave_path]
 
 
 def test_startup_diagnostics_status_lists_only_blocking_failures() -> None:
