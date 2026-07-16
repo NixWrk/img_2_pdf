@@ -1,8 +1,33 @@
 # UniScan audit and remediation plan
 
 This document is the implementation source of truth for the repository audit performed against
-`main` at `8e99f71`. Work is delivered as small, reviewable commits with tests. An item is complete
+`main` at `8e99f71`. It records both the engineering findings and the product requirements supplied
+by the project owner. Work is delivered as small, reviewable commits with tests. An item is complete
 only when its acceptance criteria pass; changing documentation alone does not close an item.
+
+## Product invariants from the owner
+
+1. Preserve the maximum available image resolution and source pixels for as long as possible.
+   Analysis may use explicitly derived proxies, but authoritative page pixels must not be silently
+   downscaled or destructively processed.
+2. Do not apply document enhancement merely because a page was imported. Geometry and appearance
+   changes are previewed and explicitly committed; export uses the selected committed generation.
+3. Reduce data volume only for genuinely large PDF jobs, only when the user enables the export
+   checkbox, and with the chosen policy recorded in the export report. The default is lossless,
+   full-resolution export.
+4. The GUI must be understandable, reproducible, and intuitive. Controls must state whether they
+   affect geometry, appearance, or export; previews must identify unapplied changes; long work must
+   be cancellable and must not freeze Tk.
+5. Page geometry (boundary, perspective, orientation, deskew, dewarp, spread split, layout) and
+   image appearance (colour, tone, illumination, denoise, binarization, despeckle) are separate
+   models, controllers, recipes, UI sections, diagnostics, and cache namespaces.
+6. Automate the expensive human steps: page boundary detection, page-wave/dewarp estimation, and
+   book-spread classification. Automation must expose confidence/reason, preserve a no-op fallback,
+   and retain precise manual correction.
+7. Never report a failed operation after partially committing it. Multi-page and geometry mutations
+   are staged, validated, atomically committed, and rolled back on failure.
+8. Do not trade correctness for speed. Full-resolution output is produced from authoritative pixels;
+   proxies are permitted only for analysis and interactive preview.
 
 ## Definition of done
 
