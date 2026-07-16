@@ -43,6 +43,7 @@ class PipelineOptions:
     strict_detect: bool = False
     pre_split_rotation_degrees: int = 0
     rectify_split_pages: bool = True
+    detect_proposal_only: bool = False
 
 
 @dataclass(slots=True)
@@ -178,6 +179,10 @@ def process_loaded_items(
         raise ValueError("Pre-split rotation must be a multiple of 90 degrees.")
     if options.strict_detect and not options.detect_document:
         raise ValueError("Strict detection requires document detection to be enabled.")
+    if options.detect_proposal_only and not options.detect_document:
+        raise ValueError("Proposal-only detection requires document detection to be enabled.")
+    if options.detect_proposal_only and options.two_page_mode:
+        raise ValueError("Proposal-only detection is incompatible with two-page spread mode.")
 
     postprocess_fn = POSTPROCESSING_OPTIONS[options.postprocess_name]
     pages: list[PageResult] = []
@@ -194,6 +199,7 @@ def process_loaded_items(
                 backends=options.detector_backends or DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
                 scanner_root=scanner_root,
                 uvdoc_cache_home=uvdoc_cache_home,
+                proposal_only=options.detect_proposal_only,
             )
             _check_cancelled(cancel_cb)
             if not scan_output.detected:

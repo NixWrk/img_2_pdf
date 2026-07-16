@@ -2164,6 +2164,7 @@ class UnifiedScanApp(ctk.CTk):
     ) -> list[PageResult]:
         options = PipelineOptions(
             detect_document=True,
+            detect_proposal_only=True,
             two_page_mode=False,
             postprocess_name="None",
         )
@@ -2208,6 +2209,7 @@ class UnifiedScanApp(ctk.CTk):
         """Run detection on a single frame (no spread split) and return one PageResult."""
         options = PipelineOptions(
             detect_document=True,
+            detect_proposal_only=True,
             two_page_mode=False,
             postprocess_name="None",
         )
@@ -2654,6 +2656,7 @@ class UnifiedScanApp(ctk.CTk):
             staged_pages: list[_StagedImportPage] = []
             options = PipelineOptions(
                 detect_document=True,
+                detect_proposal_only=not two_page_mode,
                 two_page_mode=two_page_mode,
                 postprocess_name="None",
             )
@@ -3398,6 +3401,7 @@ class UnifiedScanApp(ctk.CTk):
                 image,
                 enabled=True,
                 backends=DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
+                proposal_only=True,
             )
         except ScanAdapterError:
             return None

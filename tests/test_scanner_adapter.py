@@ -62,6 +62,27 @@ def test_scanner_adapter_detects_quad_with_opencv_fallback() -> None:
     assert result.warped.shape[1] > 350
 
 
+def test_proposal_only_detection_does_not_build_perspective_warp(monkeypatch) -> None:
+    image = _perspective_doc()
+
+    monkeypatch.setattr(
+        "uniscan.core.scanner_adapter.warp_perspective_from_points",
+        lambda *_args, **_kwargs: pytest.fail("proposal detection must not build a warp"),
+    )
+
+    result = scan_with_document_detector(
+        image,
+        enabled=True,
+        backends=(DETECTOR_BACKEND_OPENCV,),
+        proposal_only=True,
+    )
+
+    assert result.backend == DETECTOR_BACKEND_OPENCV
+    assert result.detected is True
+    assert result.contour is not None
+    assert result.warped is image
+
+
 def test_scanner_adapter_prefers_document_inside_artificial_white_canvas() -> None:
     image, document = _document_inside_white_canvas()
 

@@ -101,6 +101,58 @@ def test_pipeline_options_default_is_non_destructive(monkeypatch) -> None:
     assert pages[0].detected is False
 
 
+def test_proposal_only_pipeline_keeps_source_pixels_with_detected_contour(monkeypatch) -> None:
+    source = np.full((700, 900, 3), 35, dtype=np.uint8)
+    contour = np.array(
+        [[170, 90], [760, 130], [700, 610], [130, 560]],
+        dtype=np.int32,
+    )
+    cv2.fillConvexPoly(source, contour, (245, 245, 245))
+    cv2.polylines(source, [contour], isClosed=True, color=(15, 15, 15), thickness=8)
+
+    monkeypatch.setattr(
+        "uniscan.core.scanner_adapter.warp_perspective_from_points",
+        lambda *_args, **_kwargs: pytest.fail("proposal pipeline must not build a warp"),
+    )
+
+    pages = process_loaded_items(
+        [("capture.png", source)],
+        options=PipelineOptions(
+            detect_document=True,
+            detect_proposal_only=True,
+            two_page_mode=False,
+        ),
+    )
+
+    assert len(pages) == 1
+    assert pages[0].contour is not None
+    assert pages[0].detected is True
+    np.testing.assert_array_equal(pages[0].raw, source)
+    np.testing.assert_array_equal(pages[0].warped, source)
+    np.testing.assert_array_equal(pages[0].current, source)
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        (PipelineOptions(detect_proposal_only=True), "requires document detection"),
+        (
+            PipelineOptions(
+                detect_document=True,
+                two_page_mode=True,
+                detect_proposal_only=True,
+            ),
+            "incompatible with two-page spread mode",
+        ),
+    ],
+)
+def test_pipeline_rejects_invalid_proposal_only_combinations(
+    options: PipelineOptions, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        process_loaded_items([("source.png", _img())], options=options)
+
+
 def test_pipeline_rejects_strict_detection_when_detection_is_disabled() -> None:
     with pytest.raises(ValueError, match="requires document detection"):
         process_loaded_items(

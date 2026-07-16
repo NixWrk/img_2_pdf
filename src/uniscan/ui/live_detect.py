@@ -172,6 +172,7 @@ class LiveContourDetector:
                 frame,
                 enabled=True,
                 backends=(backend,) if backend else DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
+                proposal_only=True,
             )
         except ScanAdapterError:
             return None

@@ -521,6 +521,7 @@ def _contour_detector_output(
     *,
     backend: str,
     contour_finder,
+    proposal_only: bool = False,
 ) -> ScanOutput:
     resized, scale = _resize_for_detection(image)
     if _is_low_variance(resized):
@@ -548,7 +549,7 @@ def _contour_detector_output(
     if scale != 1.0:
         contour = contour / scale
     contour = order_quad_points(contour.astype(np.float32))
-    warped = warp_perspective_from_points(image, contour)
+    warped = image if proposal_only else warp_perspective_from_points(image, contour)
     return ScanOutput(
         warped=warped,
         contour=contour,
@@ -558,40 +559,53 @@ def _contour_detector_output(
     )
 
 
-def _opencv_document_detector(image: np.ndarray) -> ScanOutput:
+def _opencv_document_detector(image: np.ndarray, *, proposal_only: bool = False) -> ScanOutput:
     return _contour_detector_output(
         image,
         backend=DETECTOR_BACKEND_OPENCV,
         contour_finder=_find_quad_contour,
+        proposal_only=proposal_only,
     )
 
 
-def _opencv_minrect_document_detector(image: np.ndarray) -> ScanOutput:
+def _opencv_minrect_document_detector(
+    image: np.ndarray, *, proposal_only: bool = False
+) -> ScanOutput:
     return _contour_detector_output(
         image,
         backend=DETECTOR_BACKEND_OPENCV_MINRECT,
         contour_finder=_find_minrect_contour,
+        proposal_only=proposal_only,
     )
 
 
-def _opencv_hough_document_detector(image: np.ndarray) -> ScanOutput:
+def _opencv_hough_document_detector(
+    image: np.ndarray, *, proposal_only: bool = False
+) -> ScanOutput:
     return _contour_detector_output(
         image,
         backend=DETECTOR_BACKEND_OPENCV_HOUGH,
         contour_finder=_find_hough_quad_contour,
+        proposal_only=proposal_only,
     )
 
 
-def _opencv_hybrid_document_detector(image: np.ndarray) -> ScanOutput:
+def _opencv_hybrid_document_detector(
+    image: np.ndarray, *, proposal_only: bool = False
+) -> ScanOutput:
     return _contour_detector_output(
         image,
         backend=DETECTOR_BACKEND_CV_HYBRID,
         contour_finder=_find_hybrid_contour,
+        proposal_only=proposal_only,
     )
 
 
 def _camscan_document_detector(
-    image: np.ndarray, *, scanner_root: Path | None = None
+    image: np.ndarray,
+    *,
+    scanner_root: Path | None = None,
+    proposal_only: bool = False,
 ) -> ScanOutput:
     scanner_module = _import_scanner_with_optional_root(optional_root=scanner_root)
     result = scanner_module.main(image)
@@ -606,8 +620,10 @@ def _camscan_document_detector(
             contour = order_quad_points(cv2.boxPoints(rect).astype(np.float32))
         else:
             contour = None
-    if warped is None and contour is not None:
+    if warped is None and contour is not None and not proposal_only:
         warped = warp_perspective_from_points(image, contour)
+    if proposal_only and contour is not None:
+        warped = image
     if warped is None and contour is None:
         return ScanOutput(
             warped=image, contour=None, backend=None, detected=False, raw_result=result
@@ -621,7 +637,7 @@ def _camscan_document_detector(
     )
 
 
-def _office_lens_document_detector(image: np.ndarray) -> ScanOutput:
+def _office_lens_document_detector(image: np.ndarray, *, proposal_only: bool = False) -> ScanOutput:
     runner = _load_office_lens_model()
     # Boundary detection only needs the quad session.  Running classification
     # and enhancement here was expensive and its enhanced output was discarded.
@@ -637,7 +653,7 @@ def _office_lens_document_detector(image: np.ndarray) -> ScanOutput:
         )
 
     return ScanOutput(
-        warped=warp_perspective_from_points(image, quad),
+        warped=image if proposal_only else warp_perspective_from_points(image, quad),
         contour=quad.astype(np.float32),
         backend=DETECTOR_BACKEND_OFFICE_LENS_ONNX,
         detected=True,
@@ -722,21 +738,31 @@ def scan_with_document_detector(
     backends: tuple[str, ...] | None = None,
     uvdoc_cache_home: Path | None = None,
     allow_dewarp_backends: bool = False,
+    proposal_only: bool = False,
 ) -> ScanOutput:
     """
     Run document detector and return normalized output.
 
     If detection is disabled, returns the input image as warped. UVDoc is a
     geometric dewarp model rather than a boundary detector and is skipped by
-    default; opt in only for dedicated legacy/benchmark calls.
+    default; opt in only for dedicated legacy/benchmark calls. In proposal-only
+    mode, boundary detection returns the original pixels plus the contour and
+    does not build a perspective-warped image.
     """
     if not enabled:
         return ScanOutput(warped=image, contour=None, backend=None, detected=False, raw_result=None)
 
     selected_backends = backends or DEFAULT_ACTIVE_DOCUMENT_BACKENDS
     errors: list[str] = []
+    proposal_kwargs = {"proposal_only": True} if proposal_only else {}
 
     for backend in selected_backends:
+        if proposal_only and backend in (
+            DETECTOR_BACKEND_UVDOC,
+            DETECTOR_BACKEND_PADDLEOCR_UVDOC,
+        ):
+            errors.append(f"{backend}: does not produce a boundary proposal")
+            continue
         if backend in (DETECTOR_BACKEND_UVDOC, DETECTOR_BACKEND_PADDLEOCR_UVDOC) and not (
             allow_dewarp_backends
         ):
@@ -746,17 +772,21 @@ def scan_with_document_detector(
             continue
         try:
             if backend == DETECTOR_BACKEND_OFFICE_LENS_ONNX:
-                result = _office_lens_document_detector(image)
+                result = _office_lens_document_detector(image, **proposal_kwargs)
             elif backend == DETECTOR_BACKEND_CAMSCAN:
-                result = _camscan_document_detector(image, scanner_root=scanner_root)
+                result = _camscan_document_detector(
+                    image,
+                    scanner_root=scanner_root,
+                    **proposal_kwargs,
+                )
             elif backend == DETECTOR_BACKEND_OPENCV:
-                result = _opencv_document_detector(image)
+                result = _opencv_document_detector(image, **proposal_kwargs)
             elif backend == DETECTOR_BACKEND_CV_HYBRID:
-                result = _opencv_hybrid_document_detector(image)
+                result = _opencv_hybrid_document_detector(image, **proposal_kwargs)
             elif backend == DETECTOR_BACKEND_OPENCV_HOUGH:
-                result = _opencv_hough_document_detector(image)
+                result = _opencv_hough_document_detector(image, **proposal_kwargs)
             elif backend == DETECTOR_BACKEND_OPENCV_MINRECT:
-                result = _opencv_minrect_document_detector(image)
+                result = _opencv_minrect_document_detector(image, **proposal_kwargs)
             elif backend == DETECTOR_BACKEND_UVDOC:
                 result = _uvdoc_document_detector(image, cache_home=uvdoc_cache_home)
             elif backend == DETECTOR_BACKEND_PADDLEOCR_UVDOC:
@@ -767,6 +797,9 @@ def scan_with_document_detector(
             errors.append(f"{backend}: {exc}")
             continue
 
+        if proposal_only and result.detected and result.contour is None:
+            errors.append(f"{backend}: detector did not return a boundary contour")
+            continue
         if result.detected and result.contour is not None:
             validation_image, validation_scale = _resize_for_detection(image)
             gray = (
