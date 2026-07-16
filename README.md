@@ -87,6 +87,8 @@ four-corner perspective correction with a live corrected pane, automatic crop, 9
 orientation, deskew, an adjustable spread-split line, automatic wave removal, and an editable wave
 curve. All processing editors replace the Workspace content instead of opening another window.
 Corner, split-line, and wave-point drags show a magnifier sampled from the full-resolution source.
+Perspective point changes are saved automatically when moving to another page or choosing Done;
+Reset and Auto Detect replace the current point positions without an extra Apply Current step.
 Wave points can be added, removed, and moved in both axes; the working curve can be placed over a
 contrasting upper or lower page edge without changing the correction model. Its two auxiliary
 guides may leave the image while the working curve is moved. Processing controls cover document type,

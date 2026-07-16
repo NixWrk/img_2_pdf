@@ -142,7 +142,9 @@ binary identity in a processing recipe.
 The GUI offers **None**, validated automatic text-line correction, and the explicit offline
 text-line method; it does not enable the UVDoc fallback. Workspace Processing exposes
 **Page perspective** and **Edit page waves** directly. The inline perspective editor shows
-draggable corner handles beside a live rectified result. The inline wave editor shows the source
+draggable corner handles beside a live rectified result. Changed corners are saved when navigating
+with Prev/Next or leaving with Done; Reset and Auto Detect remain explicit replacement actions.
+The inline wave editor shows the source
 curve and corrected result; points can be added, removed, moved horizontally or vertically, and
 the working curve can be moved vertically onto a contrasting page edge without changing its
 deformation values. The two auxiliary curves may move outside the image. Normalized point values

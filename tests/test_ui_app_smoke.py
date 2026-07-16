@@ -90,8 +90,8 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
 
         first = np.full((90, 120, 3), 220, dtype=np.uint8)
         second = np.full((90, 120, 3), 180, dtype=np.uint8)
-        app.session.add_image(name="first.png", image=first)
-        app.session.add_image(name="second.png", image=second)
+        first_entry = app.session.add_image(name="first.png", image=first)
+        second_entry = app.session.add_image(name="second.png", image=second)
         app.refresh_page_list(keep_index=1)
         app.update()
         assert app.page_count_var.get() == "2 pages"
@@ -192,6 +192,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         )
         app.update()
         assert app.corner_source_canvas.bbox("geometry-magnifier") is None
+        assert first_entry.entry_id in app.corner_editor_state["dirty_entry_ids"]
         initial_source_size = (
             source_bounds[2] - source_bounds[0],
             source_bounds[3] - source_bounds[1],
@@ -227,10 +228,33 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         )
         app.corner_next_button.invoke()
         app.update()
+        assert first_entry.entry_id not in app.corner_editor_state["dirty_entry_ids"]
+        assert first_entry.detected_backend == "manual"
         assert app.corner_meta_var.get().startswith("2/2  second.png")
         assert app.corner_prev_button.cget("state") == "normal"
         assert app.corner_next_button.cget("state") == "disabled"
+        second_point = app.corner_editor_state["points"][0]
+        second_x = int(
+            float(second_point[0]) / float(app.corner_editor_state["scale_x"])
+            + float(app.corner_editor_state["offset_x"])
+        )
+        second_y = int(
+            float(second_point[1]) / float(app.corner_editor_state["scale_y"])
+            + float(app.corner_editor_state["offset_y"])
+        )
+        app.corner_source_canvas.event_generate(
+            "<ButtonPress-1>", x=second_x, y=second_y
+        )
+        app.corner_source_canvas.event_generate(
+            "<B1-Motion>", x=second_x + 6, y=second_y + 6, state=0x0100
+        )
+        app.corner_source_canvas.event_generate(
+            "<ButtonRelease-1>", x=second_x + 6, y=second_y + 6
+        )
+        app.update()
+        assert second_entry.entry_id in app.corner_editor_state["dirty_entry_ids"]
         app.corner_close_button.invoke()
+        assert second_entry.detected_backend == "manual"
         assert app.inline_editor_host.winfo_manager() == ""
         assert app.workspace_preview_frame.winfo_manager() == "grid"
         app.page_listbox.selection_clear(0, app_module.tk.END)
@@ -244,7 +268,10 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         _pump_until(app, lambda: app.dewarp_resize_job is None)
         initial_dewarp_bounds = app.dewarp_source_canvas.bbox("dewarp-source")
         assert initial_dewarp_bounds is not None
-        assert app.dewarp_editor_state["last_corrected_source_shape"] == second.shape
+        assert (
+            app.dewarp_editor_state["last_corrected_source_shape"]
+            == second_entry.original_image.shape
+        )
         initial_dewarp_size = (
             initial_dewarp_bounds[2] - initial_dewarp_bounds[0],
             initial_dewarp_bounds[3] - initial_dewarp_bounds[1],

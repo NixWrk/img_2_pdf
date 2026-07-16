@@ -1265,6 +1265,11 @@ class UnifiedScanApp(ctk.CTk):
     def _on_close(self) -> None:
         if self._closing:
             return
+        inline_close = self.inline_editor_close_callback
+        if inline_close is not None:
+            inline_close()
+            if self.inline_editor_close_callback is inline_close:
+                return
         self._closing = True
         self.stop_preview()
         self.job_cancel_event.set()
@@ -3144,6 +3149,7 @@ class UnifiedScanApp(ctk.CTk):
         )
         state = {"index": initial_position}
         points_by_entry: dict[str, np.ndarray] = {}
+        dirty_entry_ids: set[str] = set()
         source_images_by_entry = {
             entry.entry_id: _perspective_source_image(
                 entry,
@@ -3218,6 +3224,7 @@ class UnifiedScanApp(ctk.CTk):
             "points": self._default_corner_points(
                 source_images_by_entry[entries[state["index"]].entry_id]
             ),
+            "dirty_entry_ids": dirty_entry_ids,
         }
         self.corner_editor_state = view_state
 
@@ -3251,6 +3258,8 @@ class UnifiedScanApp(ctk.CTk):
             detected: np.ndarray | None = None
             if auto_detect:
                 detected = self._detect_corner_points(source_image)
+                if detected is not None:
+                    dirty_entry_ids.add(entry.entry_id)
                 if detected is None and existing is not None and not from_current_geometry:
                     detected = np.asarray(existing, dtype=np.float32).reshape(-1, 2)
 
@@ -3444,6 +3453,8 @@ class UnifiedScanApp(ctk.CTk):
             points = view_state["points"]
             points[idx_p][0] = x
             points[idx_p][1] = y
+            _entry_index, entry = _current_entry()
+            dirty_entry_ids.add(entry.entry_id)
             _redraw()
             _show_canvas_magnifier(
                 canvas,
@@ -3465,6 +3476,8 @@ class UnifiedScanApp(ctk.CTk):
             points[:] = self._default_corner_points(
                 np.zeros((source_h, source_w, 3), dtype=np.uint8)
             )
+            _entry_index, entry = _current_entry()
+            dirty_entry_ids.add(entry.entry_id)
             _redraw()
             _render_corrected_preview()
 
@@ -3479,6 +3492,7 @@ class UnifiedScanApp(ctk.CTk):
             points = np.asarray(detected, dtype=np.float32).reshape(-1, 2).copy()
             points_by_entry[entry.entry_id] = points
             view_state["points"] = points
+            dirty_entry_ids.add(entry.entry_id)
             _redraw()
             _render_corrected_preview()
 
@@ -3495,33 +3509,38 @@ class UnifiedScanApp(ctk.CTk):
             entry.detected_backend = "manual"
             self._reprocess_after_geometry_change(entry, previous_committed)
 
-        def _apply_current():
+        def _save_current_if_dirty() -> bool:
+            entry_index, entry = _current_entry()
+            if entry.entry_id not in dirty_entry_ids:
+                return True
             try:
-                entry_index, entry = _current_entry()
                 points = view_state["points"]
                 _apply_entry(entry_index, entry, points)
-                self.refresh_page_list(keep_index=entry_index)
-                self._set_status(f"Applied crop to {entry.name}.")
+                dirty_entry_ids.discard(entry.entry_id)
+                self._set_status(f"Saved perspective points for {entry.name}.")
+                return True
             except Exception as exc:
                 messagebox.showerror("Auto Crop Error", str(exc))
+                return False
 
         def _apply_all():
             try:
                 for idx_offset, entry in enumerate(entries):
                     points = _init_points_for(entry)
                     _apply_entry(indices[idx_offset], entry, points)
+                    dirty_entry_ids.discard(entry.entry_id)
                 self.refresh_page_list(keep_entry_ids=selected_entry_ids)
                 self._set_status(f"Applied crop to {len(entries)} page(s).")
             except Exception as exc:
                 messagebox.showerror("Auto Crop Error", str(exc))
 
         def _prev_page():
-            if state["index"] > 0:
+            if state["index"] > 0 and _save_current_if_dirty():
                 state["index"] -= 1
                 _load_current_entry()
 
         def _next_page():
-            if state["index"] < len(entries) - 1:
+            if state["index"] < len(entries) - 1 and _save_current_if_dirty():
                 state["index"] += 1
                 _load_current_entry()
 
@@ -3564,15 +3583,17 @@ class UnifiedScanApp(ctk.CTk):
             padx=6,
         )
         ctk.CTkButton(controls, text="Reset", width=90, command=_reset).pack(side=ctk.LEFT, padx=6)
-        ctk.CTkButton(controls, text="Apply Current", width=120, command=_apply_current).pack(
-            side=ctk.LEFT,
-            padx=6,
-        )
-        ctk.CTkButton(controls, text="Apply All", width=100, command=_apply_all).pack(
-            side=ctk.LEFT, padx=6
-        )
+        if auto_detect:
+            ctk.CTkButton(
+                controls,
+                text="Apply detected to all",
+                width=150,
+                command=_apply_all,
+            ).pack(side=ctk.LEFT, padx=6)
 
         def _close_editor() -> None:
+            if not _save_current_if_dirty():
+                return
             if self.corner_resize_job is not None:
                 win.after_cancel(self.corner_resize_job)
                 self.corner_resize_job = None
@@ -3585,11 +3606,12 @@ class UnifiedScanApp(ctk.CTk):
             self.corner_editor_state = None
             self.inline_editor_close_callback = None
             win.destroy()
+            self.refresh_page_list(keep_entry_ids=selected_entry_ids)
             self._hide_inline_geometry_editor()
 
         self.corner_close_button = ctk.CTkButton(
             controls,
-            text="Close",
+            text="Done",
             width=90,
             command=_close_editor,
         )
