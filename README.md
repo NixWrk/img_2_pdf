@@ -71,8 +71,8 @@ Keep the extracted directory together. Build and release details are in
 
 ## What the GUI can do
 
-The desktop application has four persistent areas: Workspace, Camera, Import options, and Export
-options.
+The desktop application keeps one persistent Workspace. Camera capture opens from the top action
+bar, and export settings appear only when requested.
 
 You can acquire pages from:
 
@@ -84,9 +84,10 @@ You can acquire pages from:
 
 The Workspace supports page selection, reorder and deletion, replacement or camera retake, manual
 four-corner perspective correction with a live corrected pane, automatic crop, 90-degree
-orientation, deskew, spread splitting, automatic wave removal, and an editable wave curve. The
-perspective and wave editors are available directly in the Processing panel. Processing controls
-cover document type,
+orientation, deskew, spread splitting, automatic wave removal, and an editable wave curve. All
+processing editors replace the Workspace content instead of opening another window. Wave points
+can be added, removed, and moved in both axes; dragging the center curve moves the complete model
+vertically. Processing controls cover document type,
 grayscale/B&W output, contrast, brightness, denoise, thresholding, illumination correction,
 binarization, despeckle, A4/Letter layout, margins, alignment, and lighting analysis.
 

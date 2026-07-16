@@ -7,11 +7,12 @@ Record Windows version, artifact SHA-256, camera model, and operator in the rele
 - [ ] Extract the ZIP into a new directory on a clean Windows 11 x64 machine.
 - [ ] Run `uniscan.exe doctor` and confirm all non-camera checks are `ok`.
 - [ ] Run `uniscan.exe doctor --camera --camera-index 0` with the target camera connected.
-- [ ] Start `uniscan.exe`; verify Workspace, Camera, Import options, and Export options render.
+- [ ] Start `uniscan.exe`; verify the Workspace renders without a neighboring Camera tab.
 
 ## Camera and recovery
 
 - [ ] Discover/open the real camera and verify the live preview updates.
+- [ ] Open Camera from the top action bar, close it, and verify Workspace remains responsive.
 - [ ] Capture one page and a delayed multi-shot burst; cancel one burst midway.
 - [ ] Close UniScan with pages present, reopen it, and verify order/selection/images restore.
 - [ ] While UniScan is open, start a second copy against the same local session; confirm it stops
@@ -23,7 +24,9 @@ Record Windows version, artifact SHA-256, camera model, and operator in the rele
 
 - [ ] Import images by picker, drag-and-drop, and clipboard.
 - [ ] Import a multi-page PDF and cancel a second large import midway.
-- [ ] Review auto-crop, manual corners, page reorder/delete, and lighting correction.
+- [ ] Review inline auto-crop, manual corners, page reorder/delete, and lighting correction.
+- [ ] In inline wave editing, add/remove points, drag a point in both axes, and drag the complete
+      center curve vertically; verify the corrected preview updates after each operation.
 - [ ] Change processing controls and Preview without Apply; confirm export still uses the previous
       committed page. Apply, then confirm preview and export use the new full-resolution result.
 - [ ] Start Apply on several large pages and cancel midway; confirm the background job remains

@@ -73,4 +73,14 @@ behind progressive disclosure.
 1. Replace the text list with thumbnail cards while preserving multi-select and keyboard access.
 2. Add an explicit New/Discard session action and a compact recent-session recovery surface.
 3. Add Russian/English interface localization after labels and workflows stabilize.
+
+## Inline geometry iteration implemented
+
+- Workspace is the only persistent navigation area; Camera opens from the action bar in its own
+  capture window.
+- Perspective, boundary detection, wave editing, and advanced processing replace the Workspace
+  content while active instead of opening modal processing windows.
+- Wave control points support add, remove, horizontal/vertical drag, and whole-curve vertical drag.
+- Spread split preview remains in Original/Processed/Compare and creates pages only after explicit
+  confirmation.
 4. Run the manual workflow with a real camera and record task time/click count for common jobs.

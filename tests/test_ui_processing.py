@@ -24,9 +24,13 @@ from uniscan.ui.app import (
     UnifiedScanApp,
     _ApplyPageSnapshot,
     _StagedAppliedPage,
+    _add_dewarp_control_point,
     _compose_split_preview,
     _detection_summary,
+    _move_dewarp_control_point,
     _perspective_source_image,
+    _remove_dewarp_control_point,
+    _shift_dewarp_control_points,
     _split_at_ratio,
     _split_spread_pair,
     run_app,
@@ -487,6 +491,29 @@ def test_import_sources_accept_files_and_multiple_folders_without_duplicates(tmp
     sources = UnifiedScanApp._expand_import_sources([first_folder, second_folder, first_image])
 
     assert sources == [first_image, second_pdf]
+
+
+def test_dewarp_points_can_be_added_moved_removed_and_shifted_as_a_line() -> None:
+    points = [(0.0, 0.0), (0.5, 0.02), (1.0, 0.0)]
+
+    added = _add_dewarp_control_point(points, 0.25, -0.05)
+    assert added == 1
+    assert points[1] == (0.25, -0.05)
+
+    _move_dewarp_control_point(points, added, 0.4, 0.1)
+    assert points[1] == (0.4, 0.1)
+    _move_dewarp_control_point(points, added, 0.9, 0.5)
+    assert points[1][0] < points[2][0]
+    assert points[1][1] == 0.24
+
+    before = [value for _x, value in points]
+    applied = _shift_dewarp_control_points(points, -0.08)
+    assert applied == pytest.approx(-0.08)
+    assert [value for _x, value in points] == pytest.approx([value - 0.08 for value in before])
+
+    assert _remove_dewarp_control_point(points, 1) is True
+    assert len(points) == 3
+    assert _remove_dewarp_control_point(points, 1) is False
 
 
 def test_committing_previewed_split_creates_adjacent_pages_with_prior_appearance(tmp_path) -> None:

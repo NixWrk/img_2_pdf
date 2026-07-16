@@ -56,7 +56,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.preview_mode_var.get() == "Processed"
         assert app.page_preview_after_frame.winfo_manager() == "grid"
         assert app.page_preview_before_frame.winfo_manager() == ""
-        assert app.tabs._name_list == [app.tab_review_name, app.tab_scan_name]
+        assert app.tabs._name_list == [app.tab_review_name]
         app.preprocess_illumination_var.set(True)
         assert app._current_preprocess_settings().correct_illumination is True
         assert app._drag_drop_error is None
@@ -150,15 +150,14 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         app.page_listbox.selection_clear(0, app_module.tk.END)
         app.page_listbox.selection_set(0)
         app.on_page_select()
+        app.deiconify()
+        app.geometry("1100x720")
+        app.update()
         app.open_manual_corners_editor()
         app.update()
-        corner_editors = [
-            child
-            for child in app.winfo_children()
-            if hasattr(child, "title") and child.title() == "Perspective corners"
-        ]
-        assert len(corner_editors) == 1
-        assert app.grab_current() == corner_editors[0]
+        assert app.corner_editor_window is not None
+        assert app.inline_editor_host.winfo_manager() == "grid"
+        assert app.workspace_preview_frame.winfo_manager() == ""
         assert app.corner_source_canvas.winfo_exists()
         assert app.corner_preview_canvas.winfo_exists()
         _pump_until(app, lambda: app.corner_resize_job is None)
@@ -176,7 +175,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
             preview_bounds[2] - preview_bounds[0],
             preview_bounds[3] - preview_bounds[1],
         )
-        corner_editors[0].geometry("1400x980")
+        app.geometry("1500x920")
         app.update()
         _pump_until(
             app,
@@ -206,18 +205,17 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.corner_meta_var.get().startswith("2/2  second.png")
         assert app.corner_prev_button.cget("state") == "normal"
         assert app.corner_next_button.cget("state") == "disabled"
-        corner_editors[0].destroy()
+        app.corner_close_button.invoke()
+        assert app.inline_editor_host.winfo_manager() == ""
+        assert app.workspace_preview_frame.winfo_manager() == "grid"
         app.page_listbox.selection_clear(0, app_module.tk.END)
         app.page_listbox.selection_set(1)
         app.on_page_select()
+        app.geometry("1100x720")
         app.open_dewarp_points_editor()
         app.update()
-        dewarp_editors = [
-            child
-            for child in app.winfo_children()
-            if hasattr(child, "title") and child.title() == "Wave correction"
-        ]
-        assert len(dewarp_editors) == 1
+        assert app.dewarp_editor_window is not None
+        assert app.inline_editor_host.winfo_manager() == "grid"
         _pump_until(app, lambda: app.dewarp_resize_job is None)
         initial_dewarp_bounds = app.dewarp_source_canvas.bbox("dewarp-source")
         assert initial_dewarp_bounds is not None
@@ -225,7 +223,43 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
             initial_dewarp_bounds[2] - initial_dewarp_bounds[0],
             initial_dewarp_bounds[3] - initial_dewarp_bounds[1],
         )
-        dewarp_editors[0].geometry("1400x980")
+        initial_point_count = len(app.dewarp_editor_state["points"])
+        app.dewarp_add_point_button.invoke()
+        display_width = int(app.dewarp_editor_state["display_width"])
+        display_height = int(app.dewarp_editor_state["display_height"])
+        offset_x = int(app.dewarp_editor_state["offset_x"])
+        offset_y = int(app.dewarp_editor_state["offset_y"])
+        app.dewarp_source_canvas.event_generate(
+            "<Button-1>",
+            x=offset_x + int(display_width * 0.33),
+            y=offset_y + int(display_height * 0.45),
+        )
+        app.update()
+        assert len(app.dewarp_editor_state["points"]) == initial_point_count + 1
+        app.dewarp_remove_point_button.invoke()
+        assert len(app.dewarp_editor_state["points"]) == initial_point_count
+
+        before_shift = list(app.dewarp_editor_state["points"])
+        curve_x = 0.44
+        curve_y = float(
+            np.interp(
+                curve_x,
+                [point[0] for point in before_shift],
+                [point[1] for point in before_shift],
+            )
+        )
+        press_x = offset_x + int(display_width * curve_x)
+        press_y = offset_y + int(display_height * (0.5 + curve_y))
+        app.dewarp_source_canvas.event_generate("<ButtonPress-1>", x=press_x, y=press_y)
+        app.dewarp_source_canvas.event_generate(
+            "<B1-Motion>", x=press_x, y=press_y + 20, state=0x0100
+        )
+        app.dewarp_source_canvas.event_generate("<ButtonRelease-1>", x=press_x, y=press_y + 20)
+        app.update()
+        shifted = app.dewarp_editor_state["points"]
+        assert all(after[1] > before[1] for before, after in zip(before_shift, shifted))
+
+        app.geometry("1500x920")
         app.update()
         _pump_until(
             app,
@@ -245,7 +279,13 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert resized_dewarp_preview_bounds is not None
         assert resized_dewarp_bounds[2] - resized_dewarp_bounds[0] > initial_dewarp_size[0]
         assert resized_dewarp_bounds[3] - resized_dewarp_bounds[1] > initial_dewarp_size[1]
-        dewarp_editors[0].destroy()
+        app.dewarp_close_button.invoke()
+        app.open_review_processing_dialog()
+        app.update()
+        assert app.review_processing_window is not None
+        assert app.inline_editor_host.winfo_manager() == "grid"
+        app.review_processing_close_button.invoke()
+        assert app.inline_editor_host.winfo_manager() == ""
         app.preview_mode_var.set("Original")
         app._on_preview_mode_change()
         assert app.page_preview_before_frame.winfo_manager() == "grid"
@@ -281,8 +321,12 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert resized_preview_size[0] > initial_preview_size[0]
         assert resized_preview_size[1] > initial_preview_size[1]
         app.toolbar_camera_button.invoke()
-        assert app.tabs.get() == app.tab_scan_name
-        app.go_to_review_tab()
+        app.update()
+        assert app.camera_window is not None
+        assert app.camera_window.title() == "Camera"
+        assert app.tabs._name_list == [app.tab_review_name]
+        app.camera_close_callback()
+        assert app.camera_window is None
         app.update()
         app.move_selected_up()
         assert app.session.entries[0].name == "second.png"

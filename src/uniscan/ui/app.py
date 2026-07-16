@@ -215,6 +215,57 @@ def _perspective_source_image(entry, *, from_current_geometry: bool) -> np.ndarr
     return entry.original_image if from_current_geometry else entry.raw_image
 
 
+def _add_dewarp_control_point(
+    points: list[tuple[float, float]],
+    x_value: float,
+    displacement: float,
+) -> int | None:
+    if len(points) >= 32:
+        return None
+    x_value = float(np.clip(x_value, 0.0, 1.0))
+    displacement = float(np.clip(displacement, -0.24, 0.24))
+    if any(abs(existing_x - x_value) < 0.005 for existing_x, _value in points):
+        return None
+    points.append((x_value, displacement))
+    points.sort(key=lambda point: point[0])
+    return next(index for index, point in enumerate(points) if point[0] == x_value)
+
+
+def _move_dewarp_control_point(
+    points: list[tuple[float, float]],
+    index: int,
+    x_value: float,
+    displacement: float,
+) -> None:
+    margin = 0.005
+    lower = points[index - 1][0] + margin if index > 0 else 0.0
+    upper = points[index + 1][0] - margin if index + 1 < len(points) else 1.0
+    points[index] = (
+        float(np.clip(x_value, lower, upper)),
+        float(np.clip(displacement, -0.24, 0.24)),
+    )
+
+
+def _remove_dewarp_control_point(points: list[tuple[float, float]], index: int) -> bool:
+    if len(points) <= 3 or not 0 <= index < len(points):
+        return False
+    points.pop(index)
+    return True
+
+
+def _shift_dewarp_control_points(
+    points: list[tuple[float, float]],
+    delta: float,
+) -> float:
+    if not points:
+        return 0.0
+    minimum = min(value for _x, value in points)
+    maximum = max(value for _x, value in points)
+    applied = float(np.clip(delta, -0.24 - minimum, 0.24 - maximum))
+    points[:] = [(x_value, value + applied) for x_value, value in points]
+    return applied
+
+
 def _detection_summary(results: list[PageResult]) -> str:
     """Describe detector outcomes without calling fallback pages detected."""
     fallback = sum(result.fallback_reason is not None for result in results)
@@ -293,16 +344,19 @@ class UnifiedScanApp(ctk.CTk):
         self.review_preview_threads: list[threading.Thread] = []
         self.review_preview_cancel_event = threading.Event()
         self.review_preview_generation = 0
-        self.review_processing_window: ctk.CTkToplevel | None = None
+        self.review_processing_window: ctk.CTkFrame | None = None
         self.export_dialog_window: ctk.CTkToplevel | None = None
-        self.corner_editor_window: ctk.CTkToplevel | None = None
+        self.camera_window: ctk.CTkToplevel | None = None
+        self.inline_editor_host: ctk.CTkFrame | None = None
+        self.inline_editor_close_callback = None
+        self.corner_editor_window: ctk.CTkFrame | None = None
         self.corner_source_canvas: tk.Canvas | None = None
         self.corner_preview_canvas: tk.Canvas | None = None
         self.corner_meta_var: tk.StringVar | None = None
         self.corner_prev_button: ctk.CTkButton | None = None
         self.corner_next_button: ctk.CTkButton | None = None
         self.corner_resize_job: str | None = None
-        self.dewarp_editor_window: ctk.CTkToplevel | None = None
+        self.dewarp_editor_window: ctk.CTkFrame | None = None
         self.dewarp_source_canvas: tk.Canvas | None = None
         self.dewarp_preview_canvas: tk.Canvas | None = None
         self.dewarp_resize_job: str | None = None
@@ -372,7 +426,6 @@ class UnifiedScanApp(ctk.CTk):
         self.autosave_job: str | None = None
         self._last_autosave_signature: tuple[object, ...] | None = None
         self.tab_review_name = "Workspace"
-        self.tab_scan_name = "Camera"
 
         self._build_ui()
         self._bind_shortcuts()
@@ -447,7 +500,7 @@ class UnifiedScanApp(ctk.CTk):
             width=90,
             fg_color="transparent",
             border_width=1,
-            command=lambda: self.tabs.set(self.tab_scan_name),
+            command=self.open_camera_window,
         )
         self.toolbar_camera_button.pack(side=ctk.LEFT, padx=4, pady=8)
         self.toolbar_export_pdf_button = ctk.CTkButton(
@@ -489,11 +542,40 @@ class UnifiedScanApp(ctk.CTk):
         self.tabs.pack(fill=ctk.BOTH, expand=True, padx=12, pady=(4, 8))
 
         self.pages_tab = self.tabs.add(self.tab_review_name)
-        self.capture_tab = self.tabs.add(self.tab_scan_name)
 
         self._build_pages_tab(self.pages_tab)
-        self._build_capture_tab(self.capture_tab)
         self.tabs.set(self.tab_review_name)
+
+    def open_camera_window(self) -> None:
+        if self.camera_window is not None:
+            try:
+                if self.camera_window.winfo_exists():
+                    self.camera_window.lift()
+                    return
+            except tk.TclError:
+                pass
+
+        window = ctk.CTkToplevel(self)
+        self.camera_window = window
+        window.title("Camera")
+        window.geometry("1100x760")
+        window.minsize(900, 620)
+        window.transient(self)
+        body = ctk.CTkFrame(window)
+        body.pack(fill=ctk.BOTH, expand=True)
+        self._build_capture_tab(body)
+        self._update_camera_health()
+
+        def close_window() -> None:
+            self.stop_preview()
+            self.camera_window = None
+            self.camera_health_label = None
+            self.preview_label = None
+            window.destroy()
+
+        self.camera_close_callback = close_window
+        window.protocol("WM_DELETE_WINDOW", close_window)
+        window.lift()
 
     def _build_capture_tab(self, tab: ctk.CTkFrame) -> None:
         tab.grid_columnconfigure(0, weight=0)
@@ -621,6 +703,7 @@ class UnifiedScanApp(ctk.CTk):
         left = ctk.CTkFrame(tab, width=290)
         left.grid(row=0, column=0, sticky="nsew", padx=(10, 6), pady=10)
         left.grid_propagate(False)
+        self.workspace_page_list_frame = left
 
         list_header = ctk.CTkFrame(left, fg_color="transparent")
         list_header.pack(fill=ctk.X, padx=10, pady=(10, 6))
@@ -738,6 +821,7 @@ class UnifiedScanApp(ctk.CTk):
 
         preview = ctk.CTkFrame(tab)
         preview.grid(row=0, column=1, sticky="nsew", padx=6, pady=10)
+        self.workspace_preview_frame = preview
         preview.grid_rowconfigure(1, weight=1)
         preview.grid_columnconfigure(0, weight=1)
         preview.grid_columnconfigure(1, weight=1)
@@ -796,6 +880,7 @@ class UnifiedScanApp(ctk.CTk):
 
         processing = ctk.CTkScrollableFrame(tab, width=270, label_text="Processing")
         processing.grid(row=0, column=2, sticky="nsew", padx=(6, 10), pady=10)
+        self.workspace_processing_frame = processing
 
         ctk.CTkLabel(
             processing,
@@ -805,7 +890,7 @@ class UnifiedScanApp(ctk.CTk):
         ).pack(fill=ctk.X, padx=6, pady=(4, 6))
         ctk.CTkButton(
             processing,
-            text="1  Correct spread perspective...",
+            text="1  Correct spread perspective",
             command=self.open_manual_corners_editor,
         ).pack(fill=ctk.X, padx=6, pady=(0, 4))
         split_actions = ctk.CTkFrame(processing, fg_color="transparent")
@@ -832,24 +917,24 @@ class UnifiedScanApp(ctk.CTk):
         ).pack(fill=ctk.X, padx=6, pady=(0, 5))
         ctk.CTkButton(
             processing,
-            text="3  Page perspective...",
+            text="3  Page perspective",
             fg_color="transparent",
             border_width=1,
             command=self.open_current_geometry_corners_editor,
         ).pack(fill=ctk.X, padx=6, pady=(0, 4))
         ctk.CTkButton(
             processing,
-            text="4  Remove waves",
-            fg_color="transparent",
-            border_width=1,
-            command=self.remove_waves_selected,
-        ).pack(fill=ctk.X, padx=6, pady=(0, 4))
-        ctk.CTkButton(
-            processing,
-            text="Adjust wave curve...",
+            text="4  Edit page waves",
             fg_color="transparent",
             border_width=1,
             command=self.open_dewarp_points_editor,
+        ).pack(fill=ctk.X, padx=6, pady=(0, 4))
+        ctk.CTkButton(
+            processing,
+            text="Auto remove waves",
+            fg_color="transparent",
+            border_width=1,
+            command=self.remove_waves_selected,
         ).pack(fill=ctk.X, padx=6, pady=(0, 10))
         geometry_utilities = ctk.CTkFrame(processing, fg_color="transparent")
         geometry_utilities.pack(fill=ctk.X, padx=6, pady=(0, 4))
@@ -871,7 +956,7 @@ class UnifiedScanApp(ctk.CTk):
         ).pack(side=ctk.LEFT)
         ctk.CTkButton(
             processing,
-            text="Detect page boundaries...",
+            text="Detect page boundaries",
             fg_color="transparent",
             border_width=1,
             command=self.open_auto_crop_editor,
@@ -1016,7 +1101,7 @@ class UnifiedScanApp(ctk.CTk):
         ).pack(side=ctk.LEFT, padx=(0, 4))
         ctk.CTkButton(
             processing_actions,
-            text="Advanced...",
+            text="Advanced processing",
             width=108,
             fg_color="transparent",
             border_width=1,
@@ -1029,6 +1114,9 @@ class UnifiedScanApp(ctk.CTk):
         )
         self.apply_processing_button.pack(fill=ctk.X, padx=6, pady=(0, 14))
 
+        self.inline_editor_host = ctk.CTkFrame(tab)
+        self.inline_editor_host.grid_rowconfigure(0, weight=1)
+        self.inline_editor_host.grid_columnconfigure(0, weight=1)
         self.refresh_page_list()
 
     def _bind_shortcuts(self) -> None:
@@ -1085,6 +1173,9 @@ class UnifiedScanApp(ctk.CTk):
         if self.export_dialog_window is not None and self.export_dialog_window.winfo_exists():
             self.export_dialog_window.destroy()
         self.export_dialog_window = None
+        if self.camera_window is not None and self.camera_window.winfo_exists():
+            self.camera_window.destroy()
+        self.camera_window = None
         if self.camera is not None:
             self.camera.release()
         if self.autosave_job is not None:
@@ -1201,11 +1292,21 @@ class UnifiedScanApp(ctk.CTk):
             error_text=error_text,
         )
         self.camera_health_var.set(state.label)
-        if hasattr(self, "camera_health_label"):
-            self.camera_health_label.configure(text_color=state.color)
+        label = getattr(self, "camera_health_label", None)
+        if label is not None:
+            try:
+                if label.winfo_exists():
+                    label.configure(text_color=state.color)
+            except tk.TclError:
+                self.camera_health_label = None
 
     def go_to_review_tab(self) -> None:
         self.tabs.set(self.tab_review_name)
+        if self.camera_window is not None:
+            callback = getattr(self, "camera_close_callback", None)
+            if callback is not None:
+                callback()
+        self.lift()
 
     def quick_add_files(self) -> None:
         files = filedialog.askopenfilenames(
@@ -2882,6 +2983,37 @@ class UnifiedScanApp(ctk.CTk):
             return None
         return points[:4]
 
+    def _show_inline_geometry_editor(self) -> ctk.CTkFrame:
+        if self.inline_editor_host is None:
+            raise RuntimeError("Workspace editor host is unavailable.")
+        for frame in (
+            self.workspace_page_list_frame,
+            self.workspace_preview_frame,
+            self.workspace_processing_frame,
+        ):
+            frame.grid_remove()
+        for child in self.inline_editor_host.winfo_children():
+            child.destroy()
+        self.inline_editor_host.grid(
+            row=0,
+            column=0,
+            columnspan=3,
+            sticky="nsew",
+            padx=10,
+            pady=10,
+        )
+        editor = ctk.CTkFrame(self.inline_editor_host, fg_color="transparent")
+        editor.grid(row=0, column=0, sticky="nsew")
+        return editor
+
+    def _hide_inline_geometry_editor(self) -> None:
+        if self.inline_editor_host is not None:
+            self.inline_editor_host.grid_remove()
+        self.workspace_page_list_frame.grid()
+        self.workspace_preview_frame.grid()
+        self.workspace_processing_frame.grid()
+        self.update_page_preview()
+
     def _open_corner_editor_dialog(
         self,
         indices: list[int],
@@ -2926,21 +3058,16 @@ class UnifiedScanApp(ctk.CTk):
             except tk.TclError:
                 pass
             self.corner_editor_window = None
+        if self.inline_editor_close_callback is not None:
+            self.inline_editor_close_callback()
 
-        win = ctk.CTkToplevel(self)
+        win = self._show_inline_geometry_editor()
         self.corner_editor_window = win
-        win.title("Auto perspective" if auto_detect else "Perspective corners")
-        win.geometry("1120x820")
-        win.minsize(960, 640)
-        win.transient(self)
 
         header = ctk.CTkLabel(
             win,
-            text=(
-                "Adjust corners on the corrected page geometry, then apply to the current page or all pages in this editor."
-                if from_current_geometry
-                else "Adjust corners on the raw source, then apply to the current page or all pages in this editor."
-            ),
+            text="Page perspective" if from_current_geometry else "Spread perspective",
+            font=ctk.CTkFont(size=18, weight="bold"),
             anchor="w",
         )
         header.pack(fill=ctk.X, padx=12, pady=(12, 6))
@@ -3373,21 +3500,20 @@ class UnifiedScanApp(ctk.CTk):
             self.corner_meta_var = None
             self.corner_prev_button = None
             self.corner_next_button = None
+            self.inline_editor_close_callback = None
             win.destroy()
+            self._hide_inline_geometry_editor()
 
-        ctk.CTkButton(
+        self.corner_close_button = ctk.CTkButton(
             controls,
             text="Close",
             width=90,
             command=_close_editor,
-        ).pack(side=ctk.RIGHT)
+        )
+        self.corner_close_button.pack(side=ctk.RIGHT)
+        self.inline_editor_close_callback = _close_editor
 
-        _load_current_entry()
-        win.protocol("WM_DELETE_WINDOW", _close_editor)
-        win.grab_set()
-        win.attributes("-topmost", True)
-        win.lift()
-        win.attributes("-topmost", False)
+        win.after_idle(_load_current_entry)
 
     def open_manual_corners_editor(self) -> None:
         index, entry = self._single_selected_entry()
@@ -3722,6 +3848,8 @@ class UnifiedScanApp(ctk.CTk):
             except tk.TclError:
                 pass
             self.dewarp_editor_window = None
+        if self.inline_editor_close_callback is not None:
+            self.inline_editor_close_callback()
 
         source = entry.original_image
         source_height, source_width = source.shape[:2]
@@ -3745,26 +3873,14 @@ class UnifiedScanApp(ctk.CTk):
                     "Automatic model was not confident; adjust the neutral points if needed."
                 )
 
-        window = ctk.CTkToplevel(self)
+        window = self._show_inline_geometry_editor()
         self.dewarp_editor_window = window
-        window.title("Wave correction")
-        window.geometry("1120x820")
-        window.minsize(960, 680)
-        window.transient(self)
 
         ctk.CTkLabel(
             window,
             text="Page wave correction",
             font=ctk.CTkFont(size=18, weight="bold"),
         ).pack(anchor="w", padx=16, pady=(14, 2))
-        ctk.CTkLabel(
-            window,
-            text=(
-                "Drag the blue points vertically. The guides show the same correction at "
-                "three page heights; the right pane is the resulting preview."
-            ),
-            text_color=("#60646c", "#a0a4ab"),
-        ).pack(anchor="w", padx=16, pady=(0, 10))
 
         panes = ctk.CTkFrame(window)
         panes.pack(fill=ctk.BOTH, expand=True, padx=16, pady=(0, 10))
@@ -3805,6 +3921,11 @@ class UnifiedScanApp(ctk.CTk):
         state = {
             "points": initial_points,
             "active": None,
+            "selected": None,
+            "drag_mode": None,
+            "drag_start_y": 0.0,
+            "drag_start_points": None,
+            "add_mode": False,
             "display_source": source,
             "display_width": source_width,
             "display_height": source_height,
@@ -3814,6 +3935,8 @@ class UnifiedScanApp(ctk.CTk):
             "corrected_photo": None,
         }
         status = tk.StringVar(value=initial_message)
+        self.dewarp_editor_state = state
+        self.dewarp_status_var = status
 
         def current_model(*, source_name: str = "user") -> DewarpModel:
             return DewarpModel(
@@ -3850,15 +3973,16 @@ class UnifiedScanApp(ctk.CTk):
             for point_index, (x_value, displacement) in enumerate(state["points"]):
                 x_pos = offset_x + x_value * (display_width - 1)
                 y_pos = offset_y + (0.5 + displacement) * display_height
-                radius = 6
+                selected = point_index == state["selected"]
+                radius = 8 if selected else 6
                 left_canvas.create_oval(
                     x_pos - radius,
                     y_pos - radius,
                     x_pos + radius,
                     y_pos + radius,
-                    fill="#1f6aa5",
+                    fill="#ffb000" if selected else "#1f6aa5",
                     outline="#ffffff",
-                    width=1,
+                    width=2 if selected else 1,
                     tags=("dewarp-overlay", f"point-{point_index}"),
                 )
 
@@ -3959,27 +4083,107 @@ class UnifiedScanApp(ctk.CTk):
                     best_index = point_index
             return best_index
 
+        def event_values(x_pos: float, y_pos: float) -> tuple[float, float]:
+            local_x = float(x_pos) - float(state["offset_x"])
+            local_y = float(y_pos) - float(state["offset_y"])
+            x_value = local_x / max(1, int(state["display_width"]) - 1)
+            displacement = local_y / max(1, int(state["display_height"])) - 0.5
+            return (
+                float(np.clip(x_value, 0.0, 1.0)),
+                float(np.clip(displacement, -0.24, 0.24)),
+            )
+
+        def near_center_curve(x_pos: float, y_pos: float) -> bool:
+            x_value, _displacement = event_values(x_pos, y_pos)
+            point_x = np.asarray([point[0] for point in state["points"]], dtype=np.float32)
+            point_y = np.asarray([point[1] for point in state["points"]], dtype=np.float32)
+            curve_y = float(np.interp(x_value, point_x, point_y))
+            expected_y = float(state["offset_y"]) + (0.5 + curve_y) * int(state["display_height"])
+            return abs(float(y_pos) - expected_y) <= 12.0
+
+        def add_point_at(x_pos: float, y_pos: float) -> None:
+            x_value, displacement = event_values(x_pos, y_pos)
+            added = _add_dewarp_control_point(state["points"], x_value, displacement)
+            state["add_mode"] = False
+            if added is None:
+                status.set("Point was not added: choose a free position on the curve.")
+                return
+            state["selected"] = added
+            draw_overlay()
+            render_corrected()
+            status.set(f"Added point {added + 1}; {len(state['points'])} points total.")
+
         def on_down(event) -> None:
-            state["active"] = nearest_point(event.x, event.y)
+            if state["add_mode"]:
+                add_point_at(event.x, event.y)
+                return
+            active = nearest_point(event.x, event.y)
+            state["active"] = active
+            state["selected"] = active
+            if active is not None:
+                state["drag_mode"] = "point"
+            elif near_center_curve(event.x, event.y):
+                state["drag_mode"] = "line"
+                state["drag_start_y"] = float(event.y)
+                state["drag_start_points"] = list(state["points"])
+            else:
+                state["drag_mode"] = None
+            draw_overlay()
 
         def on_move(event) -> None:
-            active = state["active"]
-            if active is None:
+            if state["drag_mode"] == "point" and state["active"] is not None:
+                x_value, displacement = event_values(event.x, event.y)
+                _move_dewarp_control_point(
+                    state["points"],
+                    int(state["active"]),
+                    x_value,
+                    displacement,
+                )
+            elif state["drag_mode"] == "line":
+                original = state["drag_start_points"]
+                if original is None:
+                    return
+                state["points"] = list(original)
+                delta = (float(event.y) - float(state["drag_start_y"])) / max(
+                    1, int(state["display_height"])
+                )
+                _shift_dewarp_control_points(state["points"], delta)
+            else:
                 return
-            x_value, _old_displacement = state["points"][active]
-            local_y = float(event.y) - float(state["offset_y"])
-            displacement = float(
-                np.clip((local_y / max(1, int(state["display_height"]))) - 0.5, -0.2, 0.2)
-            )
-            state["points"][active] = (x_value, displacement)
             draw_overlay()
 
         def on_up(_event) -> None:
-            if state["active"] is None:
+            if state["drag_mode"] is None:
                 return
             state["active"] = None
+            state["drag_mode"] = None
+            state["drag_start_points"] = None
             render_corrected()
             status.set("User-adjusted preview. Apply to save these points for the page.")
+
+        def begin_add_point() -> None:
+            state["add_mode"] = True
+            status.set("Click the source curve where the new point should be placed.")
+
+        def remove_selected_point() -> None:
+            selected = state["selected"]
+            if selected is None:
+                status.set("Select a point to remove.")
+                return
+            if not _remove_dewarp_control_point(state["points"], int(selected)):
+                status.set("At least three wave points must remain.")
+                return
+            state["selected"] = None
+            draw_overlay()
+            render_corrected()
+            status.set(f"Removed point; {len(state['points'])} points remain.")
+
+        def remove_point_at(event) -> str:
+            selected = nearest_point(event.x, event.y)
+            if selected is not None:
+                state["selected"] = selected
+                remove_selected_point()
+            return "break"
 
         def use_automatic() -> None:
             model, diagnostics = estimate_textline_dewarp_model(source)
@@ -3987,12 +4191,14 @@ class UnifiedScanApp(ctk.CTk):
                 status.set(f"Automatic model unavailable: {diagnostics.reason}.")
                 return
             state["points"] = list(model.control_points)
+            state["selected"] = None
             draw_overlay()
             render_corrected()
             status.set(f"Automatic model restored from {diagnostics.line_count} supporting lines.")
 
         def use_neutral() -> None:
             state["points"] = [(float(x), 0.0) for x in np.linspace(0.0, 1.0, 9, dtype=np.float32)]
+            state["selected"] = None
             draw_overlay()
             render_corrected()
             status.set("Neutral correction model. The page will not be locally warped.")
@@ -4027,11 +4233,17 @@ class UnifiedScanApp(ctk.CTk):
             self.dewarp_editor_window = None
             self.dewarp_source_canvas = None
             self.dewarp_preview_canvas = None
+            self.dewarp_editor_state = None
+            self.dewarp_status_var = None
+            self.inline_editor_close_callback = None
             window.destroy()
+            self._hide_inline_geometry_editor()
 
         left_canvas.bind("<Button-1>", on_down)
         left_canvas.bind("<B1-Motion>", on_move)
         left_canvas.bind("<ButtonRelease-1>", on_up)
+        left_canvas.bind("<Double-Button-1>", lambda event: add_point_at(event.x, event.y))
+        left_canvas.bind("<Button-3>", remove_point_at)
         panes.bind("<Configure>", schedule_resize, add="+")
 
         ctk.CTkLabel(window, textvariable=status, anchor="w").pack(fill=ctk.X, padx=16, pady=(0, 8))
@@ -4045,16 +4257,32 @@ class UnifiedScanApp(ctk.CTk):
             border_width=1,
             command=use_neutral,
         ).pack(side=ctk.LEFT, padx=8)
+        self.dewarp_add_point_button = ctk.CTkButton(
+            actions,
+            text="Add point",
+            fg_color="transparent",
+            border_width=1,
+            command=begin_add_point,
+        )
+        self.dewarp_add_point_button.pack(side=ctk.LEFT)
+        self.dewarp_remove_point_button = ctk.CTkButton(
+            actions,
+            text="Remove point",
+            fg_color="transparent",
+            border_width=1,
+            command=remove_selected_point,
+        )
+        self.dewarp_remove_point_button.pack(side=ctk.LEFT, padx=8)
         ctk.CTkButton(actions, text="Apply points", command=apply_points).pack(side=ctk.RIGHT)
-        ctk.CTkButton(
+        self.dewarp_close_button = ctk.CTkButton(
             actions,
             text="Cancel",
             fg_color="transparent",
             border_width=1,
             command=close_editor,
-        ).pack(side=ctk.RIGHT, padx=8)
-        window.protocol("WM_DELETE_WINDOW", close_editor)
-        window.grab_set()
+        )
+        self.dewarp_close_button.pack(side=ctk.RIGHT, padx=8)
+        self.inline_editor_close_callback = close_editor
         window.after_idle(render_views)
 
     def _on_review_processing_slider_change(self, _value: float) -> None:
@@ -4174,15 +4402,18 @@ class UnifiedScanApp(ctk.CTk):
             and self.review_processing_window.winfo_exists()
         ):
             self.review_processing_window.lift()
-            self.review_processing_window.focus()
             return
+        if self.inline_editor_close_callback is not None:
+            self.inline_editor_close_callback()
 
-        window = ctk.CTkToplevel(self)
-        window.title("Review Processing - Advanced")
-        window.resizable(width=False, height=False)
+        window = self._show_inline_geometry_editor()
         self.review_processing_window = window
 
-        ctk.CTkLabel(window, text="Tune processing settings for Review preview/apply.").pack(
+        ctk.CTkLabel(
+            window,
+            text="Advanced processing",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        ).pack(
             anchor="w",
             padx=12,
             pady=(12, 8),
@@ -4295,7 +4526,9 @@ class UnifiedScanApp(ctk.CTk):
 
         def _on_close() -> None:
             self.review_processing_window = None
+            self.inline_editor_close_callback = None
             window.destroy()
+            self._hide_inline_geometry_editor()
 
         actions = ctk.CTkFrame(window, fg_color="transparent")
         actions.pack(fill=ctk.X, padx=12, pady=(0, 12))
@@ -4313,14 +4546,14 @@ class UnifiedScanApp(ctk.CTk):
             border_width=1,
             width=100,
         ).pack(side=ctk.LEFT, padx=(8, 0))
-        ctk.CTkButton(actions, text="Close", command=_on_close, width=100).pack(
-            side=ctk.LEFT, padx=8
+        self.review_processing_close_button = ctk.CTkButton(
+            actions,
+            text="Close",
+            command=_on_close,
+            width=100,
         )
-
-        window.protocol("WM_DELETE_WINDOW", _on_close)
-        window.attributes("-topmost", True)
-        window.grab_set()
-        window.attributes("-topmost", False)
+        self.review_processing_close_button.pack(side=ctk.LEFT, padx=8)
+        self.inline_editor_close_callback = _on_close
 
     def apply_review_changes(self) -> None:
         indices = self._selected_entry_indices()

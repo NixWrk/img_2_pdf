@@ -140,11 +140,13 @@ their own applicable terms; UniScan neither distributes those weights nor record
 binary identity in a processing recipe.
 
 The GUI offers **None**, validated automatic text-line correction, and the explicit offline
-text-line method; it does not enable the UVDoc fallback. Workspace → Processing exposes
-**Perspective...** and **Wave curve...** directly. The perspective editor shows draggable corner
-handles beside a live rectified result. The wave editor shows the source curve and corrected result;
-its normalized points are saved with the page and immediately reprocessed at full resolution when
-**Apply points** is pressed. For automatic settings, **Apply preview to pages** commits the
+text-line method; it does not enable the UVDoc fallback. Workspace Processing exposes
+**Page perspective** and **Edit page waves** directly. The inline perspective editor shows
+draggable corner handles beside a live rectified result. The inline wave editor shows the source
+curve and corrected result; points can be added, removed, moved horizontally or vertically, and
+shifted together by dragging the center curve. Its normalized points are saved with the page and
+immediately reprocessed at full resolution when **Apply points** is pressed. For automatic
+settings, **Apply preview to pages** commits the
 full-resolution result, and export publishes that committed generation without replaying different
 global settings.
 
