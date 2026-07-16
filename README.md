@@ -92,8 +92,9 @@ Perspective point changes are saved automatically when moving to another page or
 Reset and Auto Detect replace the current point positions without an extra Apply Current step.
 Wave points can be added, removed, and moved in both axes on three independent Top, Middle, and
 Bottom curves. Each curve can follow a different contrasting page feature; correction is smoothly
-interpolated between their vertical regions. If a curve has no point at the left or right image
-edge, its last point-to-point slope is linearly continued instead of becoming horizontal.
+interpolated between their vertical regions. Clicking any curve or point selects it directly. Along
+each curve, shape-preserving cubic interpolation uses the neighboring 3-4 points, including cubic
+continuation to the image edges when no endpoint was placed there.
 Processing controls cover document type,
 grayscale/B&W output, contrast, brightness, denoise, thresholding, illumination correction,
 binarization, despeckle, A4/Letter layout, margins, alignment, and lighting analysis.

@@ -481,7 +481,6 @@ class UnifiedScanApp(ctk.CTk):
         self.dewarp_editor_window: ctk.CTkFrame | None = None
         self.dewarp_source_canvas: tk.Canvas | None = None
         self.dewarp_preview_canvas: tk.Canvas | None = None
-        self.dewarp_curve_selector: ctk.CTkSegmentedButton | None = None
         self.dewarp_apply_points_button: ctk.CTkButton | None = None
         self.dewarp_resize_job: str | None = None
         self.page_drag_state: dict[str, object] | None = None
@@ -4300,12 +4299,6 @@ class UnifiedScanApp(ctk.CTk):
 
         curve_names = ("Top", "Middle", "Bottom")
         curve_colors = ("#28c7d9", "#36a3ff", "#e05aa8")
-        self.dewarp_curve_selector = ctk.CTkSegmentedButton(
-            window,
-            values=list(curve_names),
-        )
-        self.dewarp_curve_selector.pack(anchor="w", padx=16, pady=(6, 8))
-        self.dewarp_curve_selector.set(curve_names[min(1, len(initial_curves) - 1)])
 
         panes = ctk.CTkFrame(window)
         panes.pack(fill=ctk.BOTH, expand=True, padx=16, pady=(0, 10))
@@ -4372,16 +4365,8 @@ class UnifiedScanApp(ctk.CTk):
             state["guide_anchor"] = curve["anchor"]
             state["selected"] = None
             state["active"] = None
-            selector = getattr(self, "dewarp_curve_selector", None)
-            if selector is not None and len(state["curves"]) == 3:
-                selector.set(curve_names[curve_index])
             draw_overlay()
             status.set(f"Editing the {curve_names[curve_index].lower()} page curve.")
-
-        self.dewarp_curve_selector.configure(
-            command=lambda value: select_curve(curve_names.index(value))
-        )
-        state["select_curve"] = select_curve
 
         def current_model(*, source_name: str = "user") -> DewarpModel:
             curves = tuple(
@@ -4524,22 +4509,23 @@ class UnifiedScanApp(ctk.CTk):
                 render_views,
             )
 
-        def nearest_point(x_pos: float, y_pos: float) -> int | None:
+        def nearest_point(x_pos: float, y_pos: float) -> tuple[int, int] | None:
             display_width = int(state["display_width"])
             display_height = int(state["display_height"])
             offset_x = float(state["offset_x"])
             offset_y = float(state["offset_y"])
-            guide_anchor = float(state["guide_anchor"])
-            best_index = None
+            best_hit = None
             best_distance = 16.0
-            for point_index, (x_value, displacement) in enumerate(state["points"]):
-                px = offset_x + x_value * (display_width - 1)
-                py = offset_y + (guide_anchor + displacement) * display_height
-                distance = float(np.hypot(x_pos - px, y_pos - py))
-                if distance < best_distance:
-                    best_distance = distance
-                    best_index = point_index
-            return best_index
+            for curve_index, curve in enumerate(state["curves"]):
+                guide_anchor = float(curve["anchor"])
+                for point_index, (x_value, displacement) in enumerate(curve["points"]):
+                    px = offset_x + x_value * (display_width - 1)
+                    py = offset_y + (guide_anchor + displacement) * display_height
+                    distance = float(np.hypot(x_pos - px, y_pos - py))
+                    if distance < best_distance:
+                        best_distance = distance
+                        best_hit = (curve_index, point_index)
+            return best_hit
 
         def event_values(x_pos: float, y_pos: float) -> tuple[float, float]:
             local_x = float(x_pos) - float(state["offset_x"])
@@ -4554,18 +4540,28 @@ class UnifiedScanApp(ctk.CTk):
                 float(np.clip(displacement, -0.24, 0.24)),
             )
 
-        def near_center_curve(x_pos: float, y_pos: float) -> bool:
-            x_value, _displacement = event_values(x_pos, y_pos)
-            curve_y = float(
-                interpolate_control_curve(
-                    state["points"],
-                    np.asarray([x_value], dtype=np.float32),
-                )[0]
+        def nearest_curve(x_pos: float, y_pos: float) -> int | None:
+            local_x = float(x_pos) - float(state["offset_x"])
+            x_value = float(
+                np.clip(local_x / max(1, int(state["display_width"]) - 1), 0.0, 1.0)
             )
-            expected_y = float(state["offset_y"]) + (
-                float(state["guide_anchor"]) + curve_y
-            ) * int(state["display_height"])
-            return abs(float(y_pos) - expected_y) <= 12.0
+            best_curve = None
+            best_distance = 12.0
+            for curve_index, curve in enumerate(state["curves"]):
+                curve_y = float(
+                    interpolate_control_curve(
+                        curve["points"],
+                        np.asarray([x_value], dtype=np.float32),
+                    )[0]
+                )
+                expected_y = float(state["offset_y"]) + (
+                    float(curve["anchor"]) + curve_y
+                ) * int(state["display_height"])
+                distance = abs(float(y_pos) - expected_y)
+                if distance < best_distance:
+                    best_distance = distance
+                    best_curve = curve_index
+            return best_curve
 
         def show_magnifier(x_pos: float, y_pos: float) -> None:
             x_value, displacement = event_values(x_pos, y_pos)
@@ -4580,6 +4576,9 @@ class UnifiedScanApp(ctk.CTk):
             )
 
         def add_point_at(x_pos: float, y_pos: float) -> None:
+            curve_hit = nearest_curve(x_pos, y_pos)
+            if curve_hit is not None and curve_hit != state["active_curve"]:
+                select_curve(curve_hit)
             x_value, displacement = event_values(x_pos, y_pos)
             added = _add_dewarp_control_point(state["points"], x_value, displacement)
             state["add_mode"] = False
@@ -4595,16 +4594,25 @@ class UnifiedScanApp(ctk.CTk):
             if state["add_mode"]:
                 add_point_at(event.x, event.y)
                 return
-            active = nearest_point(event.x, event.y)
-            state["active"] = active
-            state["selected"] = active
-            if active is not None:
+            point_hit = nearest_point(event.x, event.y)
+            if point_hit is not None:
+                curve_index, point_index = point_hit
+                if curve_index != state["active_curve"]:
+                    select_curve(curve_index)
+                state["active"] = point_index
+                state["selected"] = point_index
                 state["drag_mode"] = "point"
-            elif near_center_curve(event.x, event.y):
+            else:
+                curve_hit = nearest_curve(event.x, event.y)
+                if curve_hit is not None and curve_hit != state["active_curve"]:
+                    select_curve(curve_hit)
+                state["active"] = None
+                state["selected"] = None
+            if point_hit is None and curve_hit is not None:
                 state["drag_mode"] = "line"
                 state["drag_start_y"] = float(event.y)
                 state["drag_start_anchor"] = float(state["guide_anchor"])
-            else:
+            elif point_hit is None:
                 state["drag_mode"] = None
             draw_overlay()
             if state["drag_mode"] is not None:
@@ -4680,9 +4688,12 @@ class UnifiedScanApp(ctk.CTk):
             status.set(f"Removed point; {len(state['points'])} points remain.")
 
         def remove_point_at(event) -> str:
-            selected = nearest_point(event.x, event.y)
-            if selected is not None:
-                state["selected"] = selected
+            point_hit = nearest_point(event.x, event.y)
+            if point_hit is not None:
+                curve_index, point_index = point_hit
+                if curve_index != state["active_curve"]:
+                    select_curve(curve_index)
+                state["selected"] = point_index
                 remove_selected_point()
             return "break"
 
@@ -4748,7 +4759,6 @@ class UnifiedScanApp(ctk.CTk):
             self.dewarp_preview_canvas = None
             self.dewarp_editor_state = None
             self.dewarp_status_var = None
-            self.dewarp_curve_selector = None
             self.dewarp_apply_points_button = None
             self.inline_editor_close_callback = None
             window.destroy()

@@ -146,9 +146,10 @@ draggable corner handles beside a live rectified result. Changed corners are sav
 with Prev/Next or leaving with Done; Reset and Auto Detect remain explicit replacement actions.
 The inline wave editor shows the source and corrected result with independent **Top**, **Middle**,
 and **Bottom** curves. Each curve has its own vertical anchor and editable points, so uneven
-curvature can be traced in three page regions; the remap interpolates smoothly between them.
-Outside the first and last point, the curve continues the slope of the nearest two points, bounded
-to the normal displacement limit, rather than adding horizontal side segments.
+curvature can be traced in three page regions; clicking a line or any of its points activates it
+without a separate selector. The remap interpolates smoothly between regions. Along each line,
+shape-preserving cubic Hermite interpolation derives local slopes from 3-4 neighboring points and
+continues its edge segments cubically, bounded to the normal displacement limit.
 Normalized anchors and point values are saved with the page and immediately reprocessed at full
 resolution when **Apply points** is
 pressed. Corner, split-line,

@@ -90,24 +90,75 @@ def interpolate_control_curve(
     control_points: tuple[tuple[float, float], ...] | list[tuple[float, float]],
     normalized_x: np.ndarray,
 ) -> np.ndarray:
-    """Interpolate between points and linearly continue both end slopes."""
+    """Shape-preserving cubic interpolation with cubic end continuation."""
     points = normalize_control_points(control_points)
-    point_x = np.asarray([point[0] for point in points], dtype=np.float32)
-    point_y = np.asarray([point[1] for point in points], dtype=np.float32)
-    targets = np.clip(np.asarray(normalized_x, dtype=np.float32), 0.0, 1.0)
+    point_x = np.asarray([point[0] for point in points], dtype=np.float64)
+    point_y = np.asarray([point[1] for point in points], dtype=np.float64)
+    interval_widths = np.diff(point_x)
+    interval_slopes = np.diff(point_y) / interval_widths
+    derivatives = np.zeros_like(point_y)
+
+    for index in range(1, len(points) - 1):
+        left_slope = interval_slopes[index - 1]
+        right_slope = interval_slopes[index]
+        if left_slope == 0.0 or right_slope == 0.0 or np.sign(left_slope) != np.sign(right_slope):
+            derivatives[index] = 0.0
+            continue
+        left_weight = 2.0 * interval_widths[index] + interval_widths[index - 1]
+        right_weight = interval_widths[index] + 2.0 * interval_widths[index - 1]
+        derivatives[index] = (left_weight + right_weight) / (
+            left_weight / left_slope + right_weight / right_slope
+        )
+
+    def endpoint_derivative(
+        first_width: float,
+        second_width: float,
+        first_slope: float,
+        second_slope: float,
+    ) -> float:
+        derivative = (
+            (2.0 * first_width + second_width) * first_slope
+            - first_width * second_slope
+        ) / (first_width + second_width)
+        if np.sign(derivative) != np.sign(first_slope):
+            return 0.0
+        if np.sign(first_slope) != np.sign(second_slope) and abs(derivative) > 3.0 * abs(
+            first_slope
+        ):
+            return 3.0 * first_slope
+        return float(derivative)
+
+    derivatives[0] = endpoint_derivative(
+        interval_widths[0],
+        interval_widths[1],
+        interval_slopes[0],
+        interval_slopes[1],
+    )
+    derivatives[-1] = endpoint_derivative(
+        interval_widths[-1],
+        interval_widths[-2],
+        interval_slopes[-1],
+        interval_slopes[-2],
+    )
+
+    targets = np.clip(np.asarray(normalized_x, dtype=np.float64), 0.0, 1.0)
     target_shape = targets.shape
     targets = targets.reshape(-1)
-    result = np.interp(targets, point_x, point_y).astype(np.float32)
-
-    left = targets < point_x[0]
-    if np.any(left):
-        left_slope = (point_y[1] - point_y[0]) / (point_x[1] - point_x[0])
-        result[left] = point_y[0] + (targets[left] - point_x[0]) * left_slope
-    right = targets > point_x[-1]
-    if np.any(right):
-        right_slope = (point_y[-1] - point_y[-2]) / (point_x[-1] - point_x[-2])
-        result[right] = point_y[-1] + (targets[right] - point_x[-1]) * right_slope
-    return np.clip(result, -0.25, 0.25).reshape(target_shape)
+    intervals = np.searchsorted(point_x, targets, side="right") - 1
+    intervals = np.clip(intervals, 0, len(points) - 2)
+    widths = interval_widths[intervals]
+    relative = (targets - point_x[intervals]) / widths
+    relative_squared = relative * relative
+    relative_cubed = relative_squared * relative
+    result = (
+        (2.0 * relative_cubed - 3.0 * relative_squared + 1.0) * point_y[intervals]
+        + (relative_cubed - 2.0 * relative_squared + relative)
+        * widths
+        * derivatives[intervals]
+        + (-2.0 * relative_cubed + 3.0 * relative_squared) * point_y[intervals + 1]
+        + (relative_cubed - relative_squared) * widths * derivatives[intervals + 1]
+    )
+    return np.clip(result, -0.25, 0.25).astype(np.float32).reshape(target_shape)
 
 
 def normalize_control_curves(

@@ -31,11 +31,12 @@ Record Windows version, artifact SHA-256, camera model, and operator in the rele
       centered directly on the cursor, and follows it without jumping to a canvas corner.
 - [ ] Open Adjust split, drag the gutter line using the full-resolution magnifier, preview both
       output pages in Compare, and confirm Create 2 pages preserves the chosen position.
-- [ ] In inline wave editing, select Top, Middle, and Bottom in turn. Give each curve a visibly
-      different shape and vertical position, verify the full-resolution result interpolates between
-      all three, and confirm Apply points restores the same curves after reopening the page.
+- [ ] In inline wave editing, click Top, Middle, and Bottom directly without using a selector. Give
+      each curve a visibly different shape and vertical position, verify the full-resolution result
+      interpolates between all three, and confirm Apply points restores them after reopening.
 - [ ] Leave the first and last wave points away from the image edges. Verify both visible curve ends
-      continue their nearest point-to-point slopes instead of turning into horizontal segments.
+      continue with smooth cubic curvature based on 3-4 nearby points instead of turning into
+      horizontal or straight side segments.
 - [ ] Change processing controls and Preview without Apply; confirm export still uses the previous
       committed page. Apply, then confirm preview and export use the new full-resolution result.
 - [ ] Start Apply on several large pages and cancel midway; confirm the background job remains

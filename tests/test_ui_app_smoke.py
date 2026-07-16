@@ -307,23 +307,22 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert len(app.dewarp_editor_state["points"]) == initial_point_count
 
         assert len(app.dewarp_editor_state["curves"]) == 3
-        app.dewarp_editor_state["select_curve"](0)
-        app.update()
-        assert app.dewarp_curve_selector.get() == "Top"
-        before_shift = list(app.dewarp_editor_state["points"])
-        before_anchor = float(app.dewarp_editor_state["guide_anchor"])
+        top_curve = app.dewarp_editor_state["curves"][0]
+        before_shift = list(top_curve["points"])
+        before_anchor = float(top_curve["anchor"])
         curve_x = 0.44
         curve_y = float(
-            np.interp(
-                curve_x,
-                [point[0] for point in before_shift],
-                [point[1] for point in before_shift],
-            )
+            app_module.interpolate_control_curve(
+                before_shift,
+                np.asarray([curve_x], dtype=np.float32),
+            )[0]
         )
         press_x = offset_x + int(display_width * curve_x)
         press_y = offset_y + int(display_height * (before_anchor + curve_y))
         app.dewarp_source_canvas.event_generate("<ButtonPress-1>", x=press_x, y=press_y)
         app.update()
+        assert app.dewarp_editor_state["active_curve"] == 0
+        assert app.dewarp_editor_state["points"] is top_curve["points"]
         assert app.dewarp_source_canvas.bbox("geometry-magnifier") is not None
         _assert_round_magnifier_at(app.dewarp_source_canvas, press_x, press_y)
         target_y = offset_y

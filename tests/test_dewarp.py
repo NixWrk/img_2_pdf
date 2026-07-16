@@ -143,7 +143,7 @@ def test_control_curves_validate_and_sort_anchors() -> None:
         normalize_control_curves([(0.5, points), (0.5, points)])
 
 
-def test_control_curve_linearly_extrapolates_both_end_slopes() -> None:
+def test_control_curve_uses_shape_preserving_cubic_interpolation_and_extrapolation() -> None:
     points = [(0.2, 0.02), (0.4, 0.06), (0.7, 0.03), (0.8, 0.01)]
 
     values = interpolate_control_curve(
@@ -151,7 +151,11 @@ def test_control_curve_linearly_extrapolates_both_end_slopes() -> None:
         np.asarray([0.0, 0.2, 0.5, 0.8, 1.0], dtype=np.float32),
     )
 
-    assert values == pytest.approx([-0.02, 0.02, 0.05, 0.01, -0.03], abs=1e-6)
+    assert values[[1, 3]] == pytest.approx([0.02, 0.01], abs=1e-6)
+    assert values[2] == pytest.approx(0.055359475, abs=1e-6)
+    assert values[2] != pytest.approx(0.05, abs=1e-4)
+    assert values[0] == pytest.approx(-0.036, abs=1e-6)
+    assert values[4] == pytest.approx(-0.004411765, abs=1e-6)
 
 
 def test_control_curve_extrapolation_is_bounded_to_page_safety_limit() -> None:
