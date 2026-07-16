@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
+import math
 from pathlib import Path
 import time
 
 import numpy as np
 
 from .cleanup import (
+    DESPECKLE_CHOICES,
     BINARIZATION_NONE,
     DESPECKLE_NONE,
     DespeckleDiagnostics,
@@ -17,22 +19,31 @@ from .cleanup import (
     analyze_lighting,
 )
 from .dewarp import (
+    DEWARP_METHOD_CHOICES,
     DEWARP_METHOD_NONE,
     DewarpDiagnostics,
     DewarpModel,
     dewarp_document,
 )
-from .layout import PAGE_LAYOUT_NONE, PageLayoutDiagnostics, layout_document_page
+from .layout import (
+    PAGE_LAYOUT_CHOICES,
+    PAGE_LAYOUT_NONE,
+    PageLayoutDiagnostics,
+    layout_document_page,
+)
 from .layout import ContentBox
 from .orientation import (
+    ORIENTATION_METHOD_CHOICES,
     ORIENTATION_METHOD_NONE,
     OrientationDiagnostics,
     orient_document,
 )
 from .postprocess import POSTPROCESSING_OPTIONS, grayscale
 from .preprocess import (
+    DESKEW_METHOD_CHOICES,
     DESKEW_METHOD_NONE,
     PreprocessSettings,
+    SkewEstimate,
     apply_enhancements_with_diagnostics,
     deskew_document_with_diagnostics,
 )
@@ -147,11 +158,18 @@ def _run_stage(
         _cancelled(request)
         if cached is not None:
             cached_image, metadata = cached
-            diagnostics = decode_diagnostics(metadata)
-            durations[stage] = round((time.perf_counter() - started) * 1000.0, 3)
-            cache_hits.append(stage)
-            _cancelled(request)
-            return cached_image, diagnostics, key
+            try:
+                diagnostics = decode_diagnostics(metadata)
+            except (KeyError, OverflowError, TypeError, ValueError):
+                # The generic cache can validate its envelope, but only this
+                # stage knows the semantic shape of its diagnostics. Treat a
+                # stale or malformed payload as a miss and repair it below.
+                cache.reject_hit(key)
+            else:
+                durations[stage] = round((time.perf_counter() - started) * 1000.0, 3)
+                cache_hits.append(stage)
+                _cancelled(request)
+                return cached_image, diagnostics, key
 
     output, diagnostics = operation()
     durations[stage] = round((time.perf_counter() - started) * 1000.0, 3)
@@ -162,15 +180,163 @@ def _run_stage(
     return output, diagnostics, key
 
 
+def _strict_bool(value: object, *, field_name: str) -> bool:
+    if type(value) is not bool:
+        raise ValueError(f"Invalid cached {field_name}.")
+    return value
+
+
+def _strict_int(value: object, *, field_name: str, minimum: int = 0) -> int:
+    if type(value) is not int or value < minimum:
+        raise ValueError(f"Invalid cached {field_name}.")
+    return value
+
+
+def _finite_float(
+    value: object,
+    *,
+    field_name: str,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"Invalid cached {field_name}.")
+    try:
+        normalized = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"Invalid cached {field_name}.") from exc
+    if (
+        not math.isfinite(normalized)
+        or (minimum is not None and normalized < minimum)
+        or (maximum is not None and normalized > maximum)
+    ):
+        raise ValueError(f"Invalid cached {field_name}.")
+    return normalized
+
+
+def _optional_reason(value: object, *, field_name: str) -> str | None:
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"Invalid cached {field_name}.")
+    return value
+
+
+def _orientation_from_dict(payload: dict[str, object]) -> OrientationDiagnostics:
+    diagnostics = OrientationDiagnostics(**payload)
+    if diagnostics.method not in ORIENTATION_METHOD_CHOICES:
+        raise ValueError("Invalid cached orientation method.")
+    _strict_bool(diagnostics.applied, field_name="orientation applied flag")
+    if type(diagnostics.angle_degrees) is not int or diagnostics.angle_degrees not in {
+        0,
+        90,
+        180,
+        270,
+    }:
+        raise ValueError("Invalid cached orientation angle.")
+    _finite_float(
+        diagnostics.confidence,
+        field_name="orientation confidence",
+        minimum=0.0,
+        maximum=1.0,
+    )
+    _strict_int(diagnostics.line_count, field_name="orientation line count")
+    _optional_reason(diagnostics.reason, field_name="orientation reason")
+    return diagnostics
+
+
 def _layout_from_dict(payload: dict[str, object]) -> PageLayoutDiagnostics:
     values = dict(payload)
     content_box = values.pop("content_box")
     if not isinstance(content_box, dict):
         raise ValueError("Invalid cached content box.")
-    return PageLayoutDiagnostics(
+    diagnostics = PageLayoutDiagnostics(
         content_box=ContentBox(**content_box),
         **values,
     )
+    if diagnostics.method not in PAGE_LAYOUT_CHOICES:
+        raise ValueError("Invalid cached layout method.")
+    _strict_bool(diagnostics.applied, field_name="layout applied flag")
+    for field_name in ("x", "y", "width", "height"):
+        _strict_int(
+            getattr(diagnostics.content_box, field_name), field_name=f"content box {field_name}"
+        )
+    _finite_float(
+        diagnostics.content_confidence,
+        field_name="content confidence",
+        minimum=0.0,
+        maximum=1.0,
+    )
+    _finite_float(diagnostics.scale, field_name="layout scale", minimum=0.0)
+    _strict_int(diagnostics.target_width, field_name="layout target width")
+    _strict_int(diagnostics.target_height, field_name="layout target height")
+    _optional_reason(diagnostics.reason, field_name="layout reason")
+    return diagnostics
+
+
+def _deskew_from_dict(payload: dict[str, object]) -> dict[str, object]:
+    """Validate cached deskew diagnostics before they reach report assembly."""
+    estimate = SkewEstimate(**payload)
+    if estimate.method not in DESKEW_METHOD_CHOICES:
+        raise ValueError("Invalid cached deskew method.")
+    if (
+        estimate.selected_method is not None
+        and estimate.selected_method not in DESKEW_METHOD_CHOICES
+    ):
+        raise ValueError("Invalid cached selected deskew method.")
+    _optional_reason(estimate.reason, field_name="deskew reason")
+    _strict_int(estimate.line_count, field_name="deskew line count")
+    angle = _finite_float(estimate.angle_degrees, field_name="deskew angle")
+    confidence = _finite_float(
+        estimate.confidence,
+        field_name="deskew confidence",
+        minimum=0.0,
+        maximum=1.0,
+    )
+    return {
+        **asdict(estimate),
+        "angle_degrees": angle,
+        "confidence": confidence,
+    }
+
+
+def _dewarp_from_dict(payload: dict[str, object]) -> DewarpDiagnostics:
+    diagnostics = DewarpDiagnostics(**payload)
+    if diagnostics.method not in DEWARP_METHOD_CHOICES:
+        raise ValueError("Invalid cached dewarp method.")
+    if diagnostics.selected_method not in DEWARP_METHOD_CHOICES:
+        raise ValueError("Invalid cached selected dewarp method.")
+    _strict_bool(diagnostics.applied, field_name="dewarp applied flag")
+    _strict_int(diagnostics.line_count, field_name="dewarp line count")
+    for field_name in (
+        "max_displacement_px",
+        "curvature_rms_px",
+        "curvature_before_px",
+        "curvature_after_px",
+        "blank_border_before",
+        "blank_border_after",
+        "edge_ink_before",
+        "edge_ink_after",
+        "aspect_change",
+        "duration_ms",
+    ):
+        _finite_float(getattr(diagnostics, field_name), field_name=f"dewarp {field_name}")
+    _optional_reason(diagnostics.reason, field_name="dewarp reason")
+    return diagnostics
+
+
+def _despeckle_from_dict(payload: dict[str, object]) -> DespeckleDiagnostics:
+    diagnostics = DespeckleDiagnostics(**payload)
+    if diagnostics.strength not in DESPECKLE_CHOICES:
+        raise ValueError("Invalid cached despeckle strength.")
+    _strict_bool(diagnostics.applied, field_name="despeckle applied flag")
+    for field_name in (
+        "candidate_components",
+        "removed_components",
+        "removed_pixels",
+        "protected_components",
+    ):
+        _strict_int(getattr(diagnostics, field_name), field_name=f"despeckle {field_name}")
+    _optional_reason(diagnostics.reason, field_name="despeckle reason")
+    return diagnostics
 
 
 def process_document_page(
@@ -198,7 +364,7 @@ def process_document_page(
         options={"method": request.orientation_method},
         operation=lambda: orient_document(image, method=request.orientation_method),
         encode_diagnostics=asdict,
-        decode_diagnostics=lambda payload: OrientationDiagnostics(**payload),
+        decode_diagnostics=_orientation_from_dict,
         cacheable=request.orientation_method != ORIENTATION_METHOD_NONE,
         request=request,
         durations=durations,
@@ -220,7 +386,7 @@ def process_document_page(
         options={"method": request.deskew_method, "diagnostics_version": 2},
         operation=deskew_stage,
         encode_diagnostics=lambda payload: payload,
-        decode_diagnostics=lambda payload: payload,
+        decode_diagnostics=_deskew_from_dict,
         cacheable=request.deskew_method != DESKEW_METHOD_NONE,
         request=request,
         durations=durations,
@@ -264,7 +430,7 @@ def process_document_page(
                 model=request.dewarp_model,
             ),
             encode_diagnostics=asdict,
-            decode_diagnostics=lambda payload: DewarpDiagnostics(**payload),
+            decode_diagnostics=_dewarp_from_dict,
             cacheable=(request.dewarp_method != DEWARP_METHOD_NONE and cache_safe_after_dewarp),
             request=request,
             durations=durations,
@@ -311,7 +477,7 @@ def process_document_page(
         },
         operation=cleanup_stage,
         encode_diagnostics=asdict,
-        decode_diagnostics=lambda payload: DespeckleDiagnostics(**payload),
+        decode_diagnostics=_despeckle_from_dict,
         cacheable=cache_safe_after_dewarp
         and (request.postprocess_name != "None" or request.preprocess_settings is not None),
         request=request,

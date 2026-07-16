@@ -538,3 +538,49 @@ def test_image_path_export_can_atomically_refresh_sources_in_same_directory(tmp_
 
     assert refreshed == [output_dir / "page_00001.png"]
     assert refreshed[0].read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("source_ext", "output_ext"),
+    (("jpeg", "jpg"), ("tiff", "tif")),
+)
+def test_image_path_export_preserves_bytes_for_equivalent_extensions(
+    tmp_path, source_ext: str, output_ext: str
+) -> None:
+    source_dir = tmp_path / "source"
+    source_paths = export_pages_as_files(
+        _pages()[:1],
+        output_dir=source_dir,
+        ext=source_ext,
+        base_name="source",
+    )
+    original = source_paths[0].read_bytes()
+
+    outputs = export_image_paths_as_files(
+        source_paths,
+        output_dir=tmp_path / "converted",
+        ext=output_ext,
+        base_name="page",
+    )
+
+    assert outputs[0].suffix == f".{output_ext}"
+    assert outputs[0].read_bytes() == original
+
+
+def test_image_path_export_rejects_corrupt_same_format_before_publish(tmp_path) -> None:
+    output_dir = tmp_path / "pages"
+    output_dir.mkdir()
+    keep = output_dir / "keep.txt"
+    keep.write_text("previous", encoding="utf-8")
+    corrupt = tmp_path / "corrupt.png"
+    corrupt.write_bytes(b"not an image")
+
+    with pytest.raises(RuntimeError, match="Cannot read source image"):
+        export_image_paths_as_files(
+            [corrupt],
+            output_dir=output_dir,
+            ext="png",
+        )
+
+    assert keep.read_text(encoding="utf-8") == "previous"
+    assert not list(tmp_path.glob(".pages.stage-*"))

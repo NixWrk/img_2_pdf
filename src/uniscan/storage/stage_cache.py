@@ -77,6 +77,32 @@ class ProcessingStageCache:
             raise ValueError("Invalid stage cache key.")
         return self.root_dir / f"{key}.png", self.root_dir / f"{key}.json"
 
+    @staticmethod
+    def _discard_paths(image_path: Path, metadata_path: Path) -> None:
+        for path in (image_path, metadata_path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                # Cache cleanup must never break document processing. A later
+                # successful put can still replace an entry that could not be
+                # removed here (for example, during a transient file lock).
+                pass
+
+    def discard(self, key: str) -> None:
+        """Best-effort removal of one cache entry and all of its files."""
+        image_path, metadata_path = self._paths(key)
+        with self._lock:
+            self._discard_paths(image_path, metadata_path)
+
+    def reject_hit(self, key: str) -> None:
+        """Discard a semantically invalid hit and correct cache telemetry."""
+        image_path, metadata_path = self._paths(key)
+        with self._lock:
+            self._discard_paths(image_path, metadata_path)
+            if self.stats.hits > 0:
+                self.stats.hits -= 1
+            self.stats.misses += 1
+
     def get(self, key: str) -> tuple[np.ndarray, dict[str, object]] | None:
         image_path, metadata_path = self._paths(key)
         with self._lock:
@@ -98,8 +124,7 @@ class ProcessingStageCache:
                 os.utime(image_path, None)
                 os.utime(metadata_path, None)
             except (OSError, RuntimeError, UnicodeError, ValueError, json.JSONDecodeError):
-                image_path.unlink(missing_ok=True)
-                metadata_path.unlink(missing_ok=True)
+                self._discard_paths(image_path, metadata_path)
                 self.stats.misses += 1
                 return None
             self.stats.hits += 1
@@ -121,9 +146,9 @@ class ProcessingStageCache:
         }
         with self._lock:
             try:
-                temporary_image.write_bytes(encoded.tobytes())
+                temporary_image.write_bytes(memoryview(encoded))
                 temporary_metadata.write_text(
-                    json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                    json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False),
                     encoding="utf-8",
                 )
                 os.replace(temporary_image, image_path)

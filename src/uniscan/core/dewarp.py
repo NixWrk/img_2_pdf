@@ -62,9 +62,7 @@ class DewarpModel:
     control_points: tuple[tuple[float, float], ...]
     source: str = "automatic"
     line_count: int = 0
-    control_curves: tuple[
-        tuple[float, tuple[tuple[float, float], ...]], ...
-    ] | None = None
+    control_curves: tuple[tuple[float, tuple[tuple[float, float], ...]], ...] | None = None
 
 
 def normalize_control_points(
@@ -117,8 +115,7 @@ def interpolate_control_curve(
         second_slope: float,
     ) -> float:
         derivative = (
-            (2.0 * first_width + second_width) * first_slope
-            - first_width * second_slope
+            (2.0 * first_width + second_width) * first_slope - first_width * second_slope
         ) / (first_width + second_width)
         if np.sign(derivative) != np.sign(first_slope):
             return 0.0
@@ -152,9 +149,7 @@ def interpolate_control_curve(
     relative_cubed = relative_squared * relative
     result = (
         (2.0 * relative_cubed - 3.0 * relative_squared + 1.0) * point_y[intervals]
-        + (relative_cubed - 2.0 * relative_squared + relative)
-        * widths
-        * derivatives[intervals]
+        + (relative_cubed - 2.0 * relative_squared + relative) * widths * derivatives[intervals]
         + (-2.0 * relative_cubed + 3.0 * relative_squared) * point_y[intervals + 1]
         + (relative_cubed - relative_squared) * widths * derivatives[intervals + 1]
     )
@@ -707,8 +702,7 @@ def dewarp_document(
                 applied=True,
                 line_count=model.line_count,
                 max_displacement_px=round(
-                    float(np.max(np.abs(_model_displacement_values(model))))
-                    * corrected.shape[0],
+                    float(np.max(np.abs(_model_displacement_values(model)))) * corrected.shape[0],
                     3,
                 ),
                 reason="uvdoc_with_user_adjustment",

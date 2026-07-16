@@ -108,6 +108,51 @@ def test_stage_cache_discards_corrupt_image_and_metadata_pair(tmp_path) -> None:
     assert cache.stats.misses == 1
 
 
+def test_stage_cache_discard_removes_pair_and_is_idempotent(tmp_path) -> None:
+    cache = ProcessingStageCache(tmp_path / "cache", max_bytes=1024 * 1024)
+    image = np.full((40, 50), 200, dtype=np.uint8)
+    key = cache.stage_key("a" * 64, "cleanup", {"method": "otsu"})
+    assert cache.put(key, image, {"valid": True}) is True
+    image_path = cache.root_dir / f"{key}.png"
+    metadata_path = cache.root_dir / f"{key}.json"
+
+    cache.discard(key)
+    cache.discard(key)
+
+    assert not image_path.exists()
+    assert not metadata_path.exists()
+
+
+def test_stage_cache_writes_encoded_buffer_without_tobytes_copy(tmp_path, monkeypatch) -> None:
+    class EncodedBuffer(np.ndarray):
+        def tobytes(self, *_args, **_kwargs):
+            raise AssertionError("encoded cache buffer must not be copied")
+
+    encoded = np.arange(48, dtype=np.uint8).view(EncodedBuffer)
+    monkeypatch.setattr("uniscan.storage.stage_cache.cv2.imencode", lambda *_args: (True, encoded))
+    cache = ProcessingStageCache(tmp_path / "cache", max_bytes=1024 * 1024)
+    key = cache.stage_key("a" * 64, "cleanup", {"method": "test"})
+
+    assert cache.put(key, np.zeros((4, 4), dtype=np.uint8), {"valid": True}) is True
+
+    assert (cache.root_dir / f"{key}.png").read_bytes() == bytes(range(48))
+
+
+def test_stage_cache_refuses_non_finite_metadata(tmp_path) -> None:
+    cache = ProcessingStageCache(tmp_path / "cache", max_bytes=1024 * 1024)
+    key = cache.stage_key("a" * 64, "cleanup", {"method": "test"})
+
+    assert (
+        cache.put(
+            key,
+            np.zeros((4, 4), dtype=np.uint8),
+            {"confidence": float("nan")},
+        )
+        is False
+    )
+    assert not list(cache.root_dir.iterdir())
+
+
 def test_stage_cache_rejects_invalid_limits(tmp_path) -> None:
     with pytest.raises(ValueError, match="1 MiB"):
         ProcessingStageCache(tmp_path / "small", max_bytes=100)

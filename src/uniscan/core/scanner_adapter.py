@@ -146,11 +146,7 @@ def _has_photo_transition(gray: np.ndarray, *, axis: int, start: int, from_start
         inner_stop = length - start
     if inner_stop <= inner_start:
         return False
-    region = (
-        gray[inner_start:inner_stop, :]
-        if axis == 0
-        else gray[:, inner_start:inner_stop]
-    )
+    region = gray[inner_start:inner_stop, :] if axis == 0 else gray[:, inner_start:inner_stop]
     return bool(float(np.count_nonzero(region < 230)) / max(1, region.size) >= 0.15)
 
 
@@ -198,10 +194,7 @@ def _detection_roi(image: np.ndarray) -> tuple[np.ndarray, int, int]:
             break
 
     roi = image[top : height - bottom, left : width - right]
-    if (
-        roi.shape[0] < max(32, int(height * 0.20))
-        or roi.shape[1] < max(32, int(width * 0.20))
-    ):
+    if roi.shape[0] < max(32, int(height * 0.20)) or roi.shape[1] < max(32, int(width * 0.20)):
         return image, 0, 0
     return roi, left, top
 
@@ -278,12 +271,15 @@ def _is_image_frame(
 
     tl, tr, br, bl = normalized
     axis_tolerance = max(3.0, min(width, height) * 0.025)
-    axis_aligned = max(
-        abs(float(tl[1] - tr[1])),
-        abs(float(bl[1] - br[1])),
-        abs(float(tl[0] - bl[0])),
-        abs(float(tr[0] - br[0])),
-    ) <= axis_tolerance
+    axis_aligned = (
+        max(
+            abs(float(tl[1] - tr[1])),
+            abs(float(bl[1] - br[1])),
+            abs(float(tl[0] - bl[0])),
+            abs(float(tr[0] - br[0])),
+        )
+        <= axis_tolerance
+    )
     if not axis_aligned:
         return False
 
@@ -526,7 +522,8 @@ def _contour_detector_output(
     backend: str,
     contour_finder,
 ) -> ScanOutput:
-    if _is_low_variance(image):
+    resized, scale = _resize_for_detection(image)
+    if _is_low_variance(resized):
         return ScanOutput(
             warped=image,
             contour=None,
@@ -535,7 +532,6 @@ def _contour_detector_output(
             raw_result={backend: "low_variance"},
         )
 
-    resized, scale = _resize_for_detection(image)
     detection_image, offset_x, offset_y = _detection_roi(resized)
     contour = contour_finder(detection_image)
     if contour is None:
@@ -772,8 +768,14 @@ def scan_with_document_detector(
             continue
 
         if result.detected and result.contour is not None:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
-            if _is_image_frame(result.contour, gray.shape[:2], gray):
+            validation_image, validation_scale = _resize_for_detection(image)
+            gray = (
+                cv2.cvtColor(validation_image, cv2.COLOR_BGR2GRAY)
+                if image.ndim == 3
+                else validation_image
+            )
+            validation_contour = np.asarray(result.contour, dtype=np.float32) * validation_scale
+            if _is_image_frame(validation_contour, gray.shape[:2], gray):
                 errors.append(f"{backend}: rejected artificial white canvas frame")
                 continue
         if result.detected:

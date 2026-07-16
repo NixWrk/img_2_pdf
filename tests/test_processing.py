@@ -274,6 +274,95 @@ def test_processing_cache_does_not_reuse_previous_algorithm_version(tmp_path) ->
     assert np.any(result.image != 0)
 
 
+def test_processing_cache_repairs_semantically_invalid_diagnostics(tmp_path) -> None:
+    cache = ProcessingStageCache(tmp_path / "stages", max_bytes=64 * 1024 * 1024)
+    image = _sideways_page()
+    key = cache.stage_key(
+        cache.fingerprint_image(image),
+        "orientation",
+        {"version": PROCESSING_ALGORITHM_VERSION, "method": "auto"},
+    )
+    assert cache.put(key, image, {"method": "auto"}) is True
+    request = PageProcessingRequest(orientation_method="auto", stage_cache=cache)
+
+    repaired = process_document_page(image, request)
+    reused = process_document_page(image, request)
+
+    assert "orientation" not in repaired.diagnostics.cache_hits
+    assert reused.diagnostics.cache_hits == ("orientation",)
+    assert cache.stats.misses == 1
+    assert cache.stats.hits == 1
+    np.testing.assert_array_equal(reused.image, repaired.image)
+
+
+def test_processing_cache_repairs_invalid_deskew_diagnostics(tmp_path) -> None:
+    cache = ProcessingStageCache(tmp_path / "stages", max_bytes=64 * 1024 * 1024)
+    image = _sideways_page()
+    key = cache.stage_key(
+        cache.fingerprint_image(image),
+        "deskew",
+        {
+            "version": PROCESSING_ALGORITHM_VERSION,
+            "method": "hybrid",
+            "diagnostics_version": 2,
+        },
+    )
+    assert cache.put(key, image, {"method": "hybrid"}) is True
+    request = PageProcessingRequest(deskew_method="hybrid", stage_cache=cache)
+
+    repaired = process_document_page(image, request)
+    reused = process_document_page(image, request)
+
+    assert "deskew" not in repaired.diagnostics.cache_hits
+    assert reused.diagnostics.cache_hits == ("deskew",)
+    assert cache.stats.misses == 1
+    assert cache.stats.hits == 1
+    np.testing.assert_array_equal(reused.image, repaired.image)
+
+
+@pytest.mark.parametrize(
+    ("decoder_name", "payload"),
+    (
+        (
+            "_orientation_from_dict",
+            {"method": "auto", "applied": False, "confidence": float("nan")},
+        ),
+        (
+            "_orientation_from_dict",
+            {
+                "method": "auto",
+                "applied": False,
+                "confidence": 10**400,
+            },
+        ),
+        (
+            "_dewarp_from_dict",
+            {"method": "auto", "applied": False, "max_displacement_px": float("nan")},
+        ),
+        (
+            "_despeckle_from_dict",
+            {"strength": "normal", "applied": True, "removed_pixels": -1},
+        ),
+        (
+            "_layout_from_dict",
+            {
+                "method": "a4",
+                "applied": True,
+                "content_box": {"x": 0, "y": 0, "width": 10, "height": 10},
+                "scale": float("nan"),
+            },
+        ),
+    ),
+)
+def test_cached_diagnostic_decoders_reject_semantic_corruption(decoder_name, payload) -> None:
+    from uniscan.core import processing
+
+    decoder = getattr(processing, decoder_name)
+
+    with pytest.raises(ValueError, match="Invalid cached"):
+        decoder(payload)
+
+
 @pytest.mark.parametrize(
     ("dewarp_method", "auto_dewarp_uvdoc"),
     (("paddleocr_uvdoc", False), ("auto", True)),

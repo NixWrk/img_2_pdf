@@ -106,6 +106,14 @@ def _aligned_offset(extra: int, alignment: str) -> int:
     return extra // 2
 
 
+def _is_binary_grayscale(image: np.ndarray) -> bool:
+    """Recognize a two-tone uint8 image without allocating a full-size sort buffer."""
+    if image.ndim != 2 or image.dtype != np.uint8:
+        return False
+    histogram = cv2.calcHist([image], [0], None, [256], [0, 256])
+    return cv2.countNonZero(histogram) <= 2
+
+
 def layout_document_page(
     image: np.ndarray,
     *,
@@ -169,7 +177,7 @@ def layout_document_page(
     scale = min(available_width / crop.shape[1], available_height / crop.shape[0])
     resized_width = max(1, int(round(crop.shape[1] * scale)))
     resized_height = max(1, int(round(crop.shape[0] * scale)))
-    is_binary = image.ndim == 2 and np.unique(crop).size <= 2
+    is_binary = _is_binary_grayscale(crop)
     if is_binary:
         interpolation = cv2.INTER_NEAREST
     else:

@@ -125,17 +125,16 @@ class PageStore:
         max_width: int,
         max_height: int,
     ) -> np.ndarray:
-        if len(image.shape) == 2:
-            preview = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        else:
-            preview = image
-        h, w = preview.shape[:2]
+        h, w = image.shape[:2]
         scale = min(max_width / max(1, w), max_height / max(1, h), 1.0)
-        if scale >= 1.0:
-            return preview
-        new_w = max(1, int(w * scale))
-        new_h = max(1, int(h * scale))
-        return cv2.resize(preview, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        preview = image
+        if scale < 1.0:
+            new_w = max(1, int(w * scale))
+            new_h = max(1, int(h * scale))
+            preview = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        if preview.ndim == 2:
+            return cv2.cvtColor(preview, cv2.COLOR_GRAY2BGR)
+        return preview
 
     def write_preview(
         self, path: Path, image: np.ndarray, *, max_width: int = 1920, max_height: int = 1080

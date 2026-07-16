@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import cv2
 import numpy as np
+import pytest
 
 from uniscan.core.scanner_adapter import (
     DETECTOR_BACKEND_CV_HYBRID,
@@ -360,3 +361,65 @@ def test_scanner_adapter_skips_uvdoc_during_boundary_detection(monkeypatch) -> N
     assert np.array_equal(result.warped, image)
     assert model_calls == 0
     assert "use it as a dewarp method" in result.raw_result["errors"][0]
+
+
+def test_contour_detector_checks_variance_on_bounded_proxy(monkeypatch) -> None:
+    from uniscan.core import scanner_adapter
+
+    image = np.zeros((1800, 2400, 3), dtype=np.uint8)
+    checked_shapes: list[tuple[int, ...]] = []
+
+    def low_variance(candidate) -> bool:
+        checked_shapes.append(candidate.shape)
+        return True
+
+    monkeypatch.setattr(scanner_adapter, "_is_low_variance", low_variance)
+
+    result = scanner_adapter._contour_detector_output(
+        image,
+        backend=DETECTOR_BACKEND_OPENCV,
+        contour_finder=lambda _image: pytest.fail("low-variance input must skip contour search"),
+    )
+
+    assert result.detected is False
+    assert checked_shapes == [(1200, 1600, 3)]
+
+
+def test_detector_validates_canvas_frame_on_bounded_proxy(monkeypatch) -> None:
+    from uniscan.core import scanner_adapter
+
+    image = np.zeros((1800, 2400, 3), dtype=np.uint8)
+    contour = np.array(
+        [[0, 0], [2399, 0], [2399, 1799], [0, 1799]],
+        dtype=np.float32,
+    )
+    validation_calls: list[tuple[np.ndarray, tuple[int, int]]] = []
+
+    monkeypatch.setattr(
+        scanner_adapter,
+        "_opencv_document_detector",
+        lambda _image: ScanOutput(
+            warped=image,
+            contour=contour,
+            backend=DETECTOR_BACKEND_OPENCV,
+            detected=True,
+            raw_result=None,
+        ),
+    )
+
+    def image_frame(candidate, shape, _gray) -> bool:
+        validation_calls.append((candidate.copy(), shape))
+        return False
+
+    monkeypatch.setattr(scanner_adapter, "_is_image_frame", image_frame)
+
+    result = scan_with_document_detector(
+        image,
+        enabled=True,
+        backends=(DETECTOR_BACKEND_OPENCV,),
+    )
+
+    assert result.detected is True
+    validated_contour, validated_shape = validation_calls[0]
+    assert validated_shape == (1200, 1600)
+    np.testing.assert_allclose(validated_contour, contour * (2.0 / 3.0))

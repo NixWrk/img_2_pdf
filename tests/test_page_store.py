@@ -1,5 +1,6 @@
 import os
 
+import cv2
 import numpy as np
 import pytest
 
@@ -61,6 +62,25 @@ def test_page_store_preview_resize_never_adds_letterbox_padding(tmp_path) -> Non
 
     preview = store._resize_for_display(source, max_width=1000, max_height=1000)
 
+    assert preview.shape == (500, 1000, 3)
+    assert np.all(preview == 73)
+
+
+def test_page_store_resizes_grayscale_before_expanding_channels(tmp_path, monkeypatch) -> None:
+    store = PageStore(root_dir=tmp_path)
+    source = np.full((1200, 2400), 73, dtype=np.uint8)
+    converted_shapes: list[tuple[int, ...]] = []
+    real_cvt_color = cv2.cvtColor
+
+    def tracked_cvt_color(image, code):
+        converted_shapes.append(image.shape)
+        return real_cvt_color(image, code)
+
+    monkeypatch.setattr("uniscan.storage.page_store.cv2.cvtColor", tracked_cvt_color)
+
+    preview = store._resize_for_display(source, max_width=1000, max_height=1000)
+
+    assert converted_shapes == [(500, 1000)]
     assert preview.shape == (500, 1000, 3)
     assert np.all(preview == 73)
 

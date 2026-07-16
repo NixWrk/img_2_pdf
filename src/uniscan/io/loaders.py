@@ -209,7 +209,7 @@ def imwrite_unicode(
         )
         temporary_path = Path(temporary_name)
         with os.fdopen(descriptor, "wb") as output:
-            output.write(buf.tobytes())
+            output.write(memoryview(buf))
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary_path, path)

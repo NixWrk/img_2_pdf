@@ -600,6 +600,18 @@ def _normalize_extension(ext: str) -> str:
     return normalized
 
 
+def _image_format_family(ext: str) -> str:
+    """Return the encoded format family for equivalent filename suffixes."""
+    if not ext.lstrip("."):
+        return ""
+    normalized = _normalize_extension(ext)
+    if normalized in {"jpg", "jpeg"}:
+        return "jpeg"
+    if normalized in {"tif", "tiff"}:
+        return "tiff"
+    return normalized
+
+
 def export_pages_as_pdf(
     pages: Sequence[np.ndarray],
     *,
@@ -746,7 +758,12 @@ def export_image_paths_as_files(
                 _check_cancelled(cancel_cb)
                 staged_path = staged_dir / output_name
                 src_path = Path(src)
-                if src_path.suffix.lower().lstrip(".") == ext:
+                if not src_path.is_file():
+                    raise FileNotFoundError(src_path)
+                same_format = _image_format_family(src_path.suffix) == _image_format_family(ext)
+                if same_format:
+                    if imread_unicode(src_path) is None:
+                        raise RuntimeError(f"Cannot read source image: {src_path}")
                     shutil.copy2(src_path, staged_path)
                 else:
                     image = imread_unicode(src_path)

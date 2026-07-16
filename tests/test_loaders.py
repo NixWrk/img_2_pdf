@@ -202,6 +202,19 @@ def test_imwrite_unicode_keeps_existing_target_when_replace_fails(tmp_path, monk
     assert list(tmp_path.iterdir()) == [target]
 
 
+def test_imwrite_unicode_writes_encoded_buffer_without_tobytes_copy(tmp_path, monkeypatch) -> None:
+    class EncodedBuffer(np.ndarray):
+        def tobytes(self, *_args, **_kwargs):
+            raise AssertionError("encoded buffer must be written without a full copy")
+
+    encoded = np.arange(32, dtype=np.uint8).view(EncodedBuffer)
+    monkeypatch.setattr("uniscan.io.loaders.cv2.imencode", lambda *_args: (True, encoded))
+    target = tmp_path / "buffer.png"
+
+    assert imwrite_unicode(target, _img(90)) is True
+    assert target.read_bytes() == bytes(range(32))
+
+
 def test_pdfium_page_selection_and_streaming_cancellation(tmp_path) -> None:
     path = tmp_path / "two-pages.pdf"
     _make_pdf(path)
