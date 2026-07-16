@@ -89,9 +89,9 @@ curve. All processing editors replace the Workspace content instead of opening a
 Corner, split-line, and wave-point drags show a magnifier sampled from the full-resolution source.
 Perspective point changes are saved automatically when moving to another page or choosing Done;
 Reset and Auto Detect replace the current point positions without an extra Apply Current step.
-Wave points can be added, removed, and moved in both axes; the working curve can be placed over a
-contrasting upper or lower page edge without changing the correction model. Its two auxiliary
-guides may leave the image while the working curve is moved. Processing controls cover document type,
+Wave points can be added, removed, and moved in both axes on three independent Top, Middle, and
+Bottom curves. Each curve can follow a different contrasting page feature; correction is smoothly
+interpolated between their vertical regions. Processing controls cover document type,
 grayscale/B&W output, contrast, brightness, denoise, thresholding, illumination correction,
 binarization, despeckle, A4/Letter layout, margins, alignment, and lighting analysis.
 

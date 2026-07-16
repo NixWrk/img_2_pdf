@@ -105,6 +105,20 @@ def test_entry_validates_dewarp_control_points(tmp_path) -> None:
     session.close()
 
 
+def test_entry_persists_three_dewarp_control_curves(tmp_path) -> None:
+    session = CaptureSession(store=PageStore(root_dir=tmp_path))
+    entry = session.add_image(name="dewarp-curves", image=_img(10))
+    points = [(0.0, 0.0), (0.5, 0.02), (1.0, 0.0)]
+
+    entry.set_dewarp_control_curves([(0.75, points), (0.25, points), (0.5, points)])
+
+    assert [curve[0] for curve in entry.dewarp_control_curves] == [0.25, 0.5, 0.75]
+    assert entry.dewarp_control_points == entry.dewarp_control_curves[1][1]
+    entry.clear_dewarp_control_points()
+    assert entry.dewarp_control_curves is None
+    session.close()
+
+
 def test_replace_entry_image_updates_content_and_name(tmp_path) -> None:
     session = CaptureSession(store=PageStore(root_dir=tmp_path))
     entry = session.add_image(name="old", image=_img(10))

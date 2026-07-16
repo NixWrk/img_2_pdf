@@ -125,7 +125,7 @@ third-party inference runtime. It:
 2. connects characters into candidate text lines;
 3. robustly fits line baselines and removes their linear component;
 4. aggregates at least three agreeing curvature estimates;
-5. smooths and bounds one normalized vertical-displacement curve;
+5. smooths and bounds one automatic normalized vertical-displacement curve;
 6. remaps the original pixels only when curvature exceeds a safe threshold.
 
 When the page has too few usable lines or appears already straight, the operation is a no-op and
@@ -133,8 +133,8 @@ the reason is stored in the run report. This is intentional: forcing a warp on a
 nearly blank page is worse than leaving it unchanged.
 
 `--dewarp paddleocr_uvdoc` uses the optional PaddleOCR `TextImageUnwarping` runtime as a separate
-post-crop stage. It can handle deformation beyond the single common vertical curve used by the
-offline method, but requires the heavyweight optional runtime and a model cache that PaddleOCR may
+post-crop stage. It can handle deformation beyond the three manually editable regional curves used
+by the offline method, but requires the heavyweight optional runtime and a model cache that PaddleOCR may
 populate on first use. The PaddleOCR package and downloaded model artifacts must be assessed under
 their own applicable terms; UniScan neither distributes those weights nor records a stable model
 binary identity in a processing recipe.
@@ -144,11 +144,11 @@ text-line method; it does not enable the UVDoc fallback. Workspace Processing ex
 **Page perspective** and **Edit page waves** directly. The inline perspective editor shows
 draggable corner handles beside a live rectified result. Changed corners are saved when navigating
 with Prev/Next or leaving with Done; Reset and Auto Detect remain explicit replacement actions.
-The inline wave editor shows the source
-curve and corrected result; points can be added, removed, moved horizontally or vertically, and
-the working curve can be moved vertically onto a contrasting page edge without changing its
-deformation values. The two auxiliary curves may move outside the image. Normalized point values
-are saved with the page and immediately reprocessed at full resolution when **Apply points** is
+The inline wave editor shows the source and corrected result with independent **Top**, **Middle**,
+and **Bottom** curves. Each curve has its own vertical anchor and editable points, so uneven
+curvature can be traced in three page regions; the remap interpolates smoothly between them.
+Normalized anchors and point values are saved with the page and immediately reprocessed at full
+resolution when **Apply points** is
 pressed. Corner, split-line,
 and wave-curve drags display a magnifier from the full-resolution
 source. Perspective and wave previews are also calculated from that source, then resized only for

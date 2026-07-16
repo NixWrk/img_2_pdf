@@ -29,9 +29,9 @@ Record Windows version, artifact SHA-256, camera model, and operator in the rele
       and Auto Detect still replace the current corners.
 - [ ] Open Adjust split, drag the gutter line using the full-resolution magnifier, preview both
       output pages in Compare, and confirm Create 2 pages preserves the chosen position.
-- [ ] In inline wave editing, add/remove points, drag a point in both axes, and move the working
-      curve to the upper and lower page edges. Verify its auxiliary guides may leave the frame,
-      moving only the curve does not change correction, and the magnifier follows each drag.
+- [ ] In inline wave editing, select Top, Middle, and Bottom in turn. Give each curve a visibly
+      different shape and vertical position, verify the full-resolution result interpolates between
+      all three, and confirm Apply points restores the same curves after reopening the page.
 - [ ] Change processing controls and Preview without Apply; confirm export still uses the previous
       committed page. Apply, then confirm preview and export use the new full-resolution result.
 - [ ] Start Apply on several large pages and cancel midway; confirm the background job remains

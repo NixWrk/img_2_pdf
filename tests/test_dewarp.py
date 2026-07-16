@@ -15,6 +15,7 @@ from uniscan.core.dewarp import (
     dewarp_document,
     estimate_textline_dewarp_model,
     measure_dewarp_quality,
+    normalize_control_curves,
     normalize_control_points,
 )
 from uniscan.core.scanner_adapter import ScanOutput
@@ -94,6 +95,51 @@ def test_automatic_model_can_be_replayed_and_user_adjusted() -> None:
 
     assert adjusted_diagnostics.reason == "user_adjusted_model"
     assert not np.array_equal(corrected, replayed)
+
+
+def test_three_dewarp_curves_vary_correction_over_page_height() -> None:
+    height, width = 200, 120
+    image = np.broadcast_to(np.arange(height, dtype=np.uint8)[:, None], (height, width)).copy()
+    flat = ((0.0, 0.0), (0.5, 0.0), (1.0, 0.0))
+    upward = ((0.0, 0.05), (0.5, 0.05), (1.0, 0.05))
+    downward = ((0.0, -0.05), (0.5, -0.05), (1.0, -0.05))
+    model = DewarpModel(
+        method=DEWARP_METHOD_TEXTLINE,
+        control_points=flat,
+        source="user",
+        control_curves=((0.1, upward), (0.5, flat), (0.9, downward)),
+    )
+
+    corrected = apply_dewarp_model(image, model)
+
+    assert int(corrected[20, width // 2]) == pytest.approx(30, abs=1)
+    assert int(corrected[100, width // 2]) == pytest.approx(100, abs=1)
+    assert int(corrected[180, width // 2]) == pytest.approx(170, abs=1)
+
+
+def test_identical_multi_curve_model_matches_legacy_single_curve() -> None:
+    image, _character_x = _curved_text_page()
+    points = ((0.0, 0.0), (0.5, 0.03), (1.0, 0.0))
+    legacy = DewarpModel(method=DEWARP_METHOD_TEXTLINE, control_points=points)
+    multi = DewarpModel(
+        method=DEWARP_METHOD_TEXTLINE,
+        control_points=points,
+        control_curves=((0.2, points), (0.5, points), (0.8, points)),
+    )
+
+    np.testing.assert_array_equal(
+        apply_dewarp_model(image, multi),
+        apply_dewarp_model(image, legacy),
+    )
+
+
+def test_control_curves_validate_and_sort_anchors() -> None:
+    points = [(0.0, 0.0), (0.5, 0.01), (1.0, 0.0)]
+    curves = normalize_control_curves([(0.8, points), (0.2, points), (0.5, points)])
+
+    assert [curve[0] for curve in curves] == [0.2, 0.5, 0.8]
+    with pytest.raises(ValueError, match="unique"):
+        normalize_control_curves([(0.5, points), (0.5, points)])
 
 
 def test_textline_dewarp_keeps_straight_page_unchanged() -> None:

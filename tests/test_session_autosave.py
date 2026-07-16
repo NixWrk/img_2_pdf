@@ -38,9 +38,15 @@ def test_session_manifest_round_trip(tmp_path) -> None:
     )
     first.selected = True
     first.set_dewarp_control_points([(0.0, 0.0), (0.5, 0.015), (1.0, 0.0)])
+    first.set_dewarp_control_curves(
+        [
+            (anchor, [(0.0, 0.0), (0.5, displacement), (1.0, 0.0)])
+            for anchor, displacement in ((0.2, 0.01), (0.5, 0.02), (0.8, -0.01))
+        ]
+    )
     session.add_image(name="second", image=_image(30))
     session.save_manifest(manifest)
-    assert json.loads(manifest.read_text(encoding="utf-8"))["schemaVersion"] == 2
+    assert json.loads(manifest.read_text(encoding="utf-8"))["schemaVersion"] == 3
     session.close(preserve=True)
 
     restored, was_restored = load_or_create_session(manifest)
@@ -51,6 +57,7 @@ def test_session_manifest_round_trip(tmp_path) -> None:
     assert restored.entries[0].detected_backend == "fake"
     np.testing.assert_array_equal(restored.entries[0].detected_contour, first.detected_contour)
     assert restored.entries[0].dewarp_control_points == first.dewarp_control_points
+    assert restored.entries[0].dewarp_control_curves == first.dewarp_control_curves
     assert int(restored.entries[1].current_image.mean()) == 30
     discard_autosave(restored, manifest)
     assert not manifest.exists()
@@ -339,7 +346,7 @@ def test_manifest_v2_round_trips_committed_recipe_and_v1_migrates(tmp_path) -> N
     )
     session.save_manifest(manifest)
     payload = json.loads(manifest.read_text(encoding="utf-8"))
-    assert payload["schemaVersion"] == 2
+    assert payload["schemaVersion"] == 3
     session.close(preserve=True)
 
     restored = CaptureSession.restore_manifest(manifest)

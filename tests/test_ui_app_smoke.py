@@ -292,6 +292,10 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         app.dewarp_remove_point_button.invoke()
         assert len(app.dewarp_editor_state["points"]) == initial_point_count
 
+        assert len(app.dewarp_editor_state["curves"]) == 3
+        app.dewarp_editor_state["select_curve"](0)
+        app.update()
+        assert app.dewarp_curve_selector.get() == "Top"
         before_shift = list(app.dewarp_editor_state["points"])
         before_anchor = float(app.dewarp_editor_state["guide_anchor"])
         curve_x = 0.44
@@ -303,7 +307,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
             )
         )
         press_x = offset_x + int(display_width * curve_x)
-        press_y = offset_y + int(display_height * (0.5 + curve_y))
+        press_y = offset_y + int(display_height * (before_anchor + curve_y))
         app.dewarp_source_canvas.event_generate("<ButtonPress-1>", x=press_x, y=press_y)
         app.update()
         assert app.dewarp_source_canvas.bbox("geometry-magnifier") is not None
@@ -345,6 +349,18 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert resized_dewarp_preview_bounds is not None
         assert resized_dewarp_bounds[2] - resized_dewarp_bounds[0] > initial_dewarp_size[0]
         assert resized_dewarp_bounds[3] - resized_dewarp_bounds[1] > initial_dewarp_size[1]
+        app.dewarp_apply_points_button.invoke()
+        assert second_entry.dewarp_control_curves is not None
+        assert len(second_entry.dewarp_control_curves) == 3
+        saved_curves = second_entry.dewarp_control_curves
+        app.open_dewarp_points_editor()
+        app.update()
+        _pump_until(app, lambda: app.dewarp_resize_job is None)
+        reopened_curves = tuple(
+            (float(curve["anchor"]), tuple(curve["points"]))
+            for curve in app.dewarp_editor_state["curves"]
+        )
+        assert reopened_curves == saved_curves
         app.dewarp_close_button.invoke()
         app.open_review_processing_dialog()
         app.update()

@@ -357,12 +357,17 @@ def _move_dewarp_guide_anchor(
     points: list[tuple[float, float]],
     anchor: float,
     delta: float,
+    *,
+    lower_anchor: float = 0.0,
+    upper_anchor: float = 1.0,
 ) -> float:
     if not points:
-        return float(np.clip(anchor + delta, 0.0, 1.0))
+        return float(np.clip(anchor + delta, lower_anchor, upper_anchor))
     minimum = min(value for _x, value in points)
     maximum = max(value for _x, value in points)
-    return float(np.clip(anchor + delta, -minimum, 1.0 - maximum))
+    lower = max(lower_anchor, -minimum)
+    upper = min(upper_anchor, 1.0 - maximum)
+    return float(np.clip(anchor + delta, lower, upper))
 
 
 def _detection_summary(results: list[PageResult]) -> str:
@@ -464,6 +469,8 @@ class UnifiedScanApp(ctk.CTk):
         self.dewarp_editor_window: ctk.CTkFrame | None = None
         self.dewarp_source_canvas: tk.Canvas | None = None
         self.dewarp_preview_canvas: tk.Canvas | None = None
+        self.dewarp_curve_selector: ctk.CTkSegmentedButton | None = None
+        self.dewarp_apply_points_button: ctk.CTkButton | None = None
         self.dewarp_resize_job: str | None = None
         self.page_drag_state: dict[str, object] | None = None
         self.live_detector = LiveContourDetector(backend=DEFAULT_LIVE_BACKEND)
@@ -1784,6 +1791,7 @@ class UnifiedScanApp(ctk.CTk):
             method=DEWARP_METHOD_TEXTLINE,
             control_points=entry.dewarp_control_points,
             source="user",
+            control_curves=entry.dewarp_control_curves,
         )
 
     def _apply_dewarp(self, image: np.ndarray, *, entry=None):
@@ -4233,9 +4241,19 @@ class UnifiedScanApp(ctk.CTk):
         source = entry.original_image
         source_height, source_width = source.shape[:2]
 
-        if entry.dewarp_control_points is not None:
+        if entry.dewarp_control_curves is not None:
+            initial_curves = [
+                {"anchor": anchor, "points": list(points)}
+                for anchor, points in entry.dewarp_control_curves
+            ]
+            initial_message = "Loaded three saved page-correction curves."
+        elif entry.dewarp_control_points is not None:
             initial_points = list(entry.dewarp_control_points)
-            initial_message = "Loaded saved page correction."
+            initial_curves = [
+                {"anchor": anchor, "points": list(initial_points)}
+                for anchor in (0.25, 0.5, 0.75)
+            ]
+            initial_message = "Expanded the saved legacy curve across three page regions."
         else:
             automatic_model, automatic_diagnostics = estimate_textline_dewarp_model(source)
             if automatic_model is not None:
@@ -4251,6 +4269,10 @@ class UnifiedScanApp(ctk.CTk):
                 initial_message = (
                     "Automatic model was not confident; adjust the neutral points if needed."
                 )
+            initial_curves = [
+                {"anchor": anchor, "points": list(initial_points)}
+                for anchor in (0.25, 0.5, 0.75)
+            ]
 
         window = self._show_inline_geometry_editor()
         self.dewarp_editor_window = window
@@ -4260,6 +4282,15 @@ class UnifiedScanApp(ctk.CTk):
             text="Page wave correction",
             font=ctk.CTkFont(size=18, weight="bold"),
         ).pack(anchor="w", padx=16, pady=(14, 2))
+
+        curve_names = ("Top", "Middle", "Bottom")
+        curve_colors = ("#28c7d9", "#36a3ff", "#e05aa8")
+        self.dewarp_curve_selector = ctk.CTkSegmentedButton(
+            window,
+            values=list(curve_names),
+        )
+        self.dewarp_curve_selector.pack(anchor="w", padx=16, pady=(6, 8))
+        self.dewarp_curve_selector.set(curve_names[min(1, len(initial_curves) - 1)])
 
         panes = ctk.CTkFrame(window)
         panes.pack(fill=ctk.BOTH, expand=True, padx=16, pady=(0, 10))
@@ -4290,14 +4321,17 @@ class UnifiedScanApp(ctk.CTk):
         self.dewarp_source_canvas = left_canvas
         self.dewarp_preview_canvas = right_canvas
 
+        active_curve = min(1, len(initial_curves) - 1)
         state = {
-            "points": initial_points,
+            "curves": initial_curves,
+            "active_curve": active_curve,
+            "points": initial_curves[active_curve]["points"],
             "active": None,
             "selected": None,
             "drag_mode": None,
             "drag_start_y": 0.0,
             "drag_start_anchor": 0.5,
-            "guide_anchor": 0.5,
+            "guide_anchor": initial_curves[active_curve]["anchor"],
             "add_mode": False,
             "display_width": source_width,
             "display_height": source_height,
@@ -4312,11 +4346,38 @@ class UnifiedScanApp(ctk.CTk):
         self.dewarp_editor_state = state
         self.dewarp_status_var = status
 
+        def selected_curve() -> dict[str, object]:
+            return state["curves"][int(state["active_curve"])]
+
+        def select_curve(curve_index: int) -> None:
+            curve_index = int(np.clip(curve_index, 0, len(state["curves"]) - 1))
+            state["active_curve"] = curve_index
+            curve = selected_curve()
+            state["points"] = curve["points"]
+            state["guide_anchor"] = curve["anchor"]
+            state["selected"] = None
+            state["active"] = None
+            selector = getattr(self, "dewarp_curve_selector", None)
+            if selector is not None and len(state["curves"]) == 3:
+                selector.set(curve_names[curve_index])
+            draw_overlay()
+            status.set(f"Editing the {curve_names[curve_index].lower()} page curve.")
+
+        self.dewarp_curve_selector.configure(
+            command=lambda value: select_curve(curve_names.index(value))
+        )
+        state["select_curve"] = select_curve
+
         def current_model(*, source_name: str = "user") -> DewarpModel:
+            curves = tuple(
+                (float(curve["anchor"]), tuple(curve["points"]))
+                for curve in state["curves"]
+            )
             return DewarpModel(
                 method=DEWARP_METHOD_TEXTLINE,
-                control_points=tuple(state["points"]),
+                control_points=curves[min(1, len(curves) - 1)][1],
                 source=source_name,
+                control_curves=curves,
             )
 
         def draw_overlay() -> None:
@@ -4325,44 +4386,43 @@ class UnifiedScanApp(ctk.CTk):
             display_height = int(state["display_height"])
             offset_x = float(state["offset_x"])
             offset_y = float(state["offset_y"])
-            point_x = np.asarray([point[0] for point in state["points"]], dtype=np.float32)
-            point_y = np.asarray([point[1] for point in state["points"]], dtype=np.float32)
             guide_x = np.linspace(0.0, 1.0, 160, dtype=np.float32)
-            guide_y = np.interp(guide_x, point_x, point_y)
-            guide_anchor = float(state["guide_anchor"])
-            for guide_offset in (-0.25, 0.0, 0.25):
+            for curve_index, curve in enumerate(state["curves"]):
+                points = curve["points"]
+                point_x = np.asarray([point[0] for point in points], dtype=np.float32)
+                point_y = np.asarray([point[1] for point in points], dtype=np.float32)
+                guide_y = np.interp(guide_x, point_x, point_y)
+                guide_anchor = float(curve["anchor"])
                 coords: list[float] = []
                 for x_value, displacement in zip(guide_x, guide_y):
                     coords.extend(
                         [
                             offset_x + float(x_value * (display_width - 1)),
-                            offset_y
-                            + float(
-                                (guide_anchor + guide_offset + displacement) * display_height
-                            ),
+                            offset_y + float((guide_anchor + displacement) * display_height),
                         ]
                     )
                 left_canvas.create_line(
                     *coords,
-                    fill="#36a3ff",
-                    width=3 if guide_offset == 0.0 else 1,
+                    fill=curve_colors[curve_index],
+                    width=3 if curve_index == state["active_curve"] else 2,
                     tags="dewarp-overlay",
                 )
-            for point_index, (x_value, displacement) in enumerate(state["points"]):
-                x_pos = offset_x + x_value * (display_width - 1)
-                y_pos = offset_y + (guide_anchor + displacement) * display_height
-                selected = point_index == state["selected"]
-                radius = 8 if selected else 6
-                left_canvas.create_oval(
-                    x_pos - radius,
-                    y_pos - radius,
-                    x_pos + radius,
-                    y_pos + radius,
-                    fill="#ffb000" if selected else "#1f6aa5",
-                    outline="#ffffff",
-                    width=2 if selected else 1,
-                    tags=("dewarp-overlay", f"point-{point_index}"),
-                )
+                for point_index, (x_value, displacement) in enumerate(points):
+                    x_pos = offset_x + x_value * (display_width - 1)
+                    y_pos = offset_y + (guide_anchor + displacement) * display_height
+                    active = curve_index == state["active_curve"]
+                    selected = active and point_index == state["selected"]
+                    radius = 8 if selected else (6 if active else 3)
+                    left_canvas.create_oval(
+                        x_pos - radius,
+                        y_pos - radius,
+                        x_pos + radius,
+                        y_pos + radius,
+                        fill="#ffb000" if selected else curve_colors[curve_index],
+                        outline="#ffffff" if active else curve_colors[curve_index],
+                        width=2 if selected else 1,
+                        tags=("dewarp-overlay", f"curve-{curve_index}-point-{point_index}"),
+                    )
 
         def render_corrected() -> None:
             state["last_corrected_source_shape"] = source.shape
@@ -4546,11 +4606,26 @@ class UnifiedScanApp(ctk.CTk):
                 delta = (float(event.y) - float(state["drag_start_y"])) / max(
                     1, int(state["display_height"])
                 )
+                curve_index = int(state["active_curve"])
+                curves = state["curves"]
+                lower_anchor = (
+                    float(curves[curve_index - 1]["anchor"]) + 0.02
+                    if curve_index > 0
+                    else 0.0
+                )
+                upper_anchor = (
+                    float(curves[curve_index + 1]["anchor"]) - 0.02
+                    if curve_index + 1 < len(curves)
+                    else 1.0
+                )
                 state["guide_anchor"] = _move_dewarp_guide_anchor(
                     state["points"],
                     float(state["drag_start_anchor"]),
                     delta,
+                    lower_anchor=lower_anchor,
+                    upper_anchor=upper_anchor,
                 )
+                selected_curve()["anchor"] = state["guide_anchor"]
             else:
                 return
             draw_overlay()
@@ -4567,9 +4642,8 @@ class UnifiedScanApp(ctk.CTk):
                 render_corrected()
                 status.set("User-adjusted preview. Apply to save these points for the page.")
             else:
-                status.set(
-                    "Working line moved for easier tracing; page correction is unchanged."
-                )
+                render_corrected()
+                status.set("Curve region moved; vertical interpolation preview updated.")
 
         def begin_add_point() -> None:
             state["add_mode"] = True
@@ -4600,14 +4674,21 @@ class UnifiedScanApp(ctk.CTk):
             if model is None:
                 status.set(f"Automatic model unavailable: {diagnostics.reason}.")
                 return
-            state["points"] = list(model.control_points)
+            for curve in state["curves"]:
+                curve["points"] = list(model.control_points)
+            select_curve(int(state["active_curve"]))
             state["selected"] = None
             draw_overlay()
             render_corrected()
             status.set(f"Automatic model restored from {diagnostics.line_count} supporting lines.")
 
         def use_neutral() -> None:
-            state["points"] = [(float(x), 0.0) for x in np.linspace(0.0, 1.0, 9, dtype=np.float32)]
+            neutral = [
+                (float(x), 0.0) for x in np.linspace(0.0, 1.0, 9, dtype=np.float32)
+            ]
+            for curve in state["curves"]:
+                curve["points"] = list(neutral)
+            select_curve(int(state["active_curve"]))
             state["selected"] = None
             draw_overlay()
             render_corrected()
@@ -4616,7 +4697,12 @@ class UnifiedScanApp(ctk.CTk):
         def apply_points() -> None:
             try:
                 previous_committed = entry.committed_processing
-                entry.set_dewarp_control_points(state["points"])
+                entry.set_dewarp_control_curves(
+                    [
+                        (float(curve["anchor"]), curve["points"])
+                        for curve in state["curves"]
+                    ]
+                )
                 self.dewarp_method_var.set("Text lines (offline)")
                 diagnostics = self._reprocess_with_dewarp(
                     entry,
@@ -4625,11 +4711,11 @@ class UnifiedScanApp(ctk.CTk):
                 )
                 self.refresh_page_list(keep_entry_ids=(entry.entry_id,))
                 self._set_status(
-                    f"Saved {len(entry.dewarp_control_points or ())} dewarp points; "
+                    f"Saved 3 dewarp curves; "
                     f"max correction {diagnostics.max_displacement_px:.1f}px."
                 )
                 self.geometry_summary_var.set(
-                    f"Wave applied: user curve, {len(entry.dewarp_control_points or ())} points, "
+                    f"Wave applied: 3 regional curves, "
                     f"{diagnostics.max_displacement_px:.1f}px"
                 )
                 close_editor()
@@ -4645,6 +4731,8 @@ class UnifiedScanApp(ctk.CTk):
             self.dewarp_preview_canvas = None
             self.dewarp_editor_state = None
             self.dewarp_status_var = None
+            self.dewarp_curve_selector = None
+            self.dewarp_apply_points_button = None
             self.inline_editor_close_callback = None
             window.destroy()
             self._hide_inline_geometry_editor()
@@ -4683,7 +4771,12 @@ class UnifiedScanApp(ctk.CTk):
             command=remove_selected_point,
         )
         self.dewarp_remove_point_button.pack(side=ctk.LEFT, padx=8)
-        ctk.CTkButton(actions, text="Apply points", command=apply_points).pack(side=ctk.RIGHT)
+        self.dewarp_apply_points_button = ctk.CTkButton(
+            actions,
+            text="Apply points",
+            command=apply_points,
+        )
+        self.dewarp_apply_points_button.pack(side=ctk.RIGHT)
         self.dewarp_close_button = ctk.CTkButton(
             actions,
             text="Cancel",

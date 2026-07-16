@@ -14,7 +14,7 @@ from uuid import uuid4
 
 import numpy as np
 
-from uniscan.core.dewarp import DewarpModel, normalize_control_points
+from uniscan.core.dewarp import DewarpModel, normalize_control_curves, normalize_control_points
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.preprocess import PreprocessSettings
 from uniscan.core.processing import PageProcessingDiagnostics, PageProcessingRequest
@@ -204,6 +204,9 @@ class CaptureEntry:
     detected_contour: np.ndarray | None = None
     detected_backend: str | None = None
     dewarp_control_points: tuple[tuple[float, float], ...] | None = None
+    dewarp_control_curves: tuple[
+        tuple[float, tuple[tuple[float, float], ...]], ...
+    ] | None = None
     committed_processing: CommittedPageProcessing | None = None
     selected: bool = False
     revision: int = field(default=0, repr=False)
@@ -297,6 +300,7 @@ class CaptureEntry:
             current_image=image,
         )
         self.dewarp_control_points = None
+        self.dewarp_control_curves = None
         self.committed_processing = None
         self.revision += 1
 
@@ -339,12 +343,20 @@ class CaptureEntry:
         control_points: tuple[tuple[float, float], ...] | list[tuple[float, float]],
     ) -> None:
         self.dewarp_control_points = normalize_control_points(control_points)
+        self.dewarp_control_curves = None
+        self.revision += 1
+
+    def set_dewarp_control_curves(self, control_curves) -> None:
+        curves = normalize_control_curves(control_curves)
+        self.dewarp_control_curves = curves
+        self.dewarp_control_points = min(curves, key=lambda item: abs(item[0] - 0.5))[1]
         self.revision += 1
 
     def clear_dewarp_control_points(self) -> None:
-        if self.dewarp_control_points is not None:
+        if self.dewarp_control_points is not None or self.dewarp_control_curves is not None:
             self.revision += 1
         self.dewarp_control_points = None
+        self.dewarp_control_curves = None
 
 
 class CaptureSession:
@@ -541,6 +553,7 @@ class CaptureSession:
             current_image=original_image if current_image is None else current_image,
         )
         entry.dewarp_control_points = None
+        entry.dewarp_control_curves = None
         entry.committed_processing = None
         entry.revision += 1
         if name is not None and name.strip():
@@ -559,7 +572,7 @@ class CaptureSession:
         manifest_path = Path(manifest_path)
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "sessionDir": str(self.store.session_dir.resolve()),
             "entries": [
                 {
@@ -575,6 +588,14 @@ class CaptureSession:
                     "dewarpControlPoints": (
                         [list(point) for point in entry.dewarp_control_points]
                         if entry.dewarp_control_points is not None
+                        else None
+                    ),
+                    "dewarpControlCurves": (
+                        [
+                            [anchor, [list(point) for point in points]]
+                            for anchor, points in entry.dewarp_control_curves
+                        ]
+                        if entry.dewarp_control_curves is not None
                         else None
                     ),
                     "committedProcessing": (
@@ -649,7 +670,7 @@ class CaptureSession:
         manifest_version = payload.get("schemaVersion")
         if (
             type(manifest_version) is not int
-            or manifest_version not in {1, 2}
+            or manifest_version not in {1, 2, 3}
             or not isinstance(payload.get("entries"), list)
         ):
             raise ValueError(f"Unsupported session manifest: {manifest_path}")
@@ -700,6 +721,14 @@ class CaptureSession:
                 control_points = (
                     normalize_control_points(control_points_raw)
                     if control_points_raw is not None
+                    else None
+                )
+                control_curves_raw = (
+                    item.get("dewarpControlCurves") if manifest_version >= 3 else None
+                )
+                control_curves = (
+                    normalize_control_curves(control_curves_raw)
+                    if control_curves_raw is not None
                     else None
                 )
                 backend_raw = item.get("detectedBackend")
@@ -761,6 +790,7 @@ class CaptureSession:
                     detected_contour=contour,
                     detected_backend=backend_raw,
                     dewarp_control_points=control_points,
+                    dewarp_control_curves=control_curves,
                     committed_processing=committed_processing,
                     selected=bool(item.get("selected", False)),
                     entry_id=entry_id,

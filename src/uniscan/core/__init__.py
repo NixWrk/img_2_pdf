@@ -15,6 +15,7 @@ from .dewarp import (
     estimate_textline_dewarp_model,
     measure_dewarp_quality,
     normalize_control_points,
+    normalize_control_curves,
 )
 from .pipeline import PipelineOptions, build_pdf_from_images, process_loaded_items, split_spread
 from .orientation import (
@@ -173,6 +174,7 @@ __all__ = [
     "measure_dewarp_quality",
     "order_quad_points",
     "normalize_control_points",
+    "normalize_control_curves",
     "orient_document",
     "rotate_right_angle",
     "process_loaded_items",

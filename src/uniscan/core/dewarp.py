@@ -56,12 +56,15 @@ class DewarpQualityMetrics:
 
 @dataclass(slots=True, frozen=True)
 class DewarpModel:
-    """Normalized vertical displacement points that can be edited and replayed."""
+    """Editable vertical displacement curves that can be replayed."""
 
     method: str
     control_points: tuple[tuple[float, float], ...]
     source: str = "automatic"
     line_count: int = 0
+    control_curves: tuple[
+        tuple[float, tuple[tuple[float, float], ...]], ...
+    ] | None = None
 
 
 def normalize_control_points(
@@ -81,6 +84,42 @@ def normalize_control_points(
     if np.any(np.abs(points[:, 1]) > 0.25):
         raise ValueError("Dewarp control point displacement exceeds 25% of page height.")
     return tuple((float(x), float(y)) for x, y in points)
+
+
+def normalize_control_curves(
+    control_curves,
+) -> tuple[tuple[float, tuple[tuple[float, float], ...]], ...]:
+    """Validate and sort vertical anchors with independent horizontal curves."""
+    if not isinstance(control_curves, (tuple, list)) or not 1 <= len(control_curves) <= 8:
+        raise ValueError("Dewarp control curves must contain 1..8 anchored curves.")
+    normalized = []
+    for item in control_curves:
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            raise ValueError("Each dewarp curve must contain an anchor and control points.")
+        anchor = float(item[0])
+        if not np.isfinite(anchor) or not 0.0 <= anchor <= 1.0:
+            raise ValueError("Dewarp curve anchors must be between 0 and 1.")
+        normalized.append((anchor, normalize_control_points(item[1])))
+    normalized.sort(key=lambda item: item[0])
+    anchors = np.asarray([item[0] for item in normalized], dtype=np.float64)
+    if np.any(np.diff(anchors) <= 0.0):
+        raise ValueError("Dewarp curve anchors must be unique.")
+    return tuple(normalized)
+
+
+def _model_control_curves(
+    model: DewarpModel,
+) -> tuple[tuple[float, tuple[tuple[float, float], ...]], ...]:
+    if model.control_curves is not None:
+        return normalize_control_curves(model.control_curves)
+    return ((0.5, normalize_control_points(model.control_points)),)
+
+
+def _model_displacement_values(model: DewarpModel) -> np.ndarray:
+    return np.asarray(
+        [point[1] for _anchor, points in _model_control_curves(model) for point in points],
+        dtype=np.float64,
+    )
 
 
 def _to_gray(image: np.ndarray) -> np.ndarray:
@@ -360,23 +399,46 @@ def estimate_textline_dewarp_model(
 
 
 def apply_dewarp_model(image: np.ndarray, model: DewarpModel) -> np.ndarray:
-    """Apply an automatic or user-adjusted normalized displacement curve."""
-    points = normalize_control_points(model.control_points)
+    """Apply one curve uniformly or interpolate several curves over page height."""
+    curves = _model_control_curves(model)
     height, width = image.shape[:2]
-    point_x = np.asarray([point[0] for point in points], dtype=np.float32)
-    point_y = np.asarray([point[1] for point in points], dtype=np.float32)
     normalized_x = np.linspace(0.0, 1.0, width, dtype=np.float32)
-    displacement = np.interp(normalized_x, point_x, point_y).astype(np.float32) * height
     smooth_sigma = max(1.0, width / 180.0)
-    displacement = cv2.GaussianBlur(
-        displacement.reshape(1, -1),
-        (0, 0),
-        sigmaX=smooth_sigma,
-    ).reshape(-1)
+    profiles = []
+    for _anchor, points in curves:
+        point_x = np.asarray([point[0] for point in points], dtype=np.float32)
+        point_y = np.asarray([point[1] for point in points], dtype=np.float32)
+        displacement = np.interp(normalized_x, point_x, point_y).astype(np.float32) * height
+        profiles.append(
+            cv2.GaussianBlur(
+                displacement.reshape(1, -1),
+                (0, 0),
+                sigmaX=smooth_sigma,
+            ).reshape(-1)
+        )
+    profile_array = np.stack(profiles, axis=0)
+
+    if len(curves) == 1:
+        displacement_field = np.broadcast_to(profile_array[0], (height, width)).copy()
+    else:
+        anchors = np.asarray([curve[0] for curve in curves], dtype=np.float32)
+        normalized_y = np.linspace(0.0, 1.0, height, dtype=np.float32)
+        displacement_field = np.empty((height, width), dtype=np.float32)
+        displacement_field[normalized_y <= anchors[0]] = profile_array[0]
+        displacement_field[normalized_y >= anchors[-1]] = profile_array[-1]
+        for curve_index in range(len(curves) - 1):
+            lower = anchors[curve_index]
+            upper = anchors[curve_index + 1]
+            rows = (normalized_y >= lower) & (normalized_y <= upper)
+            weights = ((normalized_y[rows] - lower) / (upper - lower))[:, None]
+            displacement_field[rows] = (
+                profile_array[curve_index][None, :] * (1.0 - weights)
+                + profile_array[curve_index + 1][None, :] * weights
+            )
 
     map_x = np.broadcast_to(np.arange(width, dtype=np.float32), (height, width)).copy()
-    map_y = np.broadcast_to(np.arange(height, dtype=np.float32)[:, None], (height, width)).copy()
-    map_y += displacement[None, :]
+    map_y = displacement_field
+    map_y += np.arange(height, dtype=np.float32)[:, None]
     corrected = cv2.remap(
         image,
         map_x,
@@ -398,8 +460,7 @@ def _textline_dewarp(
         if model is None:
             return image.copy(), diagnostics
     else:
-        points = normalize_control_points(model.control_points)
-        displacements = np.asarray([point[1] for point in points], dtype=np.float64)
+        displacements = _model_displacement_values(model)
         diagnostics = DewarpDiagnostics(
             method=DEWARP_METHOD_TEXTLINE,
             applied=True,
@@ -573,7 +634,8 @@ def dewarp_document(
                 applied=True,
                 line_count=model.line_count,
                 max_displacement_px=round(
-                    max(abs(point[1]) for point in model.control_points) * corrected.shape[0],
+                    float(np.max(np.abs(_model_displacement_values(model))))
+                    * corrected.shape[0],
                     3,
                 ),
                 reason="uvdoc_with_user_adjustment",
