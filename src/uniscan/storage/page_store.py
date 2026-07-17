@@ -17,7 +17,7 @@ import numpy as np
 from uniscan.io.loaders import imread_unicode, imwrite_unicode
 
 
-_ENTRY_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
+_STORAGE_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 
 
 @dataclass(slots=True, frozen=True)
@@ -48,7 +48,9 @@ class PageStore:
             if root_dir is not None
             else Path(tempfile.gettempdir()) / "uniscan_cache"
         )
-        self.session_id = session_id or uuid4().hex
+        self.session_id = (
+            uuid4().hex if session_id is None else self._validate_session_id(session_id)
+        )
         self.session_dir = base / self.session_id
         self.pages_dir = self.session_dir / "pages"
         self.pages_dir.mkdir(parents=True, exist_ok=True)
@@ -74,9 +76,16 @@ class PageStore:
             return self._paths_for_page_dir(page_dir)
 
     @staticmethod
+    def _validate_session_id(session_id: str) -> str:
+        """Return a canonical session ID or reject it before creating directories."""
+        if not isinstance(session_id, str) or _STORAGE_ID_PATTERN.fullmatch(session_id) is None:
+            raise ValueError("session_id must be exactly 32 lowercase hexadecimal characters")
+        return session_id
+
+    @staticmethod
     def _validate_entry_id(entry_id: str) -> str:
         """Return a canonical session entry ID or reject it before path creation."""
-        if not isinstance(entry_id, str) or _ENTRY_ID_PATTERN.fullmatch(entry_id) is None:
+        if not isinstance(entry_id, str) or _STORAGE_ID_PATTERN.fullmatch(entry_id) is None:
             raise ValueError("entry_id must be exactly 32 lowercase hexadecimal characters")
         return entry_id
 

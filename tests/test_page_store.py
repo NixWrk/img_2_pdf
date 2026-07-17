@@ -17,6 +17,45 @@ def _entry_id(seed: int) -> str:
     return f"{seed:032x}"
 
 
+@pytest.mark.parametrize(
+    "session_id",
+    [
+        "",
+        ".",
+        "..",
+        "../outside",
+        "..\\outside",
+        "nested/session",
+        "nested\\session",
+        "/absolute",
+        "C:\\absolute",
+        "0" * 31,
+        "A" * 32,
+        "550e8400-e29b-41d4-a716-446655440000",
+    ],
+)
+def test_page_store_rejects_invalid_session_id_before_creating_directories(
+    tmp_path, session_id
+) -> None:
+    root = tmp_path / "cache"
+
+    with pytest.raises(ValueError, match="session_id must be exactly 32 lowercase hexadecimal"):
+        PageStore(root_dir=root, session_id=session_id)
+
+    assert not root.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_page_store_accepts_explicit_lowercase_hex_session_id(tmp_path) -> None:
+    session_id = "a" * 32
+
+    store = PageStore(root_dir=tmp_path, session_id=session_id)
+
+    assert store.session_id == session_id
+    assert store.session_dir == tmp_path / session_id
+    assert store.pages_dir.is_dir()
+
+
 def test_page_store_add_read_remove(tmp_path) -> None:
     store = PageStore(root_dir=tmp_path)
     entry_id = _entry_id(1)
