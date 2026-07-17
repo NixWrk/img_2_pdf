@@ -42,6 +42,7 @@ ALLOWED_RUNTIME_LICENSE_IDS = frozenset(
         "CC0-1.0",
         "LGPL-3.0-only",
         "LGPL-3.0-or-later",
+        "HPND",
         "MIT",
         "MIT-CMU",
         "MPL-2.0",
@@ -66,7 +67,10 @@ LICENSE_OVERRIDES = {
     "pyinstaller-hooks-contrib": {
         "2026.6": "LicenseRef-PyInstaller-Hooks-Build-Only",
     },
-    "pypdfium2": {"5.11.0": "BSD-3-Clause AND Apache-2.0 AND CC-BY-4.0"},
+    "pypdfium2": {
+        "4.30.0": "BSD-3-Clause AND Apache-2.0 AND CC-BY-4.0",
+        "5.11.0": "BSD-3-Clause AND Apache-2.0 AND CC-BY-4.0",
+    },
     "tkinterdnd2": {"0.6.2": "MIT"},
 }
 

@@ -72,11 +72,11 @@ def test_license_inventory_contains_runtime_dependencies(tmp_path: Path) -> None
 
 
 class _FakeDistribution:
-    def __init__(self, name: str, license_expression: str | None) -> None:
+    def __init__(self, name: str, license_expression: str | None, *, version: str = "1.0") -> None:
         self.metadata = {"Name": name}
         if license_expression is not None:
             self.metadata["License-Expression"] = license_expression
-        self.version = "1.0"
+        self.version = version
 
 
 @pytest.mark.parametrize("expression", ["AGPL-3.0-only", "GPL-3.0-only"])
@@ -86,6 +86,22 @@ def test_license_policy_rejects_forbidden_copyleft(expression: str) -> None:
             _FakeDistribution("fake-forbidden", expression),
             scope="runtime",
         )
+
+
+def test_license_policy_accepts_reviewed_hpnd_runtime_license() -> None:
+    assert (
+        validate_distribution_license(_FakeDistribution("fake-reviewed", "HPND"), scope="runtime")
+        == "HPND"
+    )
+
+
+def test_license_policy_accepts_reviewed_pypdfium_floor_override() -> None:
+    expression = validate_distribution_license(
+        _FakeDistribution("pypdfium2", None, version="4.30.0"),
+        scope="runtime",
+    )
+
+    assert set(expression.split(" AND ")) == {"Apache-2.0", "BSD-3-Clause", "CC-BY-4.0"}
 
 
 def test_license_policy_rejects_unknown_or_ambiguous_distribution() -> None:
