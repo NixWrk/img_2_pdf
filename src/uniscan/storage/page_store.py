@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -14,6 +15,9 @@ import cv2
 import numpy as np
 
 from uniscan.io.loaders import imread_unicode, imwrite_unicode
+
+
+_ENTRY_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 
 
 @dataclass(slots=True, frozen=True)
@@ -64,11 +68,20 @@ class PageStore:
         )
 
     def paths_for_entry(self, entry_id: str) -> PagePaths:
+        entry_id = self._validate_entry_id(entry_id)
         with self._lock:
             page_dir = self._recover_page_locked(entry_id)
             return self._paths_for_page_dir(page_dir)
 
+    @staticmethod
+    def _validate_entry_id(entry_id: str) -> str:
+        """Return a canonical session entry ID or reject it before path creation."""
+        if not isinstance(entry_id, str) or _ENTRY_ID_PATTERN.fullmatch(entry_id) is None:
+            raise ValueError("entry_id must be exactly 32 lowercase hexadecimal characters")
+        return entry_id
+
     def _page_directories(self, entry_id: str) -> tuple[Path, Path, Path]:
+        entry_id = self._validate_entry_id(entry_id)
         return (
             self.pages_dir / entry_id,
             self.pages_dir / f".{entry_id}.stage",
@@ -324,6 +337,7 @@ class PageStore:
         current_image: np.ndarray | None = None,
     ) -> PagePaths:
         """Publish a complete page generation, recovering either side of a crash."""
+        entry_id = self._validate_entry_id(entry_id)
         with self._lock:
             self._recover_page_locked(entry_id)
             return self._replace_page_set_locked(
@@ -346,6 +360,7 @@ class PageStore:
         result (after document detection / UVDoc). If `warped_image` is None,
         the raw image is used for both (no rectification was applied).
         """
+        entry_id = self._validate_entry_id(entry_id)
         if warped_image is None:
             warped_image = raw_image
         with self._lock:
@@ -369,12 +384,14 @@ class PageStore:
             return self._paths_for_page_dir(page_dir)
 
     def remove_page(self, entry_id: str) -> None:
+        entry_id = self._validate_entry_id(entry_id)
         with self._lock:
             for page_dir in self._page_directories(entry_id):
                 shutil.rmtree(page_dir, ignore_errors=True)
 
     def prune_pages(self, live_entry_ids: set[str]) -> None:
         """Remove pages only after a manifest no longer references them."""
+        live_entry_ids = {self._validate_entry_id(entry_id) for entry_id in live_entry_ids}
         with self._lock:
             for entry_id in live_entry_ids:
                 self._recover_page_locked(entry_id)
@@ -394,6 +411,7 @@ class PageStore:
 
     def repair_page_assets(self, entry_id: str) -> tuple[PagePaths, bool]:
         """Rebuild derived assets and recover `current` from a valid original."""
+        entry_id = self._validate_entry_id(entry_id)
         with self._lock:
             page_dir = self._recover_page_locked(entry_id)
             recovered = self._paths_for_page_dir(page_dir)

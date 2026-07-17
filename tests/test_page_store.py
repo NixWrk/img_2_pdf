@@ -13,9 +13,13 @@ def _img(value: int = 0) -> np.ndarray:
     return out
 
 
+def _entry_id(seed: int) -> str:
+    return f"{seed:032x}"
+
+
 def test_page_store_add_read_remove(tmp_path) -> None:
     store = PageStore(root_dir=tmp_path)
-    entry_id = "entry_a"
+    entry_id = _entry_id(1)
     paths = store.add_page(entry_id, _img())
 
     assert paths.raw.exists()
@@ -36,7 +40,7 @@ def test_page_store_add_read_remove(tmp_path) -> None:
 
 def test_page_store_cleanup_session(tmp_path) -> None:
     store = PageStore(root_dir=tmp_path)
-    store.add_page("entry_b", _img())
+    store.add_page(_entry_id(2), _img())
     session_dir = store.session_dir
     assert session_dir.exists()
 
@@ -48,7 +52,7 @@ def test_page_store_writes_raw_distinct_from_warped(tmp_path) -> None:
     store = PageStore(root_dir=tmp_path)
     raw = _img(10)
     warped = _img(200)
-    paths = store.add_page("entry_pair", raw, warped)
+    paths = store.add_page(_entry_id(3), raw, warped)
 
     raw_back = store.read_image(paths.raw)
     warped_back = store.read_image(paths.original)
@@ -87,7 +91,7 @@ def test_page_store_resizes_grayscale_before_expanding_channels(tmp_path, monkey
 
 def test_page_store_failed_encode_keeps_previous_complete_file(tmp_path, monkeypatch) -> None:
     store = PageStore(root_dir=tmp_path)
-    paths = store.add_page("entry_atomic", _img(10))
+    paths = store.add_page(_entry_id(4), _img(10))
     previous = paths.current.read_bytes()
 
     def fail_after_partial_write(path, _image):
@@ -103,9 +107,10 @@ def test_page_store_failed_encode_keeps_previous_complete_file(tmp_path, monkeyp
 
 
 def test_page_store_recovers_old_generation_if_swap_stopped_before_publish(tmp_path) -> None:
+    entry_id = _entry_id(5)
     store = PageStore(root_dir=tmp_path)
-    paths = store.add_page("entry_recover_old", _img(10), _img(20))
-    page_dir, stage_dir, backup_dir = store._page_directories("entry_recover_old")
+    paths = store.add_page(entry_id, _img(10), _img(20))
+    page_dir, stage_dir, backup_dir = store._page_directories(entry_id)
     store._write_page_set(
         stage_dir,
         raw_image=_img(100),
@@ -123,9 +128,10 @@ def test_page_store_recovers_old_generation_if_swap_stopped_before_publish(tmp_p
 
 
 def test_page_store_recovers_new_generation_if_cleanup_was_interrupted(tmp_path) -> None:
+    entry_id = _entry_id(6)
     store = PageStore(root_dir=tmp_path)
-    paths = store.add_page("entry_recover_new", _img(10), _img(20))
-    page_dir, stage_dir, backup_dir = store._page_directories("entry_recover_new")
+    paths = store.add_page(entry_id, _img(10), _img(20))
+    page_dir, stage_dir, backup_dir = store._page_directories(entry_id)
     store._write_page_set(
         stage_dir,
         raw_image=_img(100),
@@ -144,7 +150,7 @@ def test_page_store_recovers_new_generation_if_cleanup_was_interrupted(tmp_path)
 
 def test_page_store_propagates_bounded_decoder_failure(tmp_path, monkeypatch) -> None:
     store = PageStore(root_dir=tmp_path)
-    paths = store.add_page("bounded", _img(10), _img(20))
+    paths = store.add_page(_entry_id(7), _img(10), _img(20))
 
     def reject(_path, **_kwargs):
         raise RuntimeError("safe input limit: 150,000,000 pixels")
@@ -152,3 +158,60 @@ def test_page_store_propagates_bounded_decoder_failure(tmp_path, monkeypatch) ->
     monkeypatch.setattr("uniscan.storage.page_store.imread_unicode", reject)
     with pytest.raises(RuntimeError, match="safe input limit"):
         store.read_image(paths.current)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        pytest.param(
+            lambda store, entry_id: store.paths_for_entry(entry_id),
+            id="paths_for_entry",
+        ),
+        pytest.param(
+            lambda store, entry_id: store.replace_page_set(entry_id, current_image=_img()),
+            id="replace_page_set",
+        ),
+        pytest.param(
+            lambda store, entry_id: store.add_page(entry_id, _img()),
+            id="add_page",
+        ),
+        pytest.param(
+            lambda store, entry_id: store.remove_page(entry_id),
+            id="remove_page",
+        ),
+        pytest.param(
+            lambda store, entry_id: store.prune_pages({entry_id}),
+            id="prune_pages",
+        ),
+        pytest.param(
+            lambda store, entry_id: store.repair_page_assets(entry_id),
+            id="repair_page_assets",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "entry_id",
+    [
+        "",
+        ".",
+        "..",
+        "../outside",
+        "..\\outside",
+        "nested/page",
+        "nested\\page",
+        "/absolute",
+        "C:\\absolute",
+        "0" * 31,
+        "A" * 32,
+        "550e8400-e29b-41d4-a716-446655440000",
+    ],
+)
+def test_page_store_rejects_invalid_entry_ids_before_page_resolution(
+    tmp_path, monkeypatch, operation, entry_id
+) -> None:
+    store = PageStore(root_dir=tmp_path)
+    monkeypatch.setattr(store, "_recover_page_locked", pytest.fail)
+    monkeypatch.setattr(store, "_page_directories", pytest.fail)
+
+    with pytest.raises(ValueError, match="32 lowercase hexadecimal"):
+        operation(store, entry_id)
