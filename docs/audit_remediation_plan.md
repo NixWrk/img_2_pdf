@@ -48,13 +48,13 @@ Every closed item must have:
 
 | ID | Finding | Required remediation | Acceptance criteria |
 |---|---|---|---|
-| COR-001 | Perspective output loses the last row and column because pixel-centre distance is used as pixel count. The Office Lens adapter duplicates the defect. | Define one inclusive pixel geometry convention and use it in both warp implementations. | An identity quad over `WxH` produces exactly `WxH`; tests cover axis-aligned, rotated, fractional, and one-pixel extents. |
-| COR-002 | Perspective points can request an unbounded allocation. | Validate coordinates, aspect ratio, dimensions, and output pixels before OpenCV allocation. | Adversarial finite points fail with an actionable error without allocating the requested output. |
+| COR-001 | Perspective output loses the last row and column because pixel-centre distance is used as pixel count. The Office Lens adapter duplicates the defect. | Define one inclusive pixel geometry convention and use it in both warp implementations. | Identity quads over `WxH` are byte-exact and produce exactly `WxH` in both the core and Office Lens paths; tests cover axis-aligned, rotated, fractional, and singleton-rejected extents. |
+| COR-002 | Perspective points can request an unbounded allocation. | Validate coordinates, aspect ratio, dimensions, and output pixels before OpenCV allocation. | Non-finite/out-of-bounds points, source/output dimensions above 32766, pre-round aspect overflow, singleton/subpixel outputs, and outputs above 150 MP fail with actionable errors before allocation; the max-safe case is accepted. |
 | COR-003 | Unsigned 10/12-bit samples are scaled as full-range 16-bit, making 12-bit pages nearly black. | Preserve source bit-depth metadata and implement explicit integer normalization rules. | `0..4095` maps to `0..255`; full 16-bit remains correct; constant and signed inputs are covered. |
 | COR-004 | Multi-curve dewarp allows a non-monotonic `map_y`, folding and repeating rows. | Validate anchor separation and the vertical Jacobian; reject or safely constrain folding models. | Every accepted map has a positive minimum vertical derivative; adversarial curves are rejected before remap. |
 | COR-005 | Blank pages already remain full page, but a single connected component that passes the current thresholds can be enlarged to the printable area. | Gate crop/scale by confidence, coverage, and multi-signal component evidence; preserve the existing blank-page no-op. | Single-speck/component and sparse negatives remain full page; valid content still lays out; diagnostics explain every no-op. |
-| COR-006 | Office Lens min-max luminance normalization converts a constant white page to black. | Add a flat-range guard and stable percentile/target-luminance normalization. | Constant black/gray/white pages remain stable and finite. |
-| COR-007 | Spread analysis can produce arrays of different lengths when the smoothing kernel exceeds the search band. | Bound the kernel or use a shape-preserving implementation. | Every accepted minimum input size returns a result/None without exception. |
+| COR-006 | Office Lens min-max luminance normalization converts a constant white page to black. | Add a flat-range guard and stable percentile/target-luminance normalization. | Constant black/gray/white pages remain stable and finite; near-flat, outlier, affine, and nonlinear ramp fixtures stay bounded, smooth, and `uint8` without false full-frame edges or full-frame float buffers. |
+| COR-007 | Spread analysis can produce arrays of different lengths when the smoothing kernel exceeds the search band. | Bound the kernel or use a shape-preserving implementation. | Every accepted minimum input size returns a result/None without exception, and oversized smoothing kernels preserve shape and match the centered zero-padded Gaussian reference within tolerance. |
 | COR-008 | Spread edge confidence is relative only to its own maximum, allowing weak noise to look continuous. | Add an absolute robust edge-strength term and calibrate confidence. | Flat/noisy negatives stay below the split threshold; real synthetic gutters remain detected. |
 | COR-009 | A split ratio measured after homography is replayed linearly on raw pixels; embedded content boxes use the same invalid mapping. | Persist the homography and map split polygons back, or promote rectified halves to authoritative sources. | Raw/original/current halves refer to the same physical content under strong perspective. |
 | COR-010 | Deskew hybrid unconditionally selects weak min-area fallback and applies angles above 0.05 degrees regardless of confidence. | Gate fallback using confidence, angular coherence, agreement, and page category. | Sparse graphics, frames, and tables remain unchanged unless evidence is sufficient. |
@@ -113,6 +113,7 @@ Every closed item must have:
 | REL-011 | Optional camscan inserts a path at `sys.path[0]` permanently. | Use scoped import loading and restore global import state. | Optional loading cannot shadow later unrelated imports. |
 | REL-012 | UVDoc cache uses environment `setdefault`, so a later explicit cache directory may be ignored. | Make cache selection explicit and validate model identity/path. | Requested cache path is either honoured or rejected clearly. |
 | REL-013 | A cache entry can pass the generic JSON/schema check and then fail stage-specific decoding on every run without being evicted, creating a persistent poison hit. | Validate at the stage decoder boundary and atomically quarantine/remove entries that fail semantic decoding; optional-cache errors remain misses. | A semantically corrupt fixture causes one miss/recompute, then a valid hit; it never fails repeated processing or survives as the same poison entry. |
+| REL-014 | PageStore still trusts lexical paths and follows filesystem indirection: public path-taking methods can receive arbitrary sources/destinations, and symlink/junction/reparse components or check/use swaps under session/pages/entry/stage/backup can redirect I/O, recovery, pruning, or destructive cleanup outside owned storage. | Replace internal path APIs with entry-ID/asset capabilities; make external snapshot destinations an explicit bounded capability; reject reparse components and use no-follow/handle-verified operations, or enforce an exclusively owned storage root with directory-identity checks before destructive actions. | Absolute/traversal/forged asset paths fail closed; Windows-junction and POSIX-symlink fixtures at root/session/pages/entry/stage/backup plus injected TOCTOU swaps cannot read, write, link/copy, replace, or delete an external sentinel; the sentinel remains byte-identical, while normal restore/add/replace/prune/close and explicitly authorized temporary snapshots still pass. |
 
 ## P1: workflow and GUI
 
@@ -160,6 +161,7 @@ Every closed item must have:
 | QA-011 | Public PageStore methods accept arbitrary entry IDs that can form paths outside the page directory. | Validate UUID-like IDs at every public boundary. | Traversal and separator-containing IDs are rejected. |
 | QA-012 | Broad exception handlers sometimes erase error type/context. | Narrow expected exceptions and preserve causes in diagnostics. | User errors remain actionable; programming errors are not silently converted to fallback. |
 | QA-013 | The lossless-default regression used `PdfImage.get_px_size()`, which is absent from the declared minimum `pypdfium2` 4.30.0 API. | Verify embedded pixels through bitmap extraction available across the supported range and exercise the dependency floor. | The exact-pixel regression passes on `pypdfium2` 4.30.0 and the current development environment. |
+| QA-014 | Explicit PageStore session IDs accept invalid names before session-directory creation, allowing traversal-shaped or malformed session roots. | Validate explicit session IDs before any directory is created; keep `None` as the only auto-generation path. | Only exact 32-character lowercase hex session IDs are accepted; empty, uppercase, hyphenated, separator-containing, and traversal IDs fail before `mkdir` and leave the store root untouched. |
 
 ## Delivery order and commit policy
 
@@ -179,7 +181,7 @@ Every closed item must have:
     detector policy, including AUTO-001 through AUTO-006.
 11. Extract only useful GUI controllers, expose missing settings, and remove blocking Tk work.
 12. Optimize storage, cache, import, export, and detector work from measured timings, including
-    REL-001 through REL-003 and REL-013.
+    REL-001 through REL-003, REL-013, and REL-014.
 13. Harden camera/live detection, including GUI-013 and REL-004 through REL-012.
 14. Expand real/adversarial/large-job benchmarks, lock releases, and complete documentation.
 
@@ -187,7 +189,8 @@ Commits must not include unrelated working-tree content. The tracked `example/` 
 corpus asset, not an incidental example: it may remain distributable only with recorded provenance,
 licence/redistribution status, expected use, and a benchmark/test manifest entry. Otherwise it must
 move to a documented private corpus and be removed from distributable history. Each implementation
-commit includes its tests and updates the status below; corpus/documentation commits do not mark
+commit includes its tests; status is updated in the same commit or a dedicated follow-up status
+commit. Corpus/documentation commits do not mark
 engineering findings complete.
 
 ## Progress log
@@ -202,7 +205,10 @@ engineering findings complete.
 | 2026-07-16 | `569309e` | COR-019, GUI-011, GUI-012; COR-012, COR-015, COR-018, GUI-004, GUI-013, MEM-020 partial | Preserved quarantine order and persisted/validated import options; Quick Export now preserves visible scope/DPI. Crop proposals have explicit persisted state and best-effort multi-page rollback; automatic dewarp is preview/Apply; camera/burst ownership is safer and burst is streamed with a 20-shot cap. The partial items still lack their full crash, Reject/report, blocked-read, or byte-budget acceptance evidence. |
 | 2026-07-16 | `7612627` | COR-016, QA-013 | Removed the post-minimum PDFium API dependency from the exact-pixel regression; the test passes on `pypdfium2` 4.30.0 and the current environment. COR-016 and QA-013 are complete. |
 | 2026-07-16 | `237f83f` | REL-002; REL-013 partial | Made LRU touch and temporary cleanup fail-soft, prevented a cleanup-locked rejected key from being reused in-process, and repaired it on a later successful write. REL-002 is complete; durable interprocess rejection remains part of REL-013/REL-001. |
-| 2026-07-16 | `5318d8f` | MEM-022 | Added validated proposal-only detection to import, capture, manual corner detection, and live detection; built-in contour backends no longer create a discarded full-resolution warp. MEM-022 is complete. |
+| 2026-07-16 | `5318d8f` | MEM-022 | Added proposal-only detection to import, capture, manual corner detection, and live detection; built-in contour backends no longer create a discarded full-resolution warp. MEM-022 is complete. |
+| 2026-07-17 | `589ccd3` | QA-011 | Validated every public entry-ID boundary before path resolution; traversal and separator forms are rejected. QA-011 is complete. |
+| 2026-07-17 | `3c3cb70` | QA-014 | Validated explicit session IDs before `mkdir`; invalid input creates no directory. QA-014 is complete. |
+| 2026-07-17 | `b4b7792` | COR-001, COR-002, COR-006, COR-007 | Unified inclusive warp geometry and Office Lens parity, bounded pre-allocation/proposal validation, stable fixed-point luminance normalization, and shape-preserving spread smoothing. The 122 focused acceptance tests pass; all four items are complete. |
 
 `Complete` above means the item-specific acceptance criteria has direct automated evidence. `Partial`
 means the implementation reduced the risk but the finding remains open. All findings not named as
@@ -210,6 +216,8 @@ complete remain open.
 
 ### Remaining acceptance gaps in this tranche
 
+- REL-014 is newly identified and remains open: the QA-011/QA-014 lexical validators do not stop
+  filesystem indirection, reparse points, or check/use swaps around PageStore-owned paths.
 - AUTO-006 still needs attempted backend and selection/rejection reason per split half.
 - MEM-018 still needs measured 150 MP peak-memory and corpus-decision evidence; MEM-020 still
   needs an explicit byte budget and peak/failure measurements.
