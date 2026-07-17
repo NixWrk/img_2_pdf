@@ -209,6 +209,7 @@ engineering findings complete.
 | 2026-07-17 | `589ccd3` | QA-011 | Validated every public entry-ID boundary before path resolution; traversal and separator forms are rejected. QA-011 is complete. |
 | 2026-07-17 | `3c3cb70` | QA-014 | Validated explicit session IDs before `mkdir`; invalid input creates no directory. QA-014 is complete. |
 | 2026-07-17 | `b4b7792` | COR-001, COR-002, COR-006, COR-007 | Unified inclusive warp geometry and Office Lens parity, bounded pre-allocation/proposal validation, stable fixed-point luminance normalization, and shape-preserving spread smoothing. The 122 focused acceptance tests pass; all four items are complete. |
+| 2026-07-17 | `ac91527` | QA-009 partial | Kept the release license gate compatible with the supported dependency floor and current Pillow metadata by approving HPND and the `pypdfium2` 4.30.0 reviewed override. QA-009 remains open because dependencies are still not locked and controlled update automation is not implemented. |
 
 `Complete` above means the item-specific acceptance criteria has direct automated evidence. `Partial`
 means the implementation reduced the risk but the finding remains open. All findings not named as
@@ -223,6 +224,8 @@ complete remain open.
   needs an explicit byte budget and peak/failure measurements.
 - REL-013 still needs a durable cross-process rejection/quarantine mechanism coordinated with
   REL-001 interprocess publication.
+- QA-009 still needs a release constraints/lock file and controlled dependency-update workflow;
+  the license metadata follow-up only keeps the current supported dependency floor testable.
 - COR-012, COR-015, COR-018, GUI-004, and GUI-013 remain partial: manifest-inclusive crash
   atomicity, explicit Reject/export reporting, byte-for-byte cancel/failure evidence, and a blocked
   camera-read cancellation test are not yet complete.
