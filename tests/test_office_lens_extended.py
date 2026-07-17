@@ -11,6 +11,7 @@ from uniscan.office_lens.adapter import (
     OfficeLensOnnx,
     QUAD_MODEL,
     _expand_quad,
+    _normalize_luminance,
     _read_rgb,
     _quad_area,
     _quad_image_score,
@@ -136,6 +137,230 @@ def test_enhancement_modes_and_perspective_warp() -> None:
     warped, size = warp_document_rgb(image, quad, padding_percent=0.02)
     assert warped.shape[1::-1] == size
     assert min(size) > 100
+
+
+def test_office_lens_identity_warp_preserves_inclusive_size() -> None:
+    image = np.arange(37 * 53 * 3, dtype=np.uint8).reshape(37, 53, 3)
+    quad = np.array(
+        [[0, 0], [52, 0], [52, 36], [0, 36]],
+        dtype=np.float32,
+    )
+
+    warped, size = warp_document_rgb(image, quad)
+
+    assert size == (53, 37)
+    assert warped.shape == image.shape
+    np.testing.assert_array_equal(warped, image)
+
+
+@pytest.mark.parametrize("level", [0, 127, 255])
+def test_luminance_normalization_preserves_constant_pages(level: int) -> None:
+    page = np.full((32, 48), level, dtype=np.uint8)
+
+    normalized = _normalize_luminance(page)
+
+    assert normalized.dtype == np.uint8
+    assert np.isfinite(normalized).all()
+    np.testing.assert_array_equal(normalized, page)
+
+
+@pytest.mark.parametrize("delta", [1, 2, 3, 4, 8])
+def test_luminance_normalization_preserves_nearly_flat_page(delta: int) -> None:
+    page = np.full((32, 48), 255 - delta, dtype=np.uint8)
+    page[::2, ::2] = 255
+
+    normalized = _normalize_luminance(page)
+
+    np.testing.assert_array_equal(normalized, page)
+
+
+@pytest.mark.parametrize("base", [0, 16, 64, 127, 246])
+def test_luminance_normalization_bounds_near_flat_contrast_gain(base: int) -> None:
+    delta = 9
+    page = np.full((64, 64), base, dtype=np.uint8)
+    page[::2, ::2] = base + delta
+
+    normalized = _normalize_luminance(page)
+
+    assert int(np.ptp(normalized)) <= delta * 4 + 1
+    assert float(normalized.std()) <= float(page.std()) * 4.1
+    assert abs(float(normalized.mean()) - float(page.mean())) <= 5.0
+
+
+@pytest.mark.parametrize("outlier_count", [90, 100, 110])
+@pytest.mark.parametrize("base", [16, 64, 127, 200, 252])
+def test_luminance_normalization_ignores_sparse_extreme_outliers(
+    outlier_count: int, base: int
+) -> None:
+    page = np.full((100, 100), base, dtype=np.uint8)
+    pixels = page.reshape(-1)
+    pixels[:outlier_count] = 0
+    pixels[outlier_count : outlier_count * 2] = 255
+
+    normalized = _normalize_luminance(page)
+
+    np.testing.assert_array_equal(normalized, page)
+
+
+@pytest.mark.parametrize("base", [64, 127, 200])
+def test_luminance_normalization_is_smooth_at_dominant_mass_boundary(base: int) -> None:
+    means: list[float] = []
+    for dominant_count in (9_499, 9_500, 9_501):
+        page = np.full((100, 100), base, dtype=np.uint8)
+        pixels = page.reshape(-1)
+        outlier_count = pixels.size - dominant_count
+        low_count = outlier_count // 2
+        pixels[:low_count] = 0
+        pixels[low_count:outlier_count] = 255
+
+        normalized = _normalize_luminance(page)
+        means.append(float(normalized.mean()))
+        assert abs(float(normalized.mean()) - float(page.mean())) <= 1.0
+
+    assert abs(means[0] - means[1]) <= 1.0
+    assert abs(means[1] - means[2]) <= 1.0
+
+
+def test_luminance_normalization_is_smooth_across_adjacent_noise_spans() -> None:
+    shifts: list[float] = []
+    for level_count in (17, 18):
+        levels = np.arange(64, 64 + level_count, dtype=np.uint8)
+        page = np.tile(levels, (100, 1))
+
+        normalized = _normalize_luminance(page)
+        shifts.append(float(normalized.mean()) - float(page.mean()))
+
+    assert max(abs(shift) for shift in shifts) <= 10.0
+    assert abs(shifts[0] - shifts[1]) <= 3.0
+
+
+@pytest.mark.parametrize("outlier_fraction", [0.0, 0.05])
+def test_luminance_normalization_is_smooth_across_bimodal_distances(
+    outlier_fraction: float,
+) -> None:
+    means: list[float] = []
+    shifts: list[float] = []
+    for second_level in (79, 80, 81, 82):
+        pixels = np.empty(10_000, dtype=np.uint8)
+        outlier_count = int(pixels.size * outlier_fraction)
+        core_count = pixels.size - outlier_count
+        midpoint = core_count // 2
+        pixels[:midpoint] = 64
+        pixels[midpoint:core_count] = second_level
+        low_outliers = outlier_count // 2
+        pixels[core_count : core_count + low_outliers] = 0
+        pixels[core_count + low_outliers :] = 255
+        page = pixels.reshape(100, 100)
+
+        normalized = _normalize_luminance(page)
+        means.append(float(normalized.mean()))
+        shifts.append(float(normalized.mean()) - float(page.mean()))
+
+    adjacent_changes = np.abs(np.diff(means))
+    assert float(adjacent_changes.max()) <= 4.0
+    assert max(abs(shift) for shift in shifts) <= 30.0
+
+
+def test_luminance_normalization_is_smooth_across_corrected_tail_rank() -> None:
+    rng = np.random.default_rng(17)
+    core = rng.integers(64, 201, size=(100, 100), dtype=np.uint8)
+    input_means: list[float] = []
+    output_means: list[float] = []
+    for zero_count in range(98, 103):
+        page = core.copy()
+        page.flat[:zero_count] = 0
+        input_means.append(float(page.mean()))
+        output_means.append(float(_normalize_luminance(page).mean()))
+
+    assert float(np.abs(np.diff(input_means)).max()) <= 0.02
+    assert float(np.abs(np.diff(output_means)).max()) <= 1.0
+
+
+@pytest.mark.parametrize("base", [64, 127])
+def test_luminance_normalization_is_smooth_across_raw_tail_rank(base: int) -> None:
+    input_means: list[float] = []
+    output_means: list[float] = []
+    for zero_count in range(498, 503):
+        page = np.full((100, 100), base, dtype=np.uint8)
+        pixels = page.reshape(-1)
+        pixels[:zero_count] = 0
+        pixels[zero_count : zero_count + 100] = 255
+        input_means.append(float(page.mean()))
+        output_means.append(float(_normalize_luminance(page).mean()))
+
+    assert float(np.abs(np.diff(input_means)).max()) <= 0.02
+    assert float(np.abs(np.diff(output_means)).max()) <= 1.0
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        np.empty((0, 8), dtype=np.uint8),
+        np.zeros((8, 8), dtype=np.float32),
+    ],
+    ids=("empty", "float32"),
+)
+def test_luminance_normalization_rejects_invalid_image(page: np.ndarray) -> None:
+    with pytest.raises(ValueError):
+        _normalize_luminance(page)
+
+
+@pytest.mark.parametrize("strength", [float("nan"), float("inf"), -float("inf")])
+def test_luminance_normalization_rejects_non_finite_strength(strength: float) -> None:
+    page = np.tile(np.arange(32, dtype=np.uint8), (32, 1))
+
+    with pytest.raises(ValueError, match="strength must be finite"):
+        _normalize_luminance(page, strength=strength)
+
+
+def test_luminance_normalization_non_flat_result_is_finite_uint8() -> None:
+    page = np.tile(np.arange(256, dtype=np.uint8), (32, 1))
+
+    normalized = _normalize_luminance(page)
+
+    assert normalized.shape == page.shape
+    assert normalized.dtype == np.uint8
+    assert np.isfinite(normalized).all()
+
+
+@pytest.mark.parametrize("start", [0, 8, 16, 32, 48, 63])
+@pytest.mark.parametrize("samples", [257, 513, 1_025])
+def test_luminance_normalization_avoids_false_edges_in_dark_ramps(start: int, samples: int) -> None:
+    page = np.tile(np.linspace(start, 255, samples, dtype=np.uint8), (101, 1))
+    normalized = _normalize_luminance(page)
+    row = normalized[normalized.shape[0] // 2]
+    steps = np.diff(row.astype(np.int16))
+
+    assert int(steps.min()) >= -3
+    assert int(steps.max()) <= 6
+    duplicate_spread = max(int(np.ptp(row[page[0] == level])) for level in np.unique(page[0]))
+    assert duplicate_spread <= 3
+
+
+@pytest.mark.parametrize(
+    ("start", "stop", "samples"),
+    [
+        (40, 112, 257),
+        (44, 112, 127),
+        (44, 224, 1_025),
+        (46, 160, 127),
+        (52, 128, 513),
+        (56, 128, 1_025),
+    ],
+)
+def test_luminance_normalization_preserves_midrange_ramp_order(
+    start: int,
+    stop: int,
+    samples: int,
+) -> None:
+    page = np.tile(np.linspace(start, stop, samples, dtype=np.uint8), (101, 1))
+    row = _normalize_luminance(page)[page.shape[0] // 2]
+    steps = np.diff(row.astype(np.int16))
+
+    assert int(steps.min()) >= -3
+    assert int(steps.max()) <= 7
+    duplicate_spread = max(int(np.ptp(row[page[0] == level])) for level in np.unique(page[0]))
+    assert duplicate_spread <= 3
 
 
 def test_byom_file_flow_reports_and_saves_all_outputs(tmp_path, monkeypatch) -> None:

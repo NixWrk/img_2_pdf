@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import cv2
+
+MAX_PERSPECTIVE_IMAGE_DIMENSION = 32_766
+MAX_PERSPECTIVE_OUTPUT_PIXELS = 150_000_000
+MAX_PERSPECTIVE_ASPECT_RATIO = 100.0
 
 
 def order_quad_points(points: np.ndarray) -> np.ndarray:
@@ -61,30 +67,109 @@ def order_quad_points(points: np.ndarray) -> np.ndarray:
     return ordered.astype(np.float32, copy=False)
 
 
-def warp_perspective_from_points(image: np.ndarray, points: np.ndarray) -> np.ndarray:
-    """Apply perspective transform using 4 corner points."""
-    quad = order_quad_points(points)
-    (tl, tr, br, bl) = quad
+def _inclusive_pixel_count(distance: float) -> int:
+    """Convert a distance between pixel centres to an inclusive pixel count."""
+    if not math.isfinite(distance) or distance < 0:
+        raise ValueError("Perspective edge lengths must be finite and non-negative.")
+    return max(1, math.floor(distance + 0.5) + 1)
 
-    width_top = np.linalg.norm(tr - tl)
-    width_bottom = np.linalg.norm(br - bl)
-    max_width = int(max(width_top, width_bottom))
 
-    height_left = np.linalg.norm(bl - tl)
-    height_right = np.linalg.norm(br - tr)
-    max_height = int(max(height_left, height_right))
+def prepare_perspective_warp(
+    image: np.ndarray,
+    points: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, tuple[int, int]]:
+    """Validate and plan a bounded perspective warp without allocating its output.
 
-    max_width = max(1, max_width)
-    max_height = max(1, max_height)
+    Coordinates identify pixel centres. Consequently, an edge from ``0`` to
+    ``W - 1`` spans ``W`` output pixels, including both endpoints.
+    """
+    if not isinstance(image, np.ndarray) or image.ndim < 2:
+        raise ValueError("Perspective source must be an image array with at least two dimensions.")
+    image_height, image_width = image.shape[:2]
+    if image_width < 1 or image_height < 1:
+        raise ValueError("Perspective source dimensions must be positive.")
+    if (
+        image_width > MAX_PERSPECTIVE_IMAGE_DIMENSION
+        or image_height > MAX_PERSPECTIVE_IMAGE_DIMENSION
+    ):
+        raise ValueError(
+            f"Perspective source {image_width}x{image_height} exceeds OpenCV's safe "
+            f"per-dimension limit of {MAX_PERSPECTIVE_IMAGE_DIMENSION:,} pixels."
+        )
 
-    dst = np.array(
+    try:
+        raw_points = np.asarray(points, dtype=np.float64).reshape(4, 2)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError("Perspective points must contain exactly four x/y coordinates.") from exc
+    if not np.isfinite(raw_points).all():
+        raise ValueError("Perspective points must contain only finite coordinates.")
+
+    x_coordinates = raw_points[:, 0]
+    y_coordinates = raw_points[:, 1]
+    if (
+        np.any(x_coordinates < 0)
+        or np.any(x_coordinates > image_width - 1)
+        or np.any(y_coordinates < 0)
+        or np.any(y_coordinates > image_height - 1)
+    ):
+        raise ValueError(
+            "Perspective points must stay within source pixel-centre bounds "
+            f"x=0..{image_width - 1}, y=0..{image_height - 1}."
+        )
+
+    quad = order_quad_points(raw_points)
+    precise_quad = quad.astype(np.float64)
+    tl, tr, br, bl = precise_quad
+    width_extent = max(float(np.linalg.norm(tr - tl)), float(np.linalg.norm(br - bl)))
+    height_extent = max(float(np.linalg.norm(bl - tl)), float(np.linalg.norm(br - tr)))
+    if width_extent < 0.5 or height_extent < 0.5:
+        raise ValueError(
+            "Perspective output must be at least 2x2 pixels; a one-pixel dimension "
+            "would create a degenerate homography."
+        )
+    geometric_aspect = max(width_extent / height_extent, height_extent / width_extent)
+    if geometric_aspect > MAX_PERSPECTIVE_ASPECT_RATIO:
+        raise ValueError(
+            f"Perspective quad aspect ratio {geometric_aspect:.2f}:1 exceeds the safe limit "
+            f"of {MAX_PERSPECTIVE_ASPECT_RATIO:g}:1."
+        )
+
+    width = _inclusive_pixel_count(width_extent)
+    height = _inclusive_pixel_count(height_extent)
+
+    if width > MAX_PERSPECTIVE_IMAGE_DIMENSION or height > MAX_PERSPECTIVE_IMAGE_DIMENSION:
+        raise ValueError(
+            "Perspective output dimensions "
+            f"{width}x{height} exceed the safe per-dimension limit of "
+            f"{MAX_PERSPECTIVE_IMAGE_DIMENSION:,} pixels."
+        )
+    aspect_ratio = max(width / height, height / width)
+    if aspect_ratio > MAX_PERSPECTIVE_ASPECT_RATIO:
+        raise ValueError(
+            f"Perspective output aspect ratio {aspect_ratio:.2f}:1 exceeds the safe limit of "
+            f"{MAX_PERSPECTIVE_ASPECT_RATIO:g}:1."
+        )
+    output_pixels = width * height
+    if output_pixels > MAX_PERSPECTIVE_OUTPUT_PIXELS:
+        raise ValueError(
+            f"Perspective output {width}x{height} requires {output_pixels:,} pixels, "
+            f"exceeding the safe limit of {MAX_PERSPECTIVE_OUTPUT_PIXELS:,}."
+        )
+
+    destination = np.array(
         [
             [0, 0],
-            [max_width - 1, 0],
-            [max_width - 1, max_height - 1],
-            [0, max_height - 1],
+            [width - 1, 0],
+            [width - 1, height - 1],
+            [0, height - 1],
         ],
         dtype=np.float32,
     )
-    matrix = cv2.getPerspectiveTransform(quad, dst)
-    return cv2.warpPerspective(image, matrix, (max_width, max_height))
+    return quad, destination, (width, height)
+
+
+def warp_perspective_from_points(image: np.ndarray, points: np.ndarray) -> np.ndarray:
+    """Apply perspective transform using 4 corner points."""
+    quad, destination, output_size = prepare_perspective_warp(image, points)
+    matrix = cv2.getPerspectiveTransform(quad, destination)
+    return cv2.warpPerspective(image, matrix, output_size)

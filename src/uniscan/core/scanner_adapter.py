@@ -14,7 +14,11 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .geometry import order_quad_points, warp_perspective_from_points
+from .geometry import (
+    order_quad_points,
+    prepare_perspective_warp,
+    warp_perspective_from_points,
+)
 
 DETECTOR_BACKEND_CAMSCAN = "camscan"
 DETECTOR_BACKEND_OPENCV = "opencv_quad"
@@ -801,6 +805,12 @@ def scan_with_document_detector(
             errors.append(f"{backend}: detector did not return a boundary contour")
             continue
         if result.detected and result.contour is not None:
+            try:
+                prepare_perspective_warp(image, result.contour)
+            except ValueError as exc:
+                errors.append(f"{backend}: rejected invalid boundary: {exc}")
+                continue
+
             validation_image, validation_scale = _resize_for_detection(image)
             gray = (
                 cv2.cvtColor(validation_image, cv2.COLOR_BGR2GRAY)

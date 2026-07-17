@@ -83,6 +83,37 @@ def test_proposal_only_detection_does_not_build_perspective_warp(monkeypatch) ->
     assert result.warped is image
 
 
+def test_proposal_only_rejects_out_of_bounds_boundary(monkeypatch) -> None:
+    image = _perspective_doc()
+    invalid_contour = np.array(
+        [[-10, 80], [760, 130], [700, 610], [130, 560]],
+        dtype=np.float32,
+    )
+    monkeypatch.setattr(
+        "uniscan.core.scanner_adapter._opencv_hough_document_detector",
+        lambda _image, **_kwargs: ScanOutput(
+            warped=image,
+            contour=invalid_contour,
+            backend=DETECTOR_BACKEND_OPENCV_HOUGH,
+            detected=True,
+            raw_result=None,
+        ),
+    )
+
+    result = scan_with_document_detector(
+        image,
+        enabled=True,
+        backends=(DETECTOR_BACKEND_OPENCV_HOUGH,),
+        proposal_only=True,
+    )
+
+    assert result.detected is False
+    assert result.contour is None
+    assert result.warped is image
+    assert "rejected invalid boundary" in result.raw_result["errors"][0]
+    assert "source pixel-centre bounds" in result.raw_result["errors"][0]
+
+
 def test_scanner_adapter_prefers_document_inside_artificial_white_canvas() -> None:
     image, document = _document_inside_white_canvas()
 

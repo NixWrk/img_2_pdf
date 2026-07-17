@@ -70,8 +70,14 @@ def _gaussian_blur_1d(values: np.ndarray, *, sigma: float) -> np.ndarray:
     if values.size == 0 or sigma <= 0:
         return values.astype(np.float32, copy=False)
     kernel_size = max(3, int(round(sigma * 6)) | 1)
-    kernel = cv2.getGaussianKernel(kernel_size, sigma).flatten()
-    return np.convolve(values.astype(np.float32), kernel, mode="same")
+    source = values.astype(np.float32, copy=False).reshape(1, -1)
+    return cv2.GaussianBlur(
+        source,
+        (kernel_size, 1),
+        sigmaX=sigma,
+        sigmaY=0,
+        borderType=cv2.BORDER_CONSTANT,
+    ).reshape(-1)
 
 
 def detect_spread_gutter(

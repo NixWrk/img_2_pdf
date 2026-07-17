@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import os
 from pathlib import Path
 from typing import Any, Literal
@@ -8,7 +9,7 @@ from typing import Any, Literal
 import cv2
 import numpy as np
 
-from uniscan.core.geometry import order_quad_points
+from uniscan.core.geometry import order_quad_points, prepare_perspective_warp
 from uniscan.io.loaders import imread_unicode, imwrite_unicode
 
 
@@ -413,12 +414,117 @@ def mode_from_classification(label: str) -> str:
     return "document"
 
 
+def _uint8_histogram(image: np.ndarray) -> np.ndarray:
+    return cv2.calcHist([image], [0], None, [256], [0, 256]).reshape(-1)
+
+
+def _histogram_dominant_fraction(histogram: np.ndarray, sample_count: int) -> float:
+    offsets = np.arange(-32, 33, dtype=np.float32)
+    dominance_kernel = np.exp(-0.5 * (offsets / 8.0) ** 2)
+    dominant_mass = float(np.convolve(histogram, dominance_kernel, mode="full").max())
+    return dominant_mass / sample_count
+
+
+def _histogram_soft_tail_bounds(
+    histogram: np.ndarray,
+    sample_count: int,
+    *,
+    tail_fraction: float = 0.05,
+    trim_fraction: float = 0.0,
+) -> tuple[float, float]:
+    levels = np.arange(256, dtype=np.float64)
+    start_count = sample_count * trim_fraction
+    end_count = sample_count * (trim_fraction + tail_fraction)
+    low_previous = np.cumsum(histogram, dtype=np.float64) - histogram
+    low_weights = np.clip(end_count - low_previous, 0.0, histogram) - np.clip(
+        start_count - low_previous, 0.0, histogram
+    )
+    reversed_histogram = histogram[::-1]
+    high_previous = np.cumsum(reversed_histogram, dtype=np.float64) - reversed_histogram
+    high_weights = np.clip(end_count - high_previous, 0.0, reversed_histogram) - np.clip(
+        start_count - high_previous, 0.0, reversed_histogram
+    )
+    low = float(np.dot(levels, low_weights) / low_weights.sum())
+    high = float(np.dot(levels[::-1], high_weights) / high_weights.sum())
+    return low, high
+
+
+def _unit_ramp(value: float, start: float, end: float) -> float:
+    return min(1.0, max(0.0, (value - start) / (end - start)))
+
+
 def _normalize_luminance(gray: np.ndarray, strength: float = 1.0) -> np.ndarray:
+    if not isinstance(gray, np.ndarray) or gray.ndim != 2 or gray.size == 0:
+        raise ValueError("Luminance normalization requires a non-empty 2D image.")
+    if gray.dtype != np.uint8:
+        raise ValueError("Luminance normalization requires a uint8 image.")
+    try:
+        strength_value = float(strength)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Luminance normalization strength must be finite.") from exc
+    if not math.isfinite(strength_value):
+        raise ValueError("Luminance normalization strength must be finite.")
+
+    minimum_contrast_span = 8.0
+    full_normalization_span = 64.0
+    dominant_noop_fraction = 0.95
+    dominant_full_fraction = 0.80
+    raw_histogram = _uint8_histogram(gray)
+    dominant_fraction = _histogram_dominant_fraction(raw_histogram, gray.size)
+    raw_low, raw_high = _histogram_soft_tail_bounds(
+        raw_histogram, gray.size, tail_fraction=0.10, trim_fraction=0.05
+    )
+    raw_contrast_span = raw_high - raw_low
+    raw_span_weight = _unit_ramp(raw_contrast_span, minimum_contrast_span, full_normalization_span)
+    dominance_weight = _unit_ramp(
+        dominant_noop_fraction - dominant_fraction,
+        0.0,
+        dominant_noop_fraction - dominant_full_fraction,
+    )
+    normalization_weight = raw_span_weight * dominance_weight
+    if normalization_weight <= 0.0:
+        return gray.copy()
+
     sigma = max(12.0, min(gray.shape[:2]) / 22.0)
-    background = cv2.GaussianBlur(gray, (0, 0), sigmaX=sigma, sigmaY=sigma)
-    background = np.maximum(background, 1)
-    normalized = cv2.divide(gray, background, scale=220.0 + 20.0 * strength)
-    return cv2.normalize(normalized, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    background_fixed = gray.astype(np.uint16)
+    np.left_shift(background_fixed, 8, out=background_fixed)
+    cv2.GaussianBlur(background_fixed, (0, 0), sigmaX=sigma, sigmaY=sigma, dst=background_fixed)
+    minimum_background_level = 64
+    background_scale = (255 - minimum_background_level) / 255.0
+    cv2.multiply(background_fixed, background_scale, dst=background_fixed, dtype=cv2.CV_16U)
+    cv2.add(background_fixed, minimum_background_level << 8, dst=background_fixed)
+    target_luminance = min(255.0, max(1.0, 220.0 + 20.0 * strength_value))
+    corrected = cv2.divide(gray, background_fixed, scale=target_luminance * 256.0, dtype=cv2.CV_8U)
+    del background_fixed
+
+    corrected_histogram = _uint8_histogram(corrected)
+    low, high = _histogram_soft_tail_bounds(corrected_histogram, corrected.size)
+    contrast_span = float(high - low)
+    normalization_weight *= _unit_ramp(
+        contrast_span, minimum_contrast_span, full_normalization_span
+    )
+    if normalization_weight <= 0.0:
+        return gray.copy()
+
+    levels = np.arange(256, dtype=np.float32)
+    # Local division already corrects illumination. Do not amplify its integer
+    # quantization a second time in the global tone curve.
+    output_span = min(target_luminance, contrast_span)
+    output_floor = target_luminance - output_span
+    lookup = np.clip(output_floor + (levels - low) * (output_span / contrast_span), 0, 255).astype(
+        np.uint8
+    )
+    normalized = cv2.LUT(corrected, lookup, dst=corrected)
+    if normalization_weight < 1.0:
+        cv2.addWeighted(
+            gray,
+            1.0 - normalization_weight,
+            normalized,
+            normalization_weight,
+            0,
+            dst=normalized,
+        )
+    return normalized
 
 
 def _clahe_luminance(image_rgb: np.ndarray, clip_limit: float) -> np.ndarray:
@@ -522,26 +628,13 @@ def warp_document_rgb(
     padding_percent: float = 0.0,
 ) -> tuple[np.ndarray, tuple[int, int]]:
     image_height, image_width = image_rgb.shape[:2]
-    ordered = _order_quad(_expand_quad(quad, image_width, image_height, padding_percent))
-    top_width = np.linalg.norm(ordered[1] - ordered[0])
-    bottom_width = np.linalg.norm(ordered[2] - ordered[3])
-    left_height = np.linalg.norm(ordered[3] - ordered[0])
-    right_height = np.linalg.norm(ordered[2] - ordered[1])
-
-    width = max(1, int(round(max(top_width, bottom_width))))
-    height = max(1, int(round(max(left_height, right_height))))
-    destination = np.array(
-        [
-            [0, 0],
-            [width - 1, 0],
-            [width - 1, height - 1],
-            [0, height - 1],
-        ],
-        dtype=np.float32,
+    ordered, destination, output_size = prepare_perspective_warp(
+        image_rgb,
+        _expand_quad(quad, image_width, image_height, padding_percent),
     )
-    transform = cv2.getPerspectiveTransform(ordered.astype(np.float32), destination)
-    warped = cv2.warpPerspective(image_rgb, transform, (width, height), flags=cv2.INTER_CUBIC)
-    return warped, (width, height)
+    transform = cv2.getPerspectiveTransform(ordered, destination)
+    warped = cv2.warpPerspective(image_rgb, transform, output_size, flags=cv2.INTER_CUBIC)
+    return warped, output_size
 
 
 class OfficeLensOnnx:

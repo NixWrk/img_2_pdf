@@ -1,6 +1,7 @@
 import numpy as np
 
 from uniscan.core.spread import (
+    _gaussian_blur_1d,
     detect_spread_gutter,
     split_spread_accurate,
     split_spread_analyzed,
@@ -110,3 +111,23 @@ def test_analyzed_split_reports_conservative_no_gutter_decision() -> None:
     assert result.pages == (image,)
     assert result.candidate is None
     assert result.reason == "no_confident_gutter"
+
+
+def test_smoothing_preserves_shape_when_kernel_exceeds_search_band() -> None:
+    profile = np.arange(9, dtype=np.float32)
+
+    smoothed = _gaussian_blur_1d(profile, sigma=2.0)
+
+    assert smoothed.shape == profile.shape
+    assert np.isfinite(smoothed).all()
+
+
+def test_minimum_supported_spread_sizes_do_not_raise() -> None:
+    for height in range(16, 20):
+        minimum_width = int(np.ceil(height * 1.3))
+        for width in (minimum_width, minimum_width + 1):
+            image = np.zeros((height, width, 3), dtype=np.uint8)
+
+            candidate = detect_spread_gutter(image)
+
+            assert candidate is None or 0 <= candidate.x < width
