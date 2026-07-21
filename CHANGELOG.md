@@ -44,6 +44,33 @@ All notable changes to UniScan are documented here. The project follows Semantic
 
 ### Changed
 
+- Camera frame acquisition now runs on a background stream: the preview never blocks the UI on
+  device reads, every shutter press waits for a guaranteed-fresh frame instead of stale
+  driver-buffer frames or blind warm-up reads, and captures reuse the already-open camera with
+  the live preview kept running.
+- Windows camera capture now prefers Media Foundation with hardware transforms disabled, falling
+  back to DirectShow and then the platform default. This turns a 28-second device open into a
+  fraction of a second and triples the streamed frame rate; the DirectShow path additionally
+  requests MJPG after the frame size and never sets the frame rate afterwards, both of which
+  silently forced uncompressed low-rate video.
+- Preview and capture now share one resolution, so pressing the shutter stores exactly the frame
+  that was on screen at that moment: no device reconfiguration, no warm-up, no shutter lag.
+- On first use of a camera UniScan measures each capture mode's real frame rate, caches the
+  result per device, and starts on the largest mode that still runs in real time. The capture
+  menu lists every mode with its measured rate and marks the slow ones, so choosing maximum
+  resolution over responsiveness stays possible and its cost is visible.
+- Live edge detection is off by default and its worker no longer runs while hidden: the current
+  detector proposes an axis-aligned box rather than a true perspective quad, so the preview no
+  longer draws boundaries. Per-page boundary detection after capture is unchanged.
+- The camera health label reports the streamed resolution, measured fps, and the capture size the
+  device actually grants; the camera opens asynchronously with an "Opening..." state, and
+  `doctor --camera` now also reports measured frame rate and the selected backend.
+- The camera moved from a separate window into a main-window tab that starts its preview on
+  entry and releases the device on exit; device, capture-resolution, and burst settings now live
+  inline on that tab (the Camera Configuration dialog is gone), and single capture runs on the
+  same cancellable background job as burst, so detection no longer freezes the UI.
+- Captures keep you on the Camera tab for shot-after-shot scanning; camera enumeration and
+  resolution changes moved off the UI thread.
 - GUI PDF import now streams pages through disk staging, while full-resolution Apply processing
   runs in a cancellable worker and commits page generations transactionally with stale-revision
   and rollback checks.

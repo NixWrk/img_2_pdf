@@ -7,6 +7,7 @@ import json
 import platform
 import sys
 import tempfile
+import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -24,6 +25,39 @@ RUNTIME_MODULES = (
     "pypdfium2",
     "tkinterdnd2",
 )
+
+
+CAMERA_FPS_SAMPLE_SEC = 1.5
+
+
+def _backend_name(api_preference: int | None) -> str | None:
+    """Human-readable OpenCV backend name, when one is selected."""
+    if api_preference is None:
+        return None
+    try:
+        import cv2
+
+        names = {cv2.CAP_MSMF: "MSMF", cv2.CAP_DSHOW: "DirectShow", cv2.CAP_V4L2: "V4L2"}
+    except Exception:
+        return None
+    return names.get(api_preference, str(api_preference))
+
+
+def _measure_stream_fps(camera: CameraService) -> float | None:
+    """Briefly run the frame stream and report its measured rate."""
+    try:
+        camera.start_stream()
+        deadline = time.monotonic() + CAMERA_FPS_SAMPLE_SEC
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+        return camera.measured_fps
+    except Exception:
+        return None
+    finally:
+        try:
+            camera.stop_stream()
+        except Exception:
+            pass
 
 
 @dataclass(slots=True, frozen=True)
@@ -172,6 +206,14 @@ def run_diagnostics(
             if frame is None:
                 raise RuntimeError("camera opened but returned no frame")
             detail = f"index {camera_index}, frame {frame.shape[1]}x{frame.shape[0]}"
+            # Sample the live stream: frame rate is what makes the preview
+            # usable, and it is the first thing to check on a slow camera.
+            fps = _measure_stream_fps(camera)
+            if fps is not None:
+                detail += f", {fps:.0f} fps"
+            backend = _backend_name(camera.api_preference)
+            if backend:
+                detail += f", backend {backend}"
             checks.append(DiagnosticCheck("camera", True, detail))
         except Exception as exc:
             checks.append(DiagnosticCheck("camera", False, str(exc)))

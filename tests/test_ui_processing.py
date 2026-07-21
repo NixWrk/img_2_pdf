@@ -21,8 +21,10 @@ from uniscan.session import (
     create_persistent_session,
     load_or_create_session,
 )
+from uniscan.io.camera_service import CameraMode
 from uniscan.storage import PageStore
 from uniscan.ui.app import (
+    RESOLUTIONS,
     UnifiedScanApp,
     _ApplyPageSnapshot,
     _StagedAppliedPage,
@@ -837,7 +839,10 @@ def test_burst_releases_existing_handle_and_commits_staged_raw_frames(
             delay_sec,
             cancel_cb,
             on_progress,
+            first_frame,
         ):
+            # Legacy path: no live stream, so there is no press-time frame.
+            assert first_frame is None
             assert shots == 2
             assert delay_sec == 0.0
             assert cancel_cb() is False
@@ -908,6 +913,283 @@ def test_closing_camera_cancels_and_releases_active_burst() -> None:
     assert active.released is True
     assert app.burst_camera is active
     assert app._burst_is_active() is True
+
+
+def test_burst_reuses_streaming_camera_and_keeps_preview(tmp_path) -> None:
+    app = _app_for_processing()
+    app.camera_shots_var = _Var(2)
+    app.camera_delay_var = _Var(0.0)
+    app.camera_index_var = _Var(3)
+    app.camera_resolution = (640, 480)
+    app.preview_job = "tick"
+    stop_calls: list[bool] = []
+    app.stop_preview = lambda: stop_calls.append(True)
+    app._update_camera_health = lambda: None
+    app.session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
+    app.refresh_page_list = lambda keep_index=None: None
+    statuses: list[str] = []
+    app._set_status = statuses.append
+
+    frames = [
+        np.full((8, 9, 3), 11, dtype=np.uint8),
+        np.full((8, 9, 3), 22, dtype=np.uint8),
+    ]
+
+    class StreamingCamera:
+        index = 3
+        resolution = (640, 480)
+        released = False
+
+        def is_streaming(self) -> bool:
+            return True
+
+        def latest_frame(self):
+            return frames[0]
+
+        def iter_burst(self, *, shots, delay_sec, cancel_cb, on_progress, first_frame):
+            assert shots == 2
+            assert delay_sec == 0.0
+            assert cancel_cb() is False
+            # The shutter frame is grabbed on the UI thread at press time.
+            assert first_frame is frames[0]
+            for frame_index, frame in enumerate(frames, start=1):
+                on_progress(frame_index, shots)
+                yield frame_index, frame
+
+        def release(self) -> None:
+            self.released = True
+
+    camera = StreamingCamera()
+    app.camera = camera
+
+    def process_frame(frame, base_name):
+        warped = np.full_like(frame, 255)
+        contour = np.float32([[0, 0], [8, 0], [8, 7], [0, 7]])
+        return [PageResult(base_name, frame, warped, warped, contour, "cv_hybrid", True, None)]
+
+    app._process_capture_frame = process_frame
+
+    def run_job(_name, worker, on_done, *, on_error=None):
+        try:
+            payload = worker(lambda **_kwargs: None, lambda: False)
+            on_done(payload)
+        except Exception:
+            if on_error is not None:
+                on_error()
+            raise
+        return True
+
+    app._start_background_job = run_job
+
+    app.capture_burst()
+
+    # The open streaming camera is reused: never released, preview untouched.
+    assert app.camera is camera
+    assert camera.released is False
+    assert stop_calls == []
+    assert app.burst_camera is None
+    assert app._burst_is_active() is False
+    assert len(app.session.entries) == 2
+    np.testing.assert_array_equal(app.session.entries[0].original_image, frames[0])
+    assert statuses[-1].startswith("Burst captured 2 page(s)")
+
+
+def test_shared_burst_camera_requires_matching_streaming_camera() -> None:
+    app = _app_for_processing()
+
+    class Cam:
+        def __init__(self, index, resolution, *, streaming=True):
+            self.index = index
+            self.resolution = resolution
+            self._streaming = streaming
+
+        def is_streaming(self) -> bool:
+            return self._streaming
+
+    app.camera = None
+    assert app._shared_burst_camera(3, (640, 480)) is None
+    app.camera = Cam(2, (640, 480))
+    assert app._shared_burst_camera(3, (640, 480)) is None
+    app.camera = Cam(3, (1280, 720))
+    assert app._shared_burst_camera(3, (640, 480)) is None
+    app.camera = Cam(3, (640, 480), streaming=False)
+    assert app._shared_burst_camera(3, (640, 480)) is None
+    match = Cam(3, (640, 480))
+    app.camera = match
+    assert app._shared_burst_camera(3, (640, 480)) is match
+
+
+def test_grab_still_frame_takes_the_on_screen_frame() -> None:
+    app = _app_for_processing()
+    on_screen = np.full((4, 4, 3), 7, dtype=np.uint8)
+
+    class StreamCam:
+        def latest_frame(self):
+            return on_screen
+
+        def read_frame(self):
+            raise AssertionError("a live stream must supply the shot directly")
+
+    # No waiting and no device reconfiguration: the shot is what was on screen.
+    assert app._grab_still_frame(StreamCam()) is on_screen
+
+    stale = np.full((4, 4, 3), 3, dtype=np.uint8)
+
+    class DirectCam:
+        def latest_frame(self):
+            return None
+
+        def read_frame(self):
+            return stale
+
+    assert app._grab_still_frame(DirectCam()) is stale
+
+
+def test_camera_modes_round_trip_through_the_cache(tmp_path) -> None:
+    app = _app_for_processing()
+    app.autosave_path = tmp_path / "state" / "autosave.json"
+    modes = [
+        CameraMode(requested=(3264, 2448), granted=(2304, 1536), fps=2.0),
+        CameraMode(requested=(1920, 1080), granted=(1920, 1080), fps=30.0),
+    ]
+
+    app._save_camera_modes(0, modes)
+    app._save_camera_modes(1, [CameraMode((640, 480), (640, 480), 30.0)])
+
+    assert app._load_camera_modes(0) == modes
+    assert app._load_camera_modes(1)[0].granted == (640, 480)
+    assert app._load_camera_modes(7) == []  # unmeasured device
+
+    # A cached device selects its best real-time mode without re-probing.
+    app.camera_resolution = (3264, 2448)
+    app._camera_resolution_chosen = False
+    assert app._apply_cached_camera_modes(0) is True
+    assert app.camera_resolution == (1920, 1080)
+
+    # An explicit user choice survives the cache being applied again.
+    app.camera_resolution = (2304, 1536)
+    app._camera_resolution_chosen = True
+    assert app._apply_cached_camera_modes(0) is True
+    assert app.camera_resolution == (2304, 1536)
+
+
+def test_failed_mode_detection_opens_once_instead_of_looping() -> None:
+    app = _app_for_processing()
+    app.camera_index_var = _Var(0)
+    app.camera_modes = []
+    app._camera_modes_probed_index = None
+    app._camera_opening = False
+    app._camera_modes_probing = False
+    app._burst_is_active = lambda: False
+    app._apply_cached_camera_modes = lambda _index: False
+    app._set_status = lambda _text: None
+
+    detections: list[object] = []
+
+    def fake_detect(*, on_done=None) -> None:
+        detections.append(on_done)
+        # A device that cannot be measured still records the attempt.
+        app._camera_modes_probed_index = 0
+        if on_done is not None:
+            on_done()
+
+    app._detect_camera_modes_async = fake_detect
+    opened: list[bool] = []
+    app._camera_open_generation = 0
+    app._update_camera_health = lambda *_a, **_k: None
+    app._show_preview_placeholder = lambda _text: None
+    app.after = lambda _delay, _cb: opened.append(True) or "job"
+    app._max_camera_resolution = lambda: (1920, 1080)
+
+    app._open_camera_async()
+
+    # Detection is attempted once; the retry then proceeds to open the device.
+    assert len(detections) == 1
+    assert opened == [True]
+
+
+def test_camera_modes_cache_ignores_corrupt_entries(tmp_path) -> None:
+    app = _app_for_processing()
+    app.autosave_path = tmp_path / "state" / "autosave.json"
+    app.autosave_path.parent.mkdir(parents=True)
+    app._camera_modes_path.write_text('{"0": [{"granted": [1, 2]}]}', encoding="utf-8")
+
+    assert app._load_camera_modes(0) == []
+    assert app._apply_cached_camera_modes(0) is False
+
+
+def test_resolution_menu_shows_measured_modes_and_parses_their_labels() -> None:
+    app = _app_for_processing()
+    app.camera_modes = [
+        CameraMode(requested=(3264, 2448), granted=(2304, 1536), fps=2.0),
+        CameraMode(requested=(1920, 1080), granted=(1920, 1080), fps=30.0),
+    ]
+    app.camera_resolution = (1920, 1080)
+
+    values = app._resolution_menu_values()
+    assert values == ["2304x1536 - 2.0 fps (slow)", "1920x1080 - 30 fps"]
+    assert app._resolution_menu_selection() == "1920x1080 - 30 fps"
+
+    # Selecting a labelled mode applies just its resolution.
+    applied: list[tuple[int, int]] = []
+    app._burst_is_active = lambda: False
+    app._set_status = lambda _text: None
+    app._camera_opening = True  # stop before the async apply, keep the parse
+    app._apply_resolution_string("2304x1536 - 2.0 fps (slow)")
+    assert app._camera_resolution_chosen is True
+    del applied
+
+    # Without measurements the plain preset list is offered.
+    app.camera_modes = []
+    assert app._resolution_menu_values() == RESOLUTIONS
+    assert app._resolution_menu_selection() == "1920x1080"
+
+
+def test_capture_one_runs_on_shared_capture_job() -> None:
+    app = _app_for_processing()
+    calls: list[tuple[int, float]] = []
+    app._start_capture_job = lambda *, shots, delay_sec: calls.append((shots, delay_sec))
+
+    app.capture_one()
+
+    assert calls == [(1, 0.0)]
+
+
+def test_capture_job_skips_while_previous_job_runs() -> None:
+    app = _app_for_processing()
+    app.job_thread = object()
+    statuses: list[str] = []
+    app._set_status = statuses.append
+
+    app._start_capture_job(shots=1, delay_sec=0.0)
+
+    assert statuses and "Busy" in statuses[-1]
+
+
+def test_shared_burst_camera_requires_the_capture_resolution() -> None:
+    app = _app_for_processing()
+
+    class Cam:
+        def __init__(self, index, resolution, *, streaming=True):
+            self.index = index
+            self.resolution = resolution
+            self._streaming = streaming
+
+        def is_streaming(self) -> bool:
+            return self._streaming
+
+    # Preview and capture share one resolution, so a stream already at the
+    # capture size is exactly what a shot should be taken from.
+    match = Cam(3, (3264, 2448))
+    app.camera = match
+    assert app._shared_burst_camera(3, (3264, 2448)) is match
+
+    app.camera = Cam(3, (1280, 720))
+    assert app._shared_burst_camera(3, (3264, 2448)) is None
+    app.camera = Cam(4, (3264, 2448))
+    assert app._shared_burst_camera(3, (3264, 2448)) is None
+    app.camera = Cam(3, (3264, 2448), streaming=False)
+    assert app._shared_burst_camera(3, (3264, 2448)) is None
 
 
 def test_camera_resolution_commits_only_after_success(monkeypatch) -> None:

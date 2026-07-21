@@ -66,7 +66,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.preview_mode_var.get() == "Processed"
         assert app.page_preview_after_frame.winfo_manager() == "grid"
         assert app.page_preview_before_frame.winfo_manager() == ""
-        assert app.tabs._name_list == [app.tab_review_name]
+        assert app.tabs._name_list == [app.tab_review_name, app.tab_camera_name]
         app.preprocess_illumination_var.set(True)
         assert app._current_preprocess_settings().correct_illumination is True
         assert app._drag_drop_error is None
@@ -411,15 +411,20 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         resized_preview_size = app.page_preview_after_photo.cget("size")
         assert resized_preview_size[0] > initial_preview_size[0]
         assert resized_preview_size[1] > initial_preview_size[1]
+        # Camera lives on an in-window tab now; switching to it starts the
+        # preview and leaving it releases the device.
+        preview_calls: list[bool] = []
+        app.start_preview = lambda: preview_calls.append(True)
         app.toolbar_camera_button.invoke()
         app.update()
-        assert app.camera_window is not None
-        assert app.camera_window.title() == "Camera"
-        assert app.tabs._name_list == [app.tab_review_name]
+        assert app.tabs.get() == app.tab_camera_name
+        assert app.tabs._name_list == [app.tab_review_name, app.tab_camera_name]
+        assert preview_calls == [True]
         released: list[bool] = []
         app.camera = SimpleNamespace(release=lambda: released.append(True))
-        app.camera_close_callback()
-        assert app.camera_window is None
+        app.go_to_review_tab()
+        app.update()
+        assert app.tabs.get() == app.tab_review_name
         assert app.camera is None
         assert released == [True]
         app.update()

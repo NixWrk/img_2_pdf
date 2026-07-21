@@ -61,6 +61,7 @@ from uniscan.core.scanner_adapter import (
 from uniscan.core.spread import split_spread_accurate
 from uniscan.diagnostics import run_diagnostics
 from uniscan.io import CameraService
+from uniscan.io.camera_service import CameraMode, best_realtime_mode
 from uniscan.io.loaders import (
     IMG_EXTS,
     PDF_EXTS,
@@ -91,7 +92,18 @@ from uniscan.ui.import_sources import (
 from uniscan.ui.live_detect import DEFAULT_LIVE_BACKEND, LIVE_BACKEND_CHOICES, LiveContourDetector
 from uniscan.ui.overlays import draw_quad_overlay, scale_contour
 
-PREVIEW_WAIT_MS = 66
+# Poll faster than the camera delivers: a tick without a new frame costs
+# almost nothing, while Tk's ~15 ms timer granularity on Windows would
+# otherwise round a frame-rate-matched interval up and drop every third frame.
+PREVIEW_WAIT_MS = 12
+# Below this measured rate the preview feels like a slideshow and shots carry
+# visible latency, so the status suggests a smaller capture size.
+LOW_PREVIEW_FPS = 10.0
+CAMERA_HEALTH_REFRESH_SEC = 1.0
+FRESH_FRAME_TIMEOUT_SEC = 5.0
+# Preview and capture share one resolution so a shot is the frame already on
+# screen; see _default_camera_resolution for why 1080p is the default.
+DEFAULT_CAPTURE_RESOLUTION = (1920, 1080)
 REVIEW_PREVIEW_DEBOUNCE_MS = 120
 REVIEW_RESIZE_DEBOUNCE_MS = 90
 RESOLUTIONS = [
@@ -530,6 +542,15 @@ class UnifiedScanApp(ctk.CTk):
         self.burst_camera: CameraService | None = None
         self._burst_capture_active = False
         self._camera_state_lock = threading.RLock()
+        self._camera_opening = False
+        self._camera_open_generation = 0
+        self._preview_last_seq = 0
+        self._camera_health_refreshed_at = 0.0
+        self._effective_capture_resolution: tuple[int, int] | None = None
+        self.camera_modes: list[CameraMode] = []
+        self._camera_modes_probing = False
+        self._camera_modes_probed_index: int | None = None
+        self._camera_resolution_chosen = False
         self.processing_cache = ProcessingStageCache(
             self.autosave_path.parent / "stage_cache",
             max_bytes=512 * 1024 * 1024,
@@ -553,7 +574,6 @@ class UnifiedScanApp(ctk.CTk):
         self.review_preview_generation = 0
         self.review_processing_window: ctk.CTkFrame | None = None
         self.export_dialog_window: ctk.CTkToplevel | None = None
-        self.camera_window: ctk.CTkToplevel | None = None
         self.inline_editor_host: ctk.CTkFrame | None = None
         self.inline_editor_close_callback = None
         self.corner_editor_window: ctk.CTkFrame | None = None
@@ -623,7 +643,7 @@ class UnifiedScanApp(ctk.CTk):
         self.import_pdf_dpi_var = tk.IntVar(value=import_pdf_dpi)
         self.import_two_page_mode_var = tk.BooleanVar(value=import_split_spreads)
         self.import_selected_files: list[str] = []
-        self.live_edge_var = tk.BooleanVar(value=True)
+        self.live_edge_var = tk.BooleanVar(value=False)
         self.live_backend_var = tk.StringVar(value="opencv_quad")
         self.live_status_var = tk.StringVar(value="Detector: Idle")
         self.export_scope_var = tk.StringVar(value="All pages")
@@ -644,6 +664,7 @@ class UnifiedScanApp(ctk.CTk):
         self.autosave_job: str | None = None
         self._last_autosave_signature: tuple[object, ...] | None = None
         self.tab_review_name = "Workspace"
+        self.tab_camera_name = "Camera"
 
         self._build_ui()
         self._bind_shortcuts()
@@ -718,7 +739,7 @@ class UnifiedScanApp(ctk.CTk):
             width=90,
             fg_color="transparent",
             border_width=1,
-            command=self.open_camera_window,
+            command=self.go_to_camera_tab,
         )
         self.toolbar_camera_button.pack(side=ctk.LEFT, padx=4, pady=8)
         self.toolbar_import_options_button = ctk.CTkButton(
@@ -765,44 +786,39 @@ class UnifiedScanApp(ctk.CTk):
         )
         self.cancel_task_button.pack(side=ctk.RIGHT, padx=8, pady=5)
 
-        self.tabs = ctk.CTkTabview(container)
+        self.tabs = ctk.CTkTabview(container, command=self._sync_camera_to_active_tab)
         self.tabs.pack(fill=ctk.BOTH, expand=True, padx=12, pady=(4, 8))
 
         self.pages_tab = self.tabs.add(self.tab_review_name)
+        self.camera_tab = self.tabs.add(self.tab_camera_name)
 
         self._build_pages_tab(self.pages_tab)
+        self._build_capture_tab(self.camera_tab)
         self.tabs.set(self.tab_review_name)
 
-    def open_camera_window(self) -> None:
-        if self.camera_window is not None:
-            try:
-                if self.camera_window.winfo_exists():
-                    self.camera_window.lift()
-                    return
-            except tk.TclError:
-                pass
+    def go_to_camera_tab(self) -> None:
+        """Switch to the in-window Camera tab; the preview starts by itself."""
+        self.tabs.set(self.tab_camera_name)
+        self._sync_camera_to_active_tab()
 
-        window = ctk.CTkToplevel(self)
-        self.camera_window = window
-        window.title("Camera")
-        window.geometry("1100x760")
-        window.minsize(900, 620)
-        window.transient(self)
-        body = ctk.CTkFrame(window)
-        body.pack(fill=ctk.BOTH, expand=True)
-        self._build_capture_tab(body)
-        self._update_camera_health()
+    def _sync_camera_to_active_tab(self) -> None:
+        """Start the camera on the Camera tab, release it everywhere else.
 
-        def close_window() -> None:
+        Called both by the tab bar (user click) and after programmatic
+        ``tabs.set`` calls, which do not fire the tab command.
+        """
+        try:
+            on_camera_tab = self.tabs.get() == self.tab_camera_name
+        except tk.TclError:
+            on_camera_tab = False
+        if on_camera_tab:
+            self.start_preview()
+        elif (
+            self.camera is not None
+            or self.__dict__.get("_camera_opening", False)
+            or self.preview_job is not None
+        ):
             self.close_camera()
-            self.camera_window = None
-            self.camera_health_label = None
-            self.preview_label = None
-            window.destroy()
-
-        self.camera_close_callback = close_window
-        window.protocol("WM_DELETE_WINDOW", close_window)
-        window.lift()
 
     def _build_capture_tab(self, tab: ctk.CTkFrame) -> None:
         tab.grid_columnconfigure(0, weight=0)
@@ -812,83 +828,75 @@ class UnifiedScanApp(ctk.CTk):
         controls = ctk.CTkScrollableFrame(tab, width=340)
         controls.grid(row=0, column=0, sticky="ns", padx=(10, 8), pady=10)
 
-        ctk.CTkLabel(controls, text="Camera index").pack(anchor="w", padx=10, pady=(10, 4))
-        self.camera_index_entry = ctk.CTkEntry(
-            controls, textvariable=self.camera_index_var, width=120
-        )
-        self.camera_index_entry.pack(anchor="w", padx=10)
-
-        row_open = ctk.CTkFrame(controls, fg_color="transparent")
-        row_open.pack(fill=ctk.X, padx=10, pady=(8, 2))
-        ctk.CTkButton(row_open, text="Open", width=90, command=self.open_camera).pack(side=ctk.LEFT)
-        ctk.CTkButton(row_open, text="Close", width=90, command=self.close_camera).pack(
-            side=ctk.LEFT, padx=6
-        )
         self.camera_health_label = ctk.CTkLabel(
             controls,
             textvariable=self.camera_health_var,
             text_color="#6c757d",
             anchor="w",
         )
-        self.camera_health_label.pack(fill=ctk.X, padx=10, pady=(2, 6))
+        self.camera_health_label.pack(fill=ctk.X, padx=10, pady=(10, 6))
 
-        ctk.CTkButton(controls, text="Configure Camera", command=self.configure_camera_event).pack(
-            fill=ctk.X,
-            padx=10,
-            pady=(6, 8),
+        self.capture_one_button = ctk.CTkButton(
+            controls,
+            text="Capture Page",
+            height=40,
+            fg_color="#2f855a",
+            hover_color="#276749",
+            command=self.capture_one,
         )
+        self.capture_one_button.pack(fill=ctk.X, padx=10, pady=(0, 8))
+
+        row_burst = ctk.CTkFrame(controls, fg_color="transparent")
+        row_burst.pack(fill=ctk.X, padx=10, pady=(0, 2))
+        shots_column = ctk.CTkFrame(row_burst, fg_color="transparent")
+        shots_column.pack(side=ctk.LEFT)
+        ctk.CTkLabel(shots_column, text=f"Shots (1-{CameraService.MAX_BURST_SHOTS})").pack(
+            anchor="w"
+        )
+        self.shots_entry = ctk.CTkEntry(shots_column, textvariable=self.camera_shots_var, width=70)
+        self.shots_entry.pack(anchor="w")
+        delay_column = ctk.CTkFrame(row_burst, fg_color="transparent")
+        delay_column.pack(side=ctk.LEFT, padx=(10, 0))
+        ctk.CTkLabel(delay_column, text="Delay (sec)").pack(anchor="w")
+        self.delay_entry = ctk.CTkEntry(delay_column, textvariable=self.camera_delay_var, width=70)
+        self.delay_entry.pack(anchor="w")
+        ctk.CTkButton(
+            row_burst,
+            text="Capture Burst",
+            width=120,
+            command=self.capture_burst,
+        ).pack(side=ctk.LEFT, padx=(10, 0), pady=(16, 0))
+
+        ctk.CTkButton(
+            controls,
+            text="Open Workspace",
+            fg_color="transparent",
+            border_width=1,
+            command=self.go_to_review_tab,
+        ).pack(fill=ctk.X, padx=10, pady=(8, 10))
 
         ctk.CTkLabel(
             controls,
-            text="Capture adds pages to the workspace.\nProcessing stays non-destructive until applied.",
+            text="Captured pages land in the Workspace immediately.\n"
+            "Processing stays non-destructive until applied.",
             justify="left",
             anchor="w",
         ).pack(fill=ctk.X, padx=10, pady=(0, 8))
 
-        ctk.CTkLabel(controls, text=f"Burst shots (1-{CameraService.MAX_BURST_SHOTS})").pack(
-            anchor="w", padx=10, pady=(4, 2)
-        )
-        self.shots_entry = ctk.CTkEntry(controls, textvariable=self.camera_shots_var, width=120)
-        self.shots_entry.pack(anchor="w", padx=10)
-
-        ctk.CTkLabel(controls, text="Delay (sec)").pack(anchor="w", padx=10, pady=(4, 2))
-        self.delay_entry = ctk.CTkEntry(controls, textvariable=self.camera_delay_var, width=120)
-        self.delay_entry.pack(anchor="w", padx=10, pady=(0, 8))
-
-        row_preview = ctk.CTkFrame(controls, fg_color="transparent")
-        row_preview.pack(fill=ctk.X, padx=10, pady=(6, 4))
-        ctk.CTkButton(
-            row_preview, text="Start Preview", width=120, command=self.start_preview
-        ).pack(side=ctk.LEFT)
-        ctk.CTkButton(row_preview, text="Stop", width=70, command=self.stop_preview).pack(
-            side=ctk.LEFT,
-            padx=6,
-        )
-
-        row_capture = ctk.CTkFrame(controls, fg_color="transparent")
-        row_capture.pack(fill=ctk.X, padx=10, pady=(4, 10))
-        ctk.CTkButton(row_capture, text="Capture One", width=120, command=self.capture_one).pack(
-            side=ctk.LEFT
-        )
-        ctk.CTkButton(
-            row_capture, text="Capture Burst", width=120, command=self.capture_burst
-        ).pack(
-            side=ctk.LEFT,
-            padx=6,
-        )
-        ctk.CTkButton(row_capture, text="Workspace", width=90, command=self.go_to_review_tab).pack(
-            side=ctk.LEFT
-        )
-
+        # Live edge detection is off by default: it currently proposes an
+        # axis-aligned box rather than a true perspective quad, so drawing it
+        # over the preview misleads more than it helps. Page boundaries are
+        # still detected per page after capture, in the workspace.
         live_edge_box = ctk.CTkFrame(controls)
         live_edge_box.pack(fill=ctk.X, padx=10, pady=(8, 4))
-        ctk.CTkLabel(live_edge_box, text="Live edge detection").pack(
+        ctk.CTkLabel(live_edge_box, text="Live edge detection (experimental)").pack(
             anchor="w", padx=8, pady=(6, 2)
         )
         ctk.CTkCheckBox(
             live_edge_box,
             text="Show document boundaries",
             variable=self.live_edge_var,
+            command=self._on_live_edge_toggle,
         ).pack(anchor="w", padx=8, pady=(0, 4))
         row_backend = ctk.CTkFrame(live_edge_box, fg_color="transparent")
         row_backend.pack(fill=ctk.X, padx=8, pady=(0, 4))
@@ -904,12 +912,72 @@ class UnifiedScanApp(ctk.CTk):
             fill=ctk.X, padx=8, pady=(0, 6)
         )
 
-        ctk.CTkLabel(
-            controls,
-            text="Captured pages are immediately available in Workspace.",
-            justify="left",
-            wraplength=250,
-        ).pack(anchor="w", padx=10, pady=(0, 8))
+        settings_box = ctk.CTkFrame(controls)
+        settings_box.pack(fill=ctk.X, padx=10, pady=(8, 10))
+        ctk.CTkLabel(settings_box, text="Camera settings").pack(anchor="w", padx=8, pady=(6, 2))
+
+        row_index = ctk.CTkFrame(settings_box, fg_color="transparent")
+        row_index.pack(fill=ctk.X, padx=8, pady=(0, 4))
+        ctk.CTkLabel(row_index, text="Device").pack(side=ctk.LEFT, padx=(0, 6))
+        self.camera_index_menu = ctk.CTkOptionMenu(
+            row_index,
+            values=[str(i) for i in range(10)],
+            command=self._on_camera_index_selected,
+            width=70,
+        )
+        self.camera_index_menu.set(str(self.camera_index_var.get()))
+        self.camera_index_menu.pack(side=ctk.LEFT)
+        self.camera_identify_button = ctk.CTkButton(
+            row_index,
+            text="Find cameras",
+            width=110,
+            command=self._identify_cameras_async,
+        )
+        self.camera_identify_button.pack(side=ctk.LEFT, padx=(6, 0))
+
+        row_resolution = ctk.CTkFrame(settings_box, fg_color="transparent")
+        row_resolution.pack(fill=ctk.X, padx=8, pady=(0, 4))
+        ctk.CTkLabel(row_resolution, text="Capture").pack(side=ctk.LEFT, padx=(0, 6))
+        self.camera_resolution_menu = ctk.CTkOptionMenu(
+            row_resolution,
+            values=self._resolution_menu_values(),
+            command=self._apply_resolution_string,
+            width=190,
+        )
+        self.camera_resolution_menu.set(self._resolution_menu_selection())
+        self.camera_resolution_menu.pack(side=ctk.LEFT)
+        self.camera_detect_modes_button = ctk.CTkButton(
+            settings_box,
+            text="Detect capture modes",
+            fg_color="transparent",
+            border_width=1,
+            command=self._detect_camera_modes_async,
+        )
+        self.camera_detect_modes_button.pack(fill=ctk.X, padx=8, pady=(0, 4))
+
+        row_custom = ctk.CTkFrame(settings_box, fg_color="transparent")
+        row_custom.pack(fill=ctk.X, padx=8, pady=(0, 4))
+        self.camera_custom_resolution_var = tk.StringVar(
+            value=f"{self.camera_resolution[0]}x{self.camera_resolution[1]}"
+        )
+        custom_entry = ctk.CTkEntry(
+            row_custom, textvariable=self.camera_custom_resolution_var, width=120
+        )
+        custom_entry.pack(side=ctk.LEFT)
+        ctk.CTkButton(
+            row_custom,
+            text="Set custom",
+            width=110,
+            command=lambda: self._apply_resolution_string(self.camera_custom_resolution_var.get()),
+        ).pack(side=ctk.LEFT, padx=(6, 0))
+
+        ctk.CTkButton(
+            settings_box,
+            text="Reconnect camera",
+            fg_color="transparent",
+            border_width=1,
+            command=self.start_preview,
+        ).pack(fill=ctk.X, padx=8, pady=(2, 8))
 
         preview_area = ctk.CTkFrame(tab)
         preview_area.grid(row=0, column=1, sticky="nsew", padx=(8, 10), pady=10)
@@ -1402,9 +1470,6 @@ class UnifiedScanApp(ctk.CTk):
         if self.export_dialog_window is not None and self.export_dialog_window.winfo_exists():
             self.export_dialog_window.destroy()
         self.export_dialog_window = None
-        if self.camera_window is not None and self.camera_window.winfo_exists():
-            self.camera_window.destroy()
-        self.camera_window = None
         if self.autosave_job is not None:
             self.after_cancel(self.autosave_job)
             self.autosave_job = None
@@ -1512,12 +1577,36 @@ class UnifiedScanApp(ctk.CTk):
         else:
             self._drag_drop_error = None
 
+    def _camera_health_detail(self) -> str | None:
+        camera = self.camera
+        if camera is None:
+            return None
+        resolution = getattr(camera, "effective_resolution", None) or getattr(
+            camera, "resolution", None
+        )
+        parts: list[str] = []
+        if resolution:
+            parts.append(f"{resolution[0]}x{resolution[1]}")
+        fps = getattr(camera, "measured_fps", None)
+        if fps:
+            parts.append(f"{fps:.0f} fps")
+        detail = " @ ".join(parts) if parts else None
+        capture = self.__dict__.get("_effective_capture_resolution") or self.__dict__.get(
+            "camera_resolution"
+        )
+        if detail and capture and tuple(capture) != tuple(resolution or ()):
+            detail += f" - capture {capture[0]}x{capture[1]}"
+        return detail
+
     def _update_camera_health(self, error_text: str | None = None) -> None:
         state = camera_health_state(
             is_open=(self.camera is not None or getattr(self, "burst_camera", None) is not None),
             is_previewing=self.preview_job is not None,
+            is_opening=bool(self.__dict__.get("_camera_opening", False)),
             error_text=error_text,
+            detail=self._camera_health_detail(),
         )
+        self._camera_health_refreshed_at = time.monotonic()
         self.camera_health_var.set(state.label)
         label = getattr(self, "camera_health_label", None)
         if label is not None:
@@ -1529,10 +1618,7 @@ class UnifiedScanApp(ctk.CTk):
 
     def go_to_review_tab(self) -> None:
         self.tabs.set(self.tab_review_name)
-        if self.camera_window is not None:
-            callback = getattr(self, "camera_close_callback", None)
-            if callback is not None:
-                callback()
+        self._sync_camera_to_active_tab()
         self.lift()
 
     def open_import_options_dialog(self) -> None:
@@ -1792,15 +1878,180 @@ class UnifiedScanApp(ctk.CTk):
 
     @staticmethod
     def _default_camera_resolution() -> tuple[int, int]:
-        best = RESOLUTIONS[0]
-        match = re.match(r"^(\d+)x(\d+)$", best.strip())
-        if match is None:
-            return (3264, 2448)
-        return (int(match.group(1)), int(match.group(2)))
+        """Default capture size.
+
+        The camera streams and shoots at one resolution, so this is a quality
+        vs. frame-rate choice. Webcams commonly sustain full frame rate up to
+        1080p and collapse to a few frames per second above it, so 1080p is
+        the highest size that keeps the preview live and shots instant. Larger
+        sizes remain selectable in the camera settings.
+        """
+        return DEFAULT_CAPTURE_RESOLUTION
 
     def _max_camera_resolution(self) -> tuple[int, int]:
         """Return the configured resolution (legacy method name retained)."""
         return getattr(self, "camera_resolution", self._default_camera_resolution())
+
+    # Capture modes -------------------------------------------------------
+
+    @property
+    def _camera_modes_path(self) -> Path:
+        return self.autosave_path.parent / "camera_modes.json"
+
+    def _load_camera_modes(self, index: int) -> list[CameraMode]:
+        """Cached measurements for one device, or an empty list."""
+        try:
+            payload = json.loads(self._camera_modes_path.read_text(encoding="utf-8"))
+            entries = payload[str(index)]
+        except Exception:
+            return []
+        modes: list[CameraMode] = []
+        for entry in entries:
+            try:
+                modes.append(
+                    CameraMode(
+                        requested=(int(entry["requested"][0]), int(entry["requested"][1])),
+                        granted=(int(entry["granted"][0]), int(entry["granted"][1])),
+                        fps=float(entry["fps"]),
+                    )
+                )
+            except Exception:
+                return []  # partial or stale cache: measure again
+        return modes
+
+    def _save_camera_modes(self, index: int, modes: list[CameraMode]) -> None:
+        path = self._camera_modes_path
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                payload = {}
+        except Exception:
+            payload = {}
+        payload[str(index)] = [
+            {"requested": list(mode.requested), "granted": list(mode.granted), "fps": mode.fps}
+            for mode in modes
+        ]
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:
+            pass  # a lost cache only costs one re-probe
+
+    def _resolution_menu_values(self) -> list[str]:
+        modes = self.__dict__.get("camera_modes") or []
+        if modes:
+            return [mode.label for mode in modes]
+        return RESOLUTIONS
+
+    def _resolution_menu_selection(self) -> str:
+        """Menu text for the resolution currently in use."""
+        current = self._max_camera_resolution()
+        for mode in self.__dict__.get("camera_modes") or []:
+            if tuple(mode.requested) == tuple(current) or tuple(mode.granted) == tuple(current):
+                return mode.label
+        return f"{current[0]}x{current[1]}"
+
+    def _refresh_resolution_menu(self) -> None:
+        # __dict__.get, not getattr: tkinter's Misc.__getattr__ recurses on
+        # instances built without a Tk window.
+        menu = self.__dict__.get("camera_resolution_menu")
+        if menu is None:
+            return
+        try:
+            if menu.winfo_exists():
+                menu.configure(values=self._resolution_menu_values())
+                menu.set(self._resolution_menu_selection())
+        except tk.TclError:
+            pass
+
+    def _detect_camera_modes_async(self, *, on_done=None) -> None:
+        """Measure the device's capture modes off the UI thread.
+
+        The device is exclusive, so the live stream is released first; the
+        preview restarts on the chosen mode once the measurements land.
+        """
+        if self.__dict__.get("_camera_modes_probing"):
+            return
+        if self._burst_is_active() or self.__dict__.get("job_thread") is not None:
+            self._set_status("Camera is busy; detect capture modes when it is idle.")
+            return
+        index = int(self.camera_index_var.get())
+        self._camera_modes_probing = True
+        button = self.__dict__.get("camera_detect_modes_button")
+        if button is not None:
+            try:
+                button.configure(state=tk.DISABLED, text="Detecting...")
+            except tk.TclError:
+                button = None
+        was_previewing = self.preview_job is not None
+        self.close_camera()
+        self._set_status(f"Detecting camera {index} capture modes...")
+        found: list[list[CameraMode]] = []
+        progress: list[tuple[int, int]] = []
+
+        def work() -> None:
+            try:
+                found.append(
+                    CameraService.probe_modes(
+                        index=index,
+                        # Tk variables are not thread-safe; the poll below
+                        # reads this and updates the status bar.
+                        on_progress=lambda done, total: progress.append((done, total)),
+                    )
+                )
+            except Exception:
+                found.append([])
+
+        thread = threading.Thread(target=work, name="CameraModeProbe", daemon=True)
+        thread.start()
+
+        def poll() -> None:
+            if thread.is_alive():
+                if progress:
+                    done, total = progress[-1]
+                    self._set_status(f"Detecting camera {index} capture modes... ({done}/{total})")
+                self.after(100, poll)
+                return
+            self._camera_modes_probing = False
+            if button is not None:
+                try:
+                    if button.winfo_exists():
+                        button.configure(state=tk.NORMAL, text="Detect capture modes")
+                except tk.TclError:
+                    pass
+            modes = found[0] if found else []
+            # Remember the attempt either way: a device that cannot be measured
+            # (busy, unplugged) must not send the caller back here in a loop.
+            self._camera_modes_probed_index = index
+            if modes:
+                self.camera_modes = modes
+                self._save_camera_modes(index, modes)
+                best = best_realtime_mode(modes)
+                if best is not None:
+                    self.camera_resolution = best.granted
+                self._refresh_resolution_menu()
+                self._set_status(f"Capture mode: {self._resolution_menu_selection()}")
+            else:
+                self._set_status("Could not detect capture modes; keeping current settings.")
+            if on_done is not None:
+                on_done()
+            elif was_previewing:
+                self.start_preview()
+
+        self.after(100, poll)
+
+    def _apply_cached_camera_modes(self, index: int) -> bool:
+        """Adopt cached measurements for a device. True when any were found."""
+        modes = self._load_camera_modes(index)
+        if not modes:
+            self.camera_modes = []
+            return False
+        self.camera_modes = modes
+        best = best_realtime_mode(modes)
+        if best is not None and not self.__dict__.get("_camera_resolution_chosen", False):
+            self.camera_resolution = best.granted
+        self._refresh_resolution_menu()
+        return True
 
     def _camera_guard(self):
         lock = self.__dict__.get("_camera_state_lock")
@@ -1840,22 +2091,114 @@ class UnifiedScanApp(ctk.CTk):
             camera.release()
 
     def _ensure_camera(self) -> CameraService:
+        """Blocking open/reuse of the shared camera with a running stream.
+
+        Prefer :meth:`_open_camera_async` from UI callbacks; this stays for
+        capture paths where the camera is normally already open.
+        """
         if self._burst_is_active():
             raise RuntimeError("Camera is busy with burst capture.")
+        return self._ensure_camera_for(
+            int(self.camera_index_var.get()), self._max_camera_resolution()
+        )
+
+    def _ensure_camera_for(self, index: int, resolution: tuple[int, int]) -> CameraService:
+        """Open (or refresh) the shared camera and start its frame stream."""
+        camera = self.camera
+        if camera is None or camera.index != index:
+            replaced = camera
+            camera = CameraService(index=index, resolution=resolution)
+            camera.open()
+            # Publish only after a successful open so a failure leaves the
+            # previous handle (if any) usable.
+            with self._camera_guard():
+                if replaced is not None and self.camera is replaced:
+                    replaced.release()
+                self.camera = camera
+        elif camera.resolution != resolution:
+            camera.set_resolution(resolution)
+        elif camera.stream_error is not None:
+            camera.open()
+        camera.start_stream()
+        return camera
+
+    def _open_camera_async(self, *, on_ready=None) -> None:
+        """Open the camera off the UI thread; the Tk thread polls for the result."""
+        if self._camera_opening or self.__dict__.get("_camera_modes_probing"):
+            return
+        if self._burst_is_active():
+            self._set_status("Camera is busy with burst capture.")
+            return
         index = int(self.camera_index_var.get())
+        if (
+            not self.__dict__.get("camera_modes")
+            and self.__dict__.get("_camera_modes_probed_index") != index
+            and not self._apply_cached_camera_modes(index)
+        ):
+            # First use of this device: measure what it can actually deliver,
+            # then open on the best real-time mode. Cached from then on, and
+            # attempted at most once per device so a failed probe still opens.
+            self._detect_camera_modes_async(
+                on_done=lambda: self._open_camera_async(on_ready=on_ready)
+            )
+            return
+        # One resolution for preview and capture: a shot is then the very frame
+        # the user is looking at, taken with no device reconfiguration.
         resolution = self._max_camera_resolution()
-        if self.camera is None:
-            self.camera = CameraService(index=index, resolution=resolution)
-            self.camera.open()
-        elif self.camera.index != index:
-            self.camera.release()
-            self.camera = CameraService(index=index, resolution=resolution)
-            self.camera.open()
-        elif self.camera.resolution != resolution:
-            self.camera.set_resolution(resolution)
-        elif self.camera.read_frame() is None:
-            self.camera.open()
-        return self.camera
+        generation = self._camera_open_generation
+        self._camera_opening = True
+        self._update_camera_health()
+        self._show_preview_placeholder(f"Opening camera {index}...")
+        result: dict[str, object] = {}
+
+        def work() -> None:
+            try:
+                result["camera"] = self._ensure_camera_for(index, resolution)
+            except Exception as exc:
+                result["error"] = exc
+
+        thread = threading.Thread(target=work, name="CameraOpen", daemon=True)
+        thread.start()
+
+        def poll() -> None:
+            if thread.is_alive():
+                self.after(50, poll)
+                return
+            self._camera_opening = False
+            camera = result.get("camera")
+            if generation != self._camera_open_generation:
+                # The camera was closed while opening; drop the fresh handle.
+                if isinstance(camera, CameraService):
+                    camera.release()
+                    with self._camera_guard():
+                        if self.camera is camera:
+                            self.camera = None
+                self._update_camera_health()
+                return
+            error = result.get("error")
+            if error is not None:
+                self._update_camera_health(error_text=str(error))
+                self._show_preview_placeholder("No camera frame")
+                self._set_status(f"Camera open failed: {error}")
+                return
+            self._update_camera_health()
+            if on_ready is not None:
+                on_ready()
+
+        self.after(50, poll)
+
+    def _show_preview_placeholder(self, text: str) -> None:
+        """Update the preview label text while no frame is being shown."""
+        if self.preview_photo is not None:
+            return
+        label = getattr(self, "preview_label", None)
+        if label is None:
+            return
+        try:
+            if label.winfo_exists():
+                label.configure(text=text)
+        except tk.TclError:
+            pass
 
     def _release_camera_handle(self) -> None:
         with self._camera_guard():
@@ -1865,16 +2208,14 @@ class UnifiedScanApp(ctk.CTk):
             camera.release()
 
     def open_camera(self) -> None:
-        try:
-            self._ensure_camera()
-            self._update_camera_health()
-            self._set_status(f"Camera opened (index {self.camera_index_var.get()})")
-        except Exception as exc:
-            self._update_camera_health(error_text=str(exc))
-            messagebox.showerror("Camera Error", str(exc))
-            self._set_status("Camera open failed")
+        """Open the camera and start the live preview without blocking the UI."""
+        self.start_preview()
 
     def close_camera(self) -> None:
+        # Invalidate any in-flight async open. (__dict__.get, not getattr:
+        # tkinter's Misc.__getattr__ recurses on partially built instances.)
+        self._camera_open_generation = self.__dict__.get("_camera_open_generation", 0) + 1
+        self._camera_opening = False
         self.stop_preview()
         self._cancel_active_burst()
         self._release_camera_handle()
@@ -1882,19 +2223,32 @@ class UnifiedScanApp(ctk.CTk):
         self._set_status("Camera closed")
 
     def start_preview(self) -> None:
-        try:
-            self._ensure_camera()
-        except Exception as exc:
-            self._update_camera_health(error_text=str(exc))
-            messagebox.showerror("Camera Error", str(exc))
-            return
-        self.live_detector.set_backend(self.live_backend_var.get())
-        self.live_detector.start()
+        self._open_camera_async(on_ready=self._begin_preview)
+
+    def _begin_preview(self) -> None:
+        self._preview_last_seq = 0
+        # The detector thread only runs while its overlay is switched on.
+        if self.live_edge_var.get():
+            self.live_detector.set_backend(self.live_backend_var.get())
+            self.live_detector.start()
+            self.live_status_var.set("Detector: Searching")
+        else:
+            self.live_status_var.set("Detector: Off")
         if self.preview_job is None:
             self._preview_loop()
         self._update_camera_health()
         self._set_status("Preview started")
-        self.live_status_var.set("Detector: Searching")
+
+    def _on_live_edge_toggle(self) -> None:
+        """Start or stop the detector with its overlay checkbox."""
+        if not self.live_edge_var.get():
+            self.live_detector.stop()
+            self.live_status_var.set("Detector: Off")
+            return
+        if self.preview_job is not None:
+            self.live_detector.set_backend(self.live_backend_var.get())
+            self.live_detector.start()
+            self.live_status_var.set("Detector: Searching")
 
     def stop_preview(self) -> None:
         if self.preview_job is not None:
@@ -1906,17 +2260,34 @@ class UnifiedScanApp(ctk.CTk):
         self._set_status("Preview stopped")
 
     def _preview_loop(self) -> None:
-        if self.camera is None:
+        started_at = time.perf_counter()
+        camera = self.camera
+        if camera is None:
             self.preview_job = None
             self._update_camera_health()
             return
-        frame = self.camera.read_frame()
-        if frame is not None:
+        stream_error = getattr(camera, "stream_error", None)
+        if stream_error:
+            self.preview_job = None
+            self.live_detector.stop()
+            self._update_camera_health(error_text=stream_error)
+            self._set_status(f"Camera preview stopped: {stream_error}")
+            return
+        info = camera.latest_frame_info()
+        if info is not None and info.seq != self._preview_last_seq:
+            # Frames arrive on the stream thread; the UI only renders here when
+            # a new one is available, so ticks never block on camera I/O.
+            self._preview_last_seq = info.seq
             if self.live_edge_var.get():
-                self.live_detector.submit(frame)
-            preview = self._preview_image_with_contour(frame)
+                self.live_detector.submit(info.frame)
+            preview = self._preview_image_with_contour(info.frame)
             self._show_in_preview(preview)
-        self.preview_job = self.after(PREVIEW_WAIT_MS, self._preview_loop)
+        if time.monotonic() - self._camera_health_refreshed_at >= CAMERA_HEALTH_REFRESH_SEC:
+            self._update_camera_health()
+        # Subtract the render cost from the interval, otherwise every frame
+        # pays "render + full wait" and the preview settles below camera rate.
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        self.preview_job = self.after(max(1, int(PREVIEW_WAIT_MS - elapsed_ms)), self._preview_loop)
 
     def _on_live_backend_change(self, value: str) -> None:
         try:
@@ -2141,20 +2512,22 @@ class UnifiedScanApp(ctk.CTk):
         self.preview_photo = photo
 
     def _to_ctk_photo_for_label(self, image: np.ndarray, label: ctk.CTkLabel) -> ctk.CTkImage:
-        if len(image.shape) == 2:
-            rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-        else:
-            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
         max_width = max(200, label.winfo_width())
         max_height = max(120, label.winfo_height())
-        h, w = rgb.shape[:2]
+        h, w = image.shape[:2]
         scale = min(max_width / w, max_height / h)
         new_w = max(1, int(w * scale))
         new_h = max(1, int(h * scale))
-        resized = cv2.resize(rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-        pil_image = Image.fromarray(resized)
+        # Colour conversion happens after the resize: at display size it is far
+        # cheaper than at full capture resolution.
+        if resized.ndim == 2:
+            rgb = cv2.cvtColor(resized, cv2.COLOR_GRAY2RGB)
+        else:
+            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+
+        pil_image = Image.fromarray(rgb)
         return ctk.CTkImage(light_image=pil_image, dark_image=pil_image, size=(new_w, new_h))
 
     def _process_capture_frame(
@@ -2218,70 +2591,146 @@ class UnifiedScanApp(ctk.CTk):
             raise RuntimeError("Document detection returned no pages.")
         return results[0]
 
-    def capture_one(self) -> None:
-        try:
-            camera = self._ensure_camera()
-            frame = camera.read_frame()
-            if frame is None:
-                raise RuntimeError("Could not capture an image from the camera.")
-            timestamp = datetime.now().strftime(r"%Y%m%d_%H%M%S_%f")
-            results = self._process_capture_frame(frame, base_name=timestamp)
-            self._ingest_page_results(results)
-            self.refresh_page_list(keep_index=len(self.session) - 1)
-            self.go_to_review_tab()
-            self._set_status(
-                f"Captured {len(results)} page(s): {_detection_summary(results)}. "
-                f"Session pages: {len(self.session)}"
+    def _grab_still_frame(self, camera: CameraService) -> np.ndarray | None:
+        """The shot: the frame already on screen when the button was pressed.
+
+        Preview and capture share one resolution, so the newest streamed frame
+        is the still. No device reconfiguration, no waiting - what the user saw
+        is what gets captured.
+        """
+        latest_frame = getattr(camera, "latest_frame", None)
+        if callable(latest_frame):
+            frame = latest_frame()
+            if frame is not None:
+                return frame
+        return camera.read_frame()
+
+    def _raise_if_camera_opening(self) -> None:
+        if self.__dict__.get("_camera_opening", False):
+            raise RuntimeError("Camera is still opening; try again in a moment.")
+
+    def _capture_workspace_still(self) -> np.ndarray:
+        """Still for workspace actions such as page retake.
+
+        Takes the live frame when the Camera tab keeps a stream running;
+        otherwise opens the device once for a single shot.
+        """
+        self._raise_if_camera_opening()
+        if self._burst_is_active():
+            raise RuntimeError("Camera is busy with burst capture.")
+        camera = self.camera
+        if camera is not None:
+            frame = self._grab_still_frame(camera)
+        else:
+            temp = CameraService(
+                index=int(self.camera_index_var.get()),
+                resolution=self._max_camera_resolution(),
             )
-        except Exception as exc:
-            messagebox.showerror("Capture Error", str(exc))
-            self._set_status("Capture failed")
+            try:
+                frame = temp.capture_still(timeout_sec=FRESH_FRAME_TIMEOUT_SEC)
+            finally:
+                temp.release()
+        if frame is None:
+            raise RuntimeError("Could not capture an image from the camera.")
+        return frame
+
+    def capture_one(self) -> None:
+        """Capture a single page; runs on the shared background capture path."""
+        self._start_capture_job(shots=1, delay_sec=0.0)
 
     def capture_burst(self) -> None:
-        burst_reserved = False
-        staging_dir = None
         try:
             shots = int(self.camera_shots_var.get())
             delay_sec = float(self.camera_delay_var.get())
-            index = int(self.camera_index_var.get())
-            resolution = self._max_camera_resolution()
             if not 1 <= shots <= CameraService.MAX_BURST_SHOTS:
                 raise ValueError(
                     f"Burst shots must be between 1 and {CameraService.MAX_BURST_SHOTS}."
                 )
-            timestamp = datetime.now().strftime(r"%Y%m%d_%H%M%S")
+            if delay_sec < 0:
+                raise ValueError("Delay must be >= 0 seconds.")
+        except Exception as exc:
+            messagebox.showerror("Burst Error", str(exc))
+            self._set_status("Burst capture failed")
+            return
+        self._start_capture_job(shots=shots, delay_sec=delay_sec)
+
+    def _start_capture_job(self, *, shots: int, delay_sec: float) -> None:
+        """Capture ``shots`` full-resolution pages in a background job.
+
+        The open preview stream is reused when possible (the live view keeps
+        running); detection and staging always happen off the UI thread.
+        """
+        single = shots == 1
+        job_name = "Capture" if single else "Capture Burst"
+        stage_name = "Capture" if single else "Burst capture"
+        burst_reserved = False
+        staging_dir = None
+        try:
+            if self.__dict__.get("_camera_opening", False):
+                # No modal here: rapid shutter presses should not spawn popups.
+                self._set_status("Camera is reconfiguring; try again in a moment.")
+                return
+            if self.__dict__.get("job_thread") is not None:
+                self._set_status("Busy: the previous capture is still processing.")
+                return
+            index = int(self.camera_index_var.get())
+            resolution = self._max_camera_resolution()
+            timestamp = datetime.now().strftime(r"%Y%m%d_%H%M%S_%f")
+
+            shared_camera = self._shared_burst_camera(index, resolution)
+            # Grab the shutter frame here, on the UI thread, before any
+            # background work starts: the stored page is then precisely the
+            # frame that was on screen when the button was pressed, not one
+            # taken a job-startup later.
+            shutter_frame = None
+            if shared_camera is not None:
+                shutter_frame = self._grab_still_frame(shared_camera)
 
             self._begin_burst_capture()
             burst_reserved = True
-            self.stop_preview()
-            self._release_camera_handle()
+            if shared_camera is None:
+                # Legacy path: no live stream to reuse, so a dedicated device
+                # handle is opened inside the worker.
+                self.stop_preview()
+                self._release_camera_handle()
             self._update_camera_health()
             staging_dir = tempfile.TemporaryDirectory(prefix="uniscan_gui_burst_")
 
             def worker(emit, is_cancelled):
-                emit(stage="Burst capture", current=f"Opening camera {index}", progress=0)
-                camera = CameraService(index=index, resolution=resolution)
+                camera = shared_camera
+                owns_camera = camera is None
+                if owns_camera:
+                    emit(stage=stage_name, current=f"Opening camera {index}", progress=0)
+                    camera = CameraService(index=index, resolution=resolution)
                 frame_paths: list[tuple[int, Path]] = []
                 try:
-                    # Publish and open under one app-level critical section: a
-                    # simultaneous window close can then always find and release
-                    # the only burst handle after open() returns.
-                    with self._camera_guard():
-                        if is_cancelled():
-                            raise RuntimeError("Cancelled by user.")
-                        self.burst_camera = camera
-                        camera.open()
+                    if owns_camera:
+                        # Publish and open under one app-level critical section: a
+                        # simultaneous window close can then always find and release
+                        # the only burst handle after open() returns.
+                        with self._camera_guard():
+                            if is_cancelled():
+                                raise RuntimeError("Cancelled by user.")
+                            self.burst_camera = camera
+                            camera.open()
+                    # Preview and capture share one resolution, so the live
+                    # stream supplies the shots directly: the first is the
+                    # frame that was on screen at the shutter press.
                     frames = camera.iter_burst(
                         shots=shots,
                         delay_sec=delay_sec,
                         cancel_cb=is_cancelled,
+                        first_frame=shutter_frame,
                         on_progress=lambda i, total: emit(
-                            stage="Burst capture",
+                            stage=stage_name,
                             current=f"Shot {i}/{total}",
                             progress=int((i / total) * 45),
                         ),
                     )
                     for frame_index, frame in frames:
+                        # Report what the device actually delivered, not what
+                        # was requested: drivers often grant a smaller size.
+                        self._effective_capture_resolution = (frame.shape[1], frame.shape[0])
                         frame_path = Path(staging_dir.name) / f"{frame_index:06d}-raw.png"
                         if not imwrite_unicode(frame_path, frame):
                             raise RuntimeError(
@@ -2291,10 +2740,11 @@ class UnifiedScanApp(ctk.CTk):
                             raise RuntimeError("Cancelled by user.")
                         frame_paths.append((frame_index, frame_path))
                 finally:
-                    camera.release()
-                    with self._camera_guard():
-                        if self.burst_camera is camera:
-                            self.burst_camera = None
+                    if owns_camera:
+                        camera.release()
+                        with self._camera_guard():
+                            if self.burst_camera is camera:
+                                self.burst_camera = None
 
                 staged_pages: list[_StagedImportPage] = []
                 fallback_pages = 0
@@ -2320,7 +2770,7 @@ class UnifiedScanApp(ctk.CTk):
                         )
                         fallback_pages += result.fallback_reason is not None
                     emit(
-                        stage="Processing burst",
+                        stage="Processing pages",
                         current=f"Frame {idx}/{total_frames}",
                         progress=45 + int((idx / total_frames) * 55),
                     )
@@ -2337,29 +2787,49 @@ class UnifiedScanApp(ctk.CTk):
                     staged_pages, fallback_pages = payload
                     self._ingest_staged_import_pages(staged_pages)
                     self.refresh_page_list(keep_index=len(self.session) - 1)
-                    self.go_to_review_tab()
+                    # Stay on the Camera tab so the next shot starts
+                    # immediately; Workspace is one click away.
                     summary = _detection_summary_counts(len(staged_pages), fallback_pages)
+                    prefix = "Captured" if single else "Burst captured"
                     self._set_status(
-                        f"Burst captured {len(staged_pages)} page(s): {summary}. "
+                        f"{prefix} {len(staged_pages)} page(s): {summary}. "
                         f"Session pages: {len(self.session)}"
                     )
                 finally:
                     finish_burst()
 
-            if not self._start_background_job(
-                "Capture Burst", worker, on_done, on_error=finish_burst
-            ):
+            if not self._start_background_job(job_name, worker, on_done, on_error=finish_burst):
                 finish_burst()
         except Exception as exc:
             if burst_reserved:
                 self._end_burst_capture()
             if staging_dir is not None:
                 staging_dir.cleanup()
-            messagebox.showerror("Burst Error", str(exc))
-            self._set_status("Burst capture failed")
+            messagebox.showerror(f"{job_name} Error", str(exc))
+            self._set_status(f"{job_name} failed")
+
+    def _shared_burst_camera(self, index: int, resolution: tuple[int, int]) -> CameraService | None:
+        """Reuse the open streaming camera for capture so shots come straight
+        off the live stream; None selects the legacy open-a-device path."""
+        camera = self.camera
+        if camera is None:
+            return None
+        if getattr(camera, "index", None) != index:
+            return None
+        current = getattr(camera, "resolution", None)
+        if current is None or tuple(current) != tuple(resolution):
+            return None
+        is_streaming = getattr(camera, "is_streaming", None)
+        if not callable(is_streaming) or not is_streaming():
+            return None
+        return camera
 
     def _set_camera_resolution(self, resolution: tuple[int, int]) -> None:
-        """Apply a camera resolution and commit the preference only on success."""
+        """Apply a capture resolution and commit the preference only on success.
+
+        Preview and capture share this resolution, so it is both the picture
+        quality and the preview frame rate the camera has to sustain.
+        """
         if self._burst_is_active():
             raise RuntimeError("Camera is busy with burst capture.")
         previous_resolution = self.camera_resolution
@@ -2373,11 +2843,13 @@ class UnifiedScanApp(ctk.CTk):
             except Exception:
                 candidate.release()
                 raise
+            self._effective_capture_resolution = getattr(candidate, "effective_resolution", None)
             self.camera = candidate
         else:
             camera = self.camera
             try:
                 camera.set_resolution(resolution)
+                self._effective_capture_resolution = getattr(camera, "effective_resolution", None)
             except Exception:
                 try:
                     camera.set_resolution(previous_resolution)
@@ -2387,83 +2859,125 @@ class UnifiedScanApp(ctk.CTk):
                 raise
         self.camera_resolution = resolution
 
-    def configure_camera_event(self) -> None:
-        def _set_camera_index(index_str: str) -> None:
-            self.camera_index_var.set(int(index_str))
-            if self.camera is not None:
-                self.camera.set_index(int(index_str))
-            self._set_status(f"Camera index set to {index_str}")
+    def _on_camera_index_selected(self, index_str: str) -> None:
+        """Inline device selector on the Camera tab."""
+        try:
+            index = int(index_str)
+        except (TypeError, ValueError):
+            return
+        self.camera_index_var.set(index)
+        # Modes belong to the device: drop them so the new one is measured or
+        # its own cache is loaded on the next open.
+        self.camera_modes = []
+        self._camera_modes_probed_index = None
+        self._camera_resolution_chosen = False
+        self._refresh_resolution_menu()
+        if self.camera is not None or self.__dict__.get("_camera_opening", False):
+            # Re-open at the new index off the UI thread; the running preview
+            # picks up the new stream automatically.
+            self._open_camera_async()
+        self._set_status(f"Camera index set to {index}")
 
-        def _identify_cameras() -> None:
-            indices = CameraService.get_available_device_indices(max_indices=10)
-            values = [str(i) for i in indices] if indices else [str(i) for i in range(10)]
-            index_menu.configure(values=values)
-            if values:
-                index_menu.set(values[0])
-                _set_camera_index(values[0])
+    def _identify_cameras_async(self) -> None:
+        """Probe device indices off the UI thread and fill the device menu."""
+        button = getattr(self, "camera_identify_button", None)
+        if button is not None:
+            try:
+                button.configure(state=tk.DISABLED, text="Finding...")
+            except tk.TclError:
+                button = None
+        found: list[list[int]] = []
 
-        def _set_resolution(res_string: str) -> None:
-            match = re.match(r"^(\d+)x(\d+)$", res_string.strip())
-            if match is None:
-                messagebox.showerror(
-                    "Resolution Error", "Resolution must be on the form <width>x<height>."
-                )
+        def probe() -> None:
+            try:
+                found.append(CameraService.get_available_device_indices(max_indices=10))
+            except Exception:
+                found.append([])
+
+        probe_thread = threading.Thread(target=probe, name="CameraProbe", daemon=True)
+        probe_thread.start()
+
+        def poll() -> None:
+            if probe_thread.is_alive():
+                self.after(50, poll)
                 return
-            resolution = (int(match.group(1)), int(match.group(2)))
+            if button is not None:
+                try:
+                    if button.winfo_exists():
+                        button.configure(state=tk.NORMAL, text="Find cameras")
+                except tk.TclError:
+                    pass
+            indices = found[0] if found else []
+            values = [str(i) for i in indices] if indices else [str(i) for i in range(10)]
+            menu = getattr(self, "camera_index_menu", None)
+            if menu is not None:
+                try:
+                    if menu.winfo_exists():
+                        menu.configure(values=values)
+                        if indices and str(self.camera_index_var.get()) not in values:
+                            menu.set(values[0])
+                            self._on_camera_index_selected(values[0])
+                except tk.TclError:
+                    pass
+            if indices:
+                self._set_status(f"Found camera indices: {', '.join(values)}")
+            else:
+                self._set_status("No cameras found.")
+
+        self.after(50, poll)
+
+    def _apply_resolution_string(self, res_string: str) -> None:
+        """Inline capture-resolution control on the Camera tab (async apply).
+
+        Accepts both a plain ``<width>x<height>`` and a measured-mode label
+        such as ``1920x1080 - 30 fps``.
+        """
+        match = re.match(r"^(\d+)x(\d+)", res_string.strip())
+        if match is None:
+            messagebox.showerror(
+                "Resolution Error", "Resolution must be on the form <width>x<height>."
+            )
+            return
+        resolution = (int(match.group(1)), int(match.group(2)))
+        self._camera_resolution_chosen = True
+        if self.__dict__.get("_camera_opening", False):
+            self._set_status("Camera is still opening; try again in a moment.")
+            return
+        if self._burst_is_active():
+            self._set_status("Camera is busy capturing; try again after it finishes.")
+            return
+        self._set_status(f"Applying capture resolution {resolution[0]}x{resolution[1]}...")
+        errors: list[Exception] = []
+
+        def apply() -> None:
             try:
                 self._set_camera_resolution(resolution)
             except Exception as exc:
-                messagebox.showerror("Resolution Error", str(exc))
-                self._set_status(f"Camera resolution failed: {exc}")
+                errors.append(exc)
+
+        apply_thread = threading.Thread(target=apply, name="CameraResolution", daemon=True)
+        apply_thread.start()
+
+        def poll() -> None:
+            if apply_thread.is_alive():
+                self.after(50, poll)
                 return
-            self._set_status(f"Camera resolution set to {resolution[0]}x{resolution[1]}")
+            if errors:
+                self._set_status(f"Capture resolution failed: {errors[0]}")
+                messagebox.showerror("Resolution Error", str(errors[0]))
+            else:
+                granted = self.__dict__.get("_effective_capture_resolution")
+                if granted and tuple(granted) != resolution:
+                    self._set_status(
+                        f"Capture resolution set to {resolution[0]}x{resolution[1]} "
+                        f"(device grants {granted[0]}x{granted[1]})"
+                    )
+                else:
+                    self._set_status(f"Capture resolution set to {resolution[0]}x{resolution[1]}")
+            self._refresh_resolution_menu()
+            self._update_camera_health()
 
-        window = ctk.CTkToplevel(self)
-        window.title("Camera Configuration")
-        window.resizable(width=False, height=False)
-
-        ctk.CTkLabel(window, text="Camera index").pack(anchor="w", padx=12, pady=(16, 4))
-        index_values = [str(i) for i in range(10)]
-        index_var = tk.StringVar(value=str(self.camera_index_var.get()))
-        index_menu = ctk.CTkOptionMenu(
-            window,
-            values=index_values,
-            variable=index_var,
-            command=_set_camera_index,
-        )
-        index_menu.pack(fill=ctk.X, padx=12, pady=(0, 8))
-
-        ctk.CTkButton(window, text="Identify cameras", command=_identify_cameras).pack(
-            fill=ctk.X,
-            padx=12,
-            pady=(0, 12),
-        )
-
-        ctk.CTkLabel(window, text="Preset resolution").pack(anchor="w", padx=12, pady=(0, 4))
-        preset_var = tk.StringVar(value=RESOLUTIONS[-1])
-        preset_var.set(f"{self.camera_resolution[0]}x{self.camera_resolution[1]}")
-        preset_menu = ctk.CTkOptionMenu(
-            window,
-            values=RESOLUTIONS,
-            variable=preset_var,
-            command=_set_resolution,
-        )
-        preset_menu.pack(fill=ctk.X, padx=12, pady=(0, 8))
-
-        ctk.CTkLabel(window, text="Custom resolution").pack(anchor="w", padx=12, pady=(0, 4))
-        custom_var = tk.StringVar(value=RESOLUTIONS[-1])
-        custom_var.set(f"{self.camera_resolution[0]}x{self.camera_resolution[1]}")
-        custom_entry = ctk.CTkEntry(window, textvariable=custom_var)
-        custom_entry.pack(fill=ctk.X, padx=12, pady=(0, 8))
-        ctk.CTkButton(
-            window,
-            text="Set custom resolution",
-            command=lambda: _set_resolution(custom_var.get()),
-        ).pack(fill=ctk.X, padx=12, pady=(0, 14))
-
-        window.attributes("-topmost", True)
-        window.grab_set()
-        window.attributes("-topmost", False)
+        self.after(50, poll)
 
     @staticmethod
     def _expand_import_sources(sources: Iterable[Path]) -> list[Path]:
@@ -3354,10 +3868,7 @@ class UnifiedScanApp(ctk.CTk):
             return
 
         try:
-            camera = self._ensure_camera()
-            frame = camera.read_frame()
-            if frame is None:
-                raise RuntimeError("Could not capture an image from the camera.")
+            frame = self._capture_workspace_still()
 
             item_name = datetime.now().strftime(r"retake_%Y%m%d_%H%M%S")
             result = self._detect_single_page(frame, name=item_name)
