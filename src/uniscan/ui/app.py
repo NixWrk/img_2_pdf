@@ -61,7 +61,7 @@ from uniscan.core.scanner_adapter import (
 from uniscan.core.spread import split_spread_accurate
 from uniscan.diagnostics import run_diagnostics
 from uniscan.io import CameraService
-from uniscan.io.camera_service import CameraMode, best_realtime_mode
+from uniscan.io.camera_service import CameraMode, best_realtime_mode, list_camera_device_names
 from uniscan.io.loaders import (
     IMG_EXTS,
     PDF_EXTS,
@@ -547,6 +547,8 @@ class UnifiedScanApp(ctk.CTk):
         self._preview_last_seq = 0
         self._camera_health_refreshed_at = 0.0
         self._effective_capture_resolution: tuple[int, int] | None = None
+        self.camera_device_names: list[str] = []
+        self.camera_device_indices: list[int] = []
         self.camera_modes: list[CameraMode] = []
         self._camera_modes_probing = False
         self._camera_modes_probed_index: int | None = None
@@ -919,13 +921,14 @@ class UnifiedScanApp(ctk.CTk):
         row_index = ctk.CTkFrame(settings_box, fg_color="transparent")
         row_index.pack(fill=ctk.X, padx=8, pady=(0, 4))
         ctk.CTkLabel(row_index, text="Device").pack(side=ctk.LEFT, padx=(0, 6))
+        self._refresh_camera_device_names()
         self.camera_index_menu = ctk.CTkOptionMenu(
             row_index,
-            values=[str(i) for i in range(10)],
-            command=self._on_camera_index_selected,
-            width=70,
+            values=self._device_menu_values(),
+            command=self._on_camera_device_selected,
+            width=220,
         )
-        self.camera_index_menu.set(str(self.camera_index_var.get()))
+        self.camera_index_menu.set(self._device_menu_selection())
         self.camera_index_menu.pack(side=ctk.LEFT)
         self.camera_identify_button = ctk.CTkButton(
             row_index,
@@ -1985,7 +1988,7 @@ class UnifiedScanApp(ctk.CTk):
                 button = None
         was_previewing = self.preview_job is not None
         self.close_camera()
-        self._set_status(f"Detecting camera {index} capture modes...")
+        self._set_status(f"Detecting {self._device_label(index)} capture modes...")
         found: list[list[CameraMode]] = []
         progress: list[tuple[int, int]] = []
 
@@ -2009,7 +2012,9 @@ class UnifiedScanApp(ctk.CTk):
             if thread.is_alive():
                 if progress:
                     done, total = progress[-1]
-                    self._set_status(f"Detecting camera {index} capture modes... ({done}/{total})")
+                    self._set_status(
+                        f"Detecting {self._device_label(index)} capture modes... ({done}/{total})"
+                    )
                 self.after(100, poll)
                 return
             self._camera_modes_probing = False
@@ -2148,7 +2153,7 @@ class UnifiedScanApp(ctk.CTk):
         generation = self._camera_open_generation
         self._camera_opening = True
         self._update_camera_health()
-        self._show_preview_placeholder(f"Opening camera {index}...")
+        self._show_preview_placeholder(f"Opening {self._device_label(index)}...")
         result: dict[str, object] = {}
 
         def work() -> None:
@@ -2700,7 +2705,9 @@ class UnifiedScanApp(ctk.CTk):
                 camera = shared_camera
                 owns_camera = camera is None
                 if owns_camera:
-                    emit(stage=stage_name, current=f"Opening camera {index}", progress=0)
+                    emit(
+                        stage=stage_name, current=f"Opening {self._device_label(index)}", progress=0
+                    )
                     camera = CameraService(index=index, resolution=resolution)
                 frame_paths: list[tuple[int, Path]] = []
                 try:
@@ -2859,6 +2866,73 @@ class UnifiedScanApp(ctk.CTk):
                 raise
         self.camera_resolution = resolution
 
+    def _refresh_camera_device_names(self) -> None:
+        """Read the system's video capture device names (best effort)."""
+        try:
+            self.camera_device_names = list_camera_device_names()
+        except Exception:
+            self.camera_device_names = []
+
+    def _device_label(self, index: int) -> str:
+        """Menu text for a device: its system name, or the bare index."""
+        names = self.__dict__.get("camera_device_names") or []
+        if 0 <= index < len(names) and names[index]:
+            return names[index]
+        return f"Camera {index}"
+
+    def _device_menu_values(self) -> list[str]:
+        indices = self.__dict__.get("camera_device_indices")
+        if not indices:
+            names = self.__dict__.get("camera_device_names") or []
+            # Before probing, offer the named devices the system reports; a
+            # machine that reports none still gets a usable index list.
+            indices = list(range(len(names))) if names else list(range(10))
+        labels: list[str] = []
+        for index in indices:
+            label = self._device_label(index)
+            # Menu entries must stay unique even when two devices share a name.
+            if label in labels:
+                label = f"{label} ({index})"
+            labels.append(label)
+        return labels
+
+    def _device_menu_selection(self) -> str:
+        current = int(self.camera_index_var.get())
+        values = self._device_menu_values()
+        indices = self.__dict__.get("camera_device_indices") or list(range(len(values)))
+        for index, label in zip(indices, values):
+            if index == current:
+                return label
+        return self._device_label(current)
+
+    def _index_for_device_label(self, label: str) -> int | None:
+        values = self._device_menu_values()
+        indices = self.__dict__.get("camera_device_indices") or list(range(len(values)))
+        for index, value in zip(indices, values):
+            if value == label:
+                return index
+        return None
+
+    def _refresh_device_menu(self) -> None:
+        # __dict__.get, not getattr: tkinter's Misc.__getattr__ recurses on
+        # instances built without a Tk window.
+        menu = self.__dict__.get("camera_index_menu")
+        if menu is None:
+            return
+        try:
+            if menu.winfo_exists():
+                menu.configure(values=self._device_menu_values())
+                menu.set(self._device_menu_selection())
+        except tk.TclError:
+            pass
+
+    def _on_camera_device_selected(self, label: str) -> None:
+        """Device menu shows system names; resolve the label to its index."""
+        index = self._index_for_device_label(label)
+        if index is None:
+            return
+        self._on_camera_index_selected(str(index))
+
     def _on_camera_index_selected(self, index_str: str) -> None:
         """Inline device selector on the Camera tab."""
         try:
@@ -2876,21 +2950,26 @@ class UnifiedScanApp(ctk.CTk):
             # Re-open at the new index off the UI thread; the running preview
             # picks up the new stream automatically.
             self._open_camera_async()
-        self._set_status(f"Camera index set to {index}")
+        self._set_status(f"Camera: {self._device_label(index)}")
 
     def _identify_cameras_async(self) -> None:
         """Probe device indices off the UI thread and fill the device menu."""
-        button = getattr(self, "camera_identify_button", None)
+        button = self.__dict__.get("camera_identify_button")
         if button is not None:
             try:
                 button.configure(state=tk.DISABLED, text="Finding...")
             except tk.TclError:
                 button = None
         found: list[list[int]] = []
+        self._refresh_camera_device_names()
+        # The system already lists its capture devices, and OpenCV indexes the
+        # same enumeration: probe exactly that many instead of sweeping ten
+        # indices and waiting on eight failures.
+        max_indices = len(self.camera_device_names) or 10
 
         def probe() -> None:
             try:
-                found.append(CameraService.get_available_device_indices(max_indices=10))
+                found.append(CameraService.get_available_device_indices(max_indices=max_indices))
             except Exception:
                 found.append([])
 
@@ -2908,19 +2987,13 @@ class UnifiedScanApp(ctk.CTk):
                 except tk.TclError:
                     pass
             indices = found[0] if found else []
-            values = [str(i) for i in indices] if indices else [str(i) for i in range(10)]
-            menu = getattr(self, "camera_index_menu", None)
-            if menu is not None:
-                try:
-                    if menu.winfo_exists():
-                        menu.configure(values=values)
-                        if indices and str(self.camera_index_var.get()) not in values:
-                            menu.set(values[0])
-                            self._on_camera_index_selected(values[0])
-                except tk.TclError:
-                    pass
+            self.camera_device_indices = indices
+            if indices and int(self.camera_index_var.get()) not in indices:
+                self._on_camera_index_selected(str(indices[0]))
+            self._refresh_device_menu()
             if indices:
-                self._set_status(f"Found camera indices: {', '.join(values)}")
+                names = ", ".join(self._device_label(index) for index in indices)
+                self._set_status(f"Found cameras: {names}")
             else:
                 self._set_status("No cameras found.")
 

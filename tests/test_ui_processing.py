@@ -1045,6 +1045,51 @@ def test_grab_still_frame_takes_the_on_screen_frame() -> None:
     assert app._grab_still_frame(DirectCam()) is stale
 
 
+def test_device_menu_lists_system_names_and_resolves_them_to_indices() -> None:
+    app = _app_for_processing()
+    app.camera_index_var = _Var(1)
+    app.camera_device_names = ["c922 Pro Stream Webcam", "Integrated Webcam"]
+    app.camera_device_indices = []
+
+    assert app._device_menu_values() == ["c922 Pro Stream Webcam", "Integrated Webcam"]
+    assert app._device_menu_selection() == "Integrated Webcam"
+    assert app._index_for_device_label("c922 Pro Stream Webcam") == 0
+    assert app._index_for_device_label("Integrated Webcam") == 1
+    assert app._index_for_device_label("Not a device") is None
+
+    # Selecting by label drives the same path as selecting by index.
+    selected: list[str] = []
+    app._on_camera_index_selected = selected.append
+    app._on_camera_device_selected("c922 Pro Stream Webcam")
+    app._on_camera_device_selected("Not a device")
+    assert selected == ["0"]
+
+
+def test_device_menu_falls_back_to_indices_without_system_names() -> None:
+    app = _app_for_processing()
+    app.camera_index_var = _Var(0)
+    app.camera_device_names = []
+    app.camera_device_indices = []
+
+    values = app._device_menu_values()
+    assert values[:3] == ["Camera 0", "Camera 1", "Camera 2"]
+    assert app._device_menu_selection() == "Camera 0"
+    assert app._index_for_device_label("Camera 2") == 2
+
+
+def test_device_menu_uses_probed_indices_and_disambiguates_equal_names() -> None:
+    app = _app_for_processing()
+    app.camera_index_var = _Var(2)
+    app.camera_device_names = ["USB Camera", "USB Camera", "USB Camera"]
+    # Only two of the three enumerated devices actually opened.
+    app.camera_device_indices = [0, 2]
+
+    assert app._device_menu_values() == ["USB Camera", "USB Camera (2)"]
+    assert app._device_menu_selection() == "USB Camera (2)"
+    assert app._index_for_device_label("USB Camera (2)") == 2
+    assert app._index_for_device_label("USB Camera") == 0
+
+
 def test_camera_modes_round_trip_through_the_cache(tmp_path) -> None:
     app = _app_for_processing()
     app.autosave_path = tmp_path / "state" / "autosave.json"

@@ -81,6 +81,72 @@ def _opencv_capture_factory(index: int, api_preference: int | None) -> CaptureDe
     return cv2.VideoCapture(index, api_preference)
 
 
+# Windows enumerates video capture interfaces under this device-interface
+# class, in the order DirectShow and Media Foundation hand them out, which is
+# the order OpenCV device indices follow.
+_KSCATEGORY_VIDEO_CAMERA = "{e5323777-f976-4f5b-9b55-b94699c46e44}"
+_DEVICE_CLASSES_KEY = r"SYSTEM\CurrentControlSet\Control\DeviceClasses"
+_DEVICE_ENUM_KEY = r"SYSTEM\CurrentControlSet\Enum"
+
+
+def _clean_device_name(raw: str) -> str:
+    """Strip the ``@oem58.inf,%PID_085C_DD%;`` prefix INF-supplied names carry."""
+    if raw.startswith("@") and ";" in raw:
+        raw = raw.split(";", 1)[1]
+    return raw.strip()
+
+
+def list_camera_device_names() -> list[str]:
+    """Friendly names of the video capture devices, in enumeration order.
+
+    Returns an empty list off Windows or when the registry cannot be read;
+    callers then fall back to plain device indices.
+    """
+    if platform.system() != "Windows":
+        return []
+    try:
+        import winreg
+    except ImportError:
+        return []
+
+    names: list[str] = []
+    seen: set[str] = set()
+    try:
+        class_path = f"{_DEVICE_CLASSES_KEY}\\{_KSCATEGORY_VIDEO_CAMERA}"
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, class_path) as class_key:
+            subkey_count = winreg.QueryInfoKey(class_key)[0]
+            for position in range(subkey_count):
+                subkey_name = winreg.EnumKey(class_key, position)
+                try:
+                    with winreg.OpenKey(class_key, subkey_name) as device_key:
+                        instance = winreg.QueryValueEx(device_key, "DeviceInstance")[0]
+                except OSError:
+                    continue  # "Properties" and other non-device entries
+                if instance in seen:
+                    continue  # one device can expose several interfaces
+                seen.add(instance)
+                names.append(_device_friendly_name(winreg, instance))
+    except OSError:
+        return []
+    return names
+
+
+def _device_friendly_name(winreg, instance: str) -> str:
+    """Registry name for a device instance, falling back to its instance id."""
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE, f"{_DEVICE_ENUM_KEY}\\{instance}"
+        ) as enum_key:
+            for value_name in ("FriendlyName", "DeviceDesc"):
+                try:
+                    return _clean_device_name(winreg.QueryValueEx(enum_key, value_name)[0])
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return instance
+
+
 def default_api_preference() -> int | None:
     """Preferred OpenCV camera backend for this platform.
 

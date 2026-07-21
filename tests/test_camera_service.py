@@ -155,6 +155,28 @@ def test_open_rejects_unavailable_camera() -> None:
         service.open()
 
 
+def test_device_name_cleanup_strips_inf_prefixes() -> None:
+    # Windows stores INF-supplied names as "@file,%KEY%;Friendly Name".
+    assert (
+        camera_service._clean_device_name("@oem58.inf,%PID_085C_DD%;c922 Pro Stream Webcam")
+        == "c922 Pro Stream Webcam"
+    )
+    assert camera_service._clean_device_name("  Integrated Webcam  ") == "Integrated Webcam"
+    assert camera_service._clean_device_name("@no-semicolon.inf") == "@no-semicolon.inf"
+
+
+def test_list_camera_device_names_is_empty_off_windows(monkeypatch) -> None:
+    monkeypatch.setattr(camera_service.platform, "system", lambda: "Linux")
+    assert camera_service.list_camera_device_names() == []
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="registry enumeration is Windows-only")
+def test_list_camera_device_names_reads_the_registry() -> None:
+    names = camera_service.list_camera_device_names()
+    assert isinstance(names, list)
+    assert all(isinstance(name, str) and name for name in names)
+
+
 def test_msmf_hardware_transforms_are_disabled_before_cv2_loads() -> None:
     # Media Foundation otherwise spends ~28 s per open negotiating hardware
     # transforms; OpenCV reads this only while importing, so uniscan/__init__

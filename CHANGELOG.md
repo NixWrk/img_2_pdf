@@ -59,6 +59,9 @@ All notable changes to UniScan are documented here. The project follows Semantic
   result per device, and starts on the largest mode that still runs in real time. The capture
   menu lists every mode with its measured rate and marks the slow ones, so choosing maximum
   resolution over responsiveness stays possible and its cost is visible.
+- The camera picker now lists devices by their system name instead of a bare index, reads those
+  names from the Windows registry with no added dependency, and probes only as many indices as
+  the system reports devices, so discovery finishes in a fraction of a second.
 - Live edge detection is off by default and its worker no longer runs while hidden: the current
   detector proposes an axis-aligned box rather than a true perspective quad, so the preview no
   longer draws boundaries. Per-page boundary detection after capture is unchanged.
