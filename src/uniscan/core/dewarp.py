@@ -13,11 +13,13 @@ import numpy as np
 DEWARP_METHOD_NONE = "none"
 DEWARP_METHOD_AUTO = "auto"
 DEWARP_METHOD_TEXTLINE = "textline"
+DEWARP_METHOD_UVDOC = "uvdoc"
 DEWARP_METHOD_PADDLEOCR_UVDOC = "paddleocr_uvdoc"
 DEWARP_METHOD_CHOICES = (
     DEWARP_METHOD_NONE,
     DEWARP_METHOD_AUTO,
     DEWARP_METHOD_TEXTLINE,
+    DEWARP_METHOD_UVDOC,
     DEWARP_METHOD_PADDLEOCR_UVDOC,
 )
 
@@ -369,15 +371,23 @@ def _candidate_rejection_reason(
     after: DewarpQualityMetrics,
     *,
     require_curvature_improvement: bool,
+    allow_reframing: bool = False,
 ) -> str | None:
+    """Reject a candidate whose measurable geometry did not actually improve.
+
+    ``allow_reframing`` loosens the framing limits for whole-page rectifiers
+    that legitimately drop the photographed background: their output is the
+    page alone, so content sits closer to the edge and the aspect ratio
+    changes by design. Curvature evidence stays the deciding factor.
+    """
     if after.aspect_ratio <= 0.0:
         return "invalid_output_size"
     aspect_change = abs(float(np.log(after.aspect_ratio / max(1e-6, before.aspect_ratio))))
-    if aspect_change > 0.15:
+    if aspect_change > (0.45 if allow_reframing else 0.15):
         return "excessive_aspect_change"
     if after.blank_border_ratio > before.blank_border_ratio + 0.15:
         return "new_blank_borders"
-    if after.edge_ink_ratio > before.edge_ink_ratio + 0.04:
+    if not allow_reframing and after.edge_ink_ratio > before.edge_ink_ratio + 0.04:
         return "content_moved_to_edge"
     if require_curvature_improvement and before.line_count >= 3:
         if after.line_count < 3:
@@ -564,37 +574,140 @@ def _uvdoc_dewarp(
     )
 
 
+def _uvdoc_grid_dewarp(image: np.ndarray) -> tuple[np.ndarray, DewarpDiagnostics]:
+    """Rectify the whole page with the bundled UVDoc grid model."""
+    # Imported lazily so a missing optional runtime cannot break module import.
+    from uniscan.core import uvdoc
+
+    if not uvdoc.is_available():
+        return image.copy(), DewarpDiagnostics(
+            method=DEWARP_METHOD_UVDOC,
+            applied=False,
+            reason="uvdoc_model_unavailable",
+        )
+    corrected = uvdoc.dewarp(image)
+    if corrected is None or corrected.size == 0:
+        return image.copy(), DewarpDiagnostics(
+            method=DEWARP_METHOD_UVDOC,
+            applied=False,
+            reason="uvdoc_no_result",
+        )
+    return corrected, DewarpDiagnostics(method=DEWARP_METHOD_UVDOC, applied=True)
+
+
+def _try_uvdoc_grid_candidate(
+    image: np.ndarray,
+    *,
+    before: DewarpQualityMetrics,
+) -> tuple[np.ndarray, DewarpDiagnostics, DewarpQualityMetrics] | str:
+    """Return an accepted UVDoc result, or the reason it was not used."""
+    try:
+        candidate, diagnostics = _uvdoc_grid_dewarp(image)
+    # Automatic mode must stay a safe no-op whatever the optional runtime does.
+    except Exception as exc:
+        return f"uvdoc_unavailable:{type(exc).__name__}"
+    if not diagnostics.applied:
+        return diagnostics.reason or "uvdoc_no_result"
+    after = measure_dewarp_quality(candidate)
+    rejection = _candidate_rejection_reason(
+        before,
+        after,
+        require_curvature_improvement=True,
+        # UVDoc returns the page alone, so background loss is expected.
+        allow_reframing=True,
+    )
+    if rejection is None and before.line_count < 3 and after.line_count < 3:
+        # Neither side offers text-line evidence, so nothing can confirm the
+        # warp helped. Photographs and near-blank pages land here, and forcing
+        # a page model on them is worse than leaving them untouched. A genuine
+        # rectification of an unreadable page reveals its lines instead.
+        rejection = "no_text_line_evidence"
+    if rejection is not None:
+        return f"uvdoc_rejected:{rejection}"
+    return candidate, diagnostics, after
+
+
 def _automatic_dewarp(
     image: np.ndarray,
     *,
     before: DewarpQualityMetrics,
     uvdoc_cache_home: Path | None,
     auto_use_uvdoc: bool,
+    auto_use_uvdoc_grid: bool,
     model: DewarpModel | None,
 ) -> tuple[np.ndarray, DewarpDiagnostics, DewarpQualityMetrics]:
     textline_candidate, textline_diagnostics = _textline_dewarp(image, model=model)
+    textline_after: DewarpQualityMetrics | None = None
     if textline_diagnostics.applied:
-        after = measure_dewarp_quality(textline_candidate)
+        textline_after = measure_dewarp_quality(textline_candidate)
         rejection = None
         if model is None:
             rejection = _candidate_rejection_reason(
                 before,
-                after,
+                textline_after,
                 require_curvature_improvement=True,
             )
         if rejection is None:
-            return (
-                textline_candidate,
-                replace(
-                    textline_diagnostics,
-                    method=DEWARP_METHOD_AUTO,
-                    selected_method=DEWARP_METHOD_TEXTLINE,
-                ),
-                after,
-            )
-        textline_reason = f"textline_rejected:{rejection}"
+            if model is not None:
+                # A user-adjusted model is an explicit decision: no model gets
+                # to overrule it, and no extra inference is worth running.
+                return (
+                    textline_candidate,
+                    replace(
+                        textline_diagnostics,
+                        method=DEWARP_METHOD_AUTO,
+                        selected_method=DEWARP_METHOD_TEXTLINE,
+                    ),
+                    textline_after,
+                )
+            textline_reason = None
+        else:
+            textline_after = None
+            textline_reason = f"textline_rejected:{rejection}"
     else:
         textline_reason = textline_diagnostics.reason or "textline_no_result"
+
+    uvdoc_grid_reason: str | None = None
+    if auto_use_uvdoc_grid:
+        outcome = _try_uvdoc_grid_candidate(image, before=before)
+        if isinstance(outcome, tuple):
+            grid_candidate, grid_diagnostics, grid_after = outcome
+            # Both candidates passed their gates, so let the measured geometry
+            # decide: the text-line model wins on pure vertical waves, UVDoc on
+            # perspective and whole-surface deformation.
+            if (
+                textline_after is None
+                or grid_after.curvature_rms_px < textline_after.curvature_rms_px
+            ):
+                return (
+                    grid_candidate,
+                    replace(
+                        grid_diagnostics,
+                        method=DEWARP_METHOD_AUTO,
+                        selected_method=DEWARP_METHOD_UVDOC,
+                        reason=(
+                            None if textline_reason is None else f"textline:{textline_reason}"
+                        ),
+                    ),
+                    grid_after,
+                )
+            uvdoc_grid_reason = "uvdoc_not_flatter"
+        else:
+            uvdoc_grid_reason = outcome
+
+    if textline_after is not None:
+        return (
+            textline_candidate,
+            replace(
+                textline_diagnostics,
+                method=DEWARP_METHOD_AUTO,
+                selected_method=DEWARP_METHOD_TEXTLINE,
+                reason=uvdoc_grid_reason,
+            ),
+            textline_after,
+        )
+    if uvdoc_grid_reason:
+        textline_reason = f"{uvdoc_grid_reason};{textline_reason}"
 
     if auto_use_uvdoc:
         try:
@@ -659,6 +772,7 @@ def dewarp_document(
     method: str = DEWARP_METHOD_TEXTLINE,
     uvdoc_cache_home: Path | None = None,
     auto_use_uvdoc: bool = False,
+    auto_use_uvdoc_grid: bool = True,
     model: DewarpModel | None = None,
 ) -> tuple[np.ndarray, DewarpDiagnostics]:
     """Straighten local page curvature without changing boundary detection policy."""
@@ -673,6 +787,7 @@ def dewarp_document(
             before=before,
             uvdoc_cache_home=uvdoc_cache_home,
             auto_use_uvdoc=auto_use_uvdoc,
+            auto_use_uvdoc_grid=auto_use_uvdoc_grid,
             model=model,
         )
         return corrected, _quality_diagnostics(
@@ -686,6 +801,22 @@ def dewarp_document(
         diagnostics = replace(
             diagnostics,
             selected_method=DEWARP_METHOD_TEXTLINE if diagnostics.applied else DEWARP_METHOD_NONE,
+        )
+        return corrected, _quality_diagnostics(
+            diagnostics,
+            before=before,
+            after=measure_dewarp_quality(corrected),
+            started=started,
+        )
+    if normalized == DEWARP_METHOD_UVDOC:
+        corrected, diagnostics = _uvdoc_grid_dewarp(image)
+        if model is not None and diagnostics.applied:
+            # An explicit user model refines the rectified page.
+            corrected = apply_dewarp_model(corrected, model)
+            diagnostics = replace(diagnostics, reason="uvdoc_with_user_adjustment")
+        diagnostics = replace(
+            diagnostics,
+            selected_method=DEWARP_METHOD_UVDOC if diagnostics.applied else DEWARP_METHOD_NONE,
         )
         return corrected, _quality_diagnostics(
             diagnostics,

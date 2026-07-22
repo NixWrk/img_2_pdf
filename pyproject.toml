@@ -21,6 +21,8 @@ dependencies = [
   "pypdfium2>=4.30,<5.12",
   "customtkinter>=5.2,<6",
   "tkinterdnd2>=0.6.2",
+  # Runs the bundled UVDoc page rectifier on the CPU.
+  "onnxruntime>=1.18",
 ]
 
 [project.optional-dependencies]
@@ -52,6 +54,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "uniscan.office_lens" = ["models/README.md"]
+"uniscan" = ["models/*.onnx", "models/*.onnx.data", "models/README.md", "models/LICENSE"]
 
 [tool.ruff]
 line-length = 100

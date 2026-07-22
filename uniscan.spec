@@ -12,6 +12,14 @@ datas = collect_data_files(
         "tkdnd/win-x64-tcl9/*.tcl",
     ],
 )
+# The UVDoc rectifier reads its graph and external weights from this directory
+# at runtime, so both files must land beside the package in the bundle.
+datas += [
+    ("src/uniscan/models/UVDoc_grid.onnx", "uniscan/models"),
+    ("src/uniscan/models/UVDoc_grid.onnx.data", "uniscan/models"),
+    ("src/uniscan/models/LICENSE", "uniscan/models"),
+    ("src/uniscan/models/README.md", "uniscan/models"),
+]
 hiddenimports = collect_submodules("tkinterdnd2")
 
 a = Analysis(
@@ -23,7 +31,8 @@ a = Analysis(
     hookspath=["scripts/pyinstaller_hooks"],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["fitz", "onnxruntime", "pymupdf"],
+    # onnxruntime is required: it runs the bundled UVDoc rectifier.
+    excludes=["fitz", "pymupdf"],
     noarchive=False,
     optimize=0,
 )

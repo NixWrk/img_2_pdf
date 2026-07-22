@@ -25,7 +25,11 @@ from packaging.utils import canonicalize_name
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT_DISTRIBUTION = canonicalize_name("uniscan")
-FORBIDDEN_DISTRIBUTIONS = {"fitz", "onnxruntime", "pymupdf"}
+# fitz/pymupdf stay out for licensing (AGPL). onnxruntime was excluded with
+# them while its only use was the optional Office Lens adapter, whose weights
+# cannot be redistributed; it is now a redistributable MIT runtime that the
+# bundled UVDoc page model needs, so it ships with the portable build.
+FORBIDDEN_DISTRIBUTIONS = {"fitz", "pymupdf"}
 LICENSE_MARKERS = ("license", "copying", "notice")
 NOTICE_SUFFIXES = {"", ".htm", ".html", ".ijg", ".md", ".rst", ".txt"}
 NATIVE_SUFFIXES = {".dll", ".dylib", ".exe", ".pyd", ".so"}
@@ -61,6 +65,11 @@ DENIED_LICENSE_PREFIXES = ("AGPL-", "BUSL-", "GPL-", "SSPL-")
 # legal review. Adding a version here requires reviewing its shipped notices.
 LICENSE_OVERRIDES = {
     "customtkinter": {"5.2.2": "MIT"},
+    # ONNX Runtime and its dependencies declare their licenses as free text
+    # rather than SPDX identifiers; these are the reviewed equivalents.
+    "flatbuffers": {"25.12.19": "Apache-2.0"},
+    "onnxruntime": {"1.27.0": "MIT"},
+    "protobuf": {"7.35.1": "BSD-3-Clause"},
     "img2pdf": {"0.6.3": "LGPL-3.0-or-later"},
     "opencv-python": {"4.13.0.92": "Apache-2.0"},
     "pyinstaller": {"6.21.0": "LicenseRef-PyInstaller-GPL-Exception"},
@@ -72,6 +81,12 @@ LICENSE_OVERRIDES = {
         "5.11.0": "BSD-3-Clause AND Apache-2.0 AND CC-BY-4.0",
     },
     "tkinterdnd2": {"0.6.2": "MIT"},
+}
+
+# Distributions that ship no license file of their own. The upstream text is
+# vendored so the redistribution inventory stays complete and fail-closed.
+VENDORED_LICENSE_NOTICES = {
+    "flatbuffers": "FlatBuffers-Apache-2.0.txt",
 }
 
 RUNTIME_NOTICE_FILENAMES = {
@@ -526,7 +541,14 @@ def collect_licenses(
             shutil.copy2(source, destination)
             copied.append(destination.relative_to(output_dir).as_posix())
         if not copied:
-            raise RuntimeError(f"No license/notice file found for {name} {version}")
+            vendored_name = VENDORED_LICENSE_NOTICES.get(key)
+            vendored_source = ROOT / "licenses" / vendored_name if vendored_name else None
+            if vendored_source is None or not vendored_source.is_file():
+                raise RuntimeError(f"No license/notice file found for {name} {version}")
+            destination = output_dir / key / vendored_source.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(vendored_source, destination)
+            copied.append(destination.relative_to(output_dir).as_posix())
 
         if frozen_distributions is None:
             payload_scope = ",".join(sorted(scopes))

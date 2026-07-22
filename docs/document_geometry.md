@@ -70,10 +70,26 @@ Page dewarping is disabled by default in the CLI (`--dewarp none`). The GUI star
 **Automatic (validated)** so photographed pages immediately show a conservative corrected preview;
 the preview must still be applied before export. `--dewarp auto` measures curvature, blank
 borders, edge ink, and aspect ratio before and after correction, and rejects a candidate that does
-not improve the measurable geometry or introduces artifacts. It tries the built-in text-line
-method first. Without `--auto-dewarp-uvdoc`, automatic mode never invokes UVDoc. Explicit
-`--dewarp paddleocr_uvdoc`, or automatic mode with that fallback enabled, may let PaddleOCR
-initialize or download its model cache; UniScan does not bundle those weights.
+not improve the measurable geometry or introduces artifacts.
+
+Automatic mode builds two candidates and keeps the flatter one. The built-in text-line method
+models vertical displacement only, so it wins on pure page waves. The bundled UVDoc page model
+(`--dewarp uvdoc`) predicts a sampling grid for the whole page, which also removes perspective and
+returns the page without its photographed background, so it wins on real photographs. A
+user-adjusted wave model outranks both and skips the extra inference. `--no-auto-dewarp-page-model`
+keeps automatic mode on text lines alone.
+
+Because UVDoc reframes the page, its framing checks are relaxed; the curvature evidence decides
+instead. When neither the source nor the result exposes at least three text lines there is nothing
+to verify, so the page is left unchanged: photographs, near-blank scans and sparse pages are
+protected from a forced warp, while a page that is unreadable until it is flattened is accepted
+once rectification reveals its lines.
+
+The model is bundled (MIT model, Apache-2.0 ONNX export; see `src/uniscan/models/README.md`) and
+runs on the CPU through ONNX Runtime in roughly 150 ms per page. `UNISCAN_UVDOC_MODEL` points at a
+different UVDoc ONNX file. Explicit `--dewarp paddleocr_uvdoc`, or automatic mode with
+`--auto-dewarp-uvdoc`, instead uses the optional heavyweight PaddleOCR unwarping runtime and may
+let it initialize or download its own model cache; UniScan does not bundle those weights.
 
 ## Content box and page layout
 

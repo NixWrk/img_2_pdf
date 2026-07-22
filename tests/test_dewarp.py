@@ -192,21 +192,23 @@ def test_auto_dewarp_selects_validated_textline_candidate() -> None:
     assert _first_line_residual_rms(corrected, character_x) < 2.0
 
 
-def test_auto_dewarp_keeps_straight_page_and_does_not_start_uvdoc(monkeypatch) -> None:
+def test_auto_dewarp_keeps_straight_page_and_does_not_start_paddleocr(monkeypatch) -> None:
     image, _character_x = _curved_text_page(amplitude=0.0)
-    uvdoc_calls = 0
+    paddle_calls = 0
 
-    def unexpected_uvdoc(*_args, **_kwargs):
-        nonlocal uvdoc_calls
-        uvdoc_calls += 1
-        raise AssertionError("UVDoc must be explicitly enabled")
+    def unexpected_paddleocr(*_args, **_kwargs):
+        nonlocal paddle_calls
+        paddle_calls += 1
+        raise AssertionError("The PaddleOCR fallback must be explicitly enabled")
 
-    monkeypatch.setattr("uniscan.core.dewarp._uvdoc_dewarp", unexpected_uvdoc)
+    monkeypatch.setattr("uniscan.core.dewarp._uvdoc_dewarp", unexpected_paddleocr)
     corrected, diagnostics = dewarp_document(image, method=DEWARP_METHOD_AUTO)
 
+    # A page that is already straight is left untouched: every candidate has to
+    # earn its place by improving the measured geometry.
     assert diagnostics.applied is False
-    assert diagnostics.reason == "curvature_below_threshold"
-    assert uvdoc_calls == 0
+    assert diagnostics.reason.endswith("curvature_below_threshold")
+    assert paddle_calls == 0
     np.testing.assert_array_equal(corrected, image)
 
 
@@ -226,7 +228,11 @@ def test_auto_dewarp_rejects_candidate_without_curvature_improvement(monkeypatch
         ),
     )
 
-    corrected, diagnostics = dewarp_document(image, method=DEWARP_METHOD_AUTO)
+    corrected, diagnostics = dewarp_document(
+        image,
+        method=DEWARP_METHOD_AUTO,
+        auto_use_uvdoc_grid=False,
+    )
 
     assert diagnostics.applied is False
     assert diagnostics.selected_method == DEWARP_METHOD_NONE
@@ -254,6 +260,7 @@ def test_auto_dewarp_can_use_explicit_uvdoc_fallback(monkeypatch) -> None:
         image,
         method=DEWARP_METHOD_AUTO,
         auto_use_uvdoc=True,
+        auto_use_uvdoc_grid=False,
     )
 
     np.testing.assert_array_equal(corrected, expected)

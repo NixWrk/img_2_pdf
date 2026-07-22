@@ -181,7 +181,13 @@ def main(argv: list[str] | None = None) -> int:
     convert_parser.add_argument(
         "--auto-dewarp-uvdoc",
         action="store_true",
-        help="Allow --dewarp auto to use optional UVDoc (may initialize its model cache).",
+        help="Allow --dewarp auto to use optional PaddleOCR unwarping (initializes its cache).",
+    )
+    convert_parser.add_argument(
+        "--no-auto-dewarp-page-model",
+        dest="auto_dewarp_uvdoc_grid",
+        action="store_false",
+        help="Keep --dewarp auto on text lines only, without the bundled UVDoc page model.",
     )
     convert_parser.add_argument(
         "--page-layout",
@@ -367,6 +373,7 @@ def main(argv: list[str] | None = None) -> int:
                 deskew_method=args.deskew,
                 dewarp_method=args.dewarp,
                 auto_dewarp_uvdoc=args.auto_dewarp_uvdoc,
+                auto_dewarp_uvdoc_grid=args.auto_dewarp_uvdoc_grid,
                 page_layout=args.page_layout,
                 page_margin_mm=args.page_margin_mm,
                 horizontal_alignment=args.align_x,

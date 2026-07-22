@@ -64,6 +64,7 @@ class PageProcessingRequest:
     dewarp_already_applied: bool = False
     uvdoc_cache_home: Path | None = None
     auto_dewarp_uvdoc: bool = False
+    auto_dewarp_uvdoc_grid: bool = True
     postprocess_name: str = "None"
     preprocess_settings: PreprocessSettings | None = None
     page_layout: str = PAGE_LAYOUT_NONE
@@ -418,6 +419,7 @@ def process_document_page(
                 "method": request.dewarp_method,
                 "model": asdict(request.dewarp_model) if request.dewarp_model is not None else None,
                 "auto_uvdoc": request.auto_dewarp_uvdoc,
+                "auto_uvdoc_grid": request.auto_dewarp_uvdoc_grid,
                 "uvdoc_cache": (
                     str(request.uvdoc_cache_home) if request.uvdoc_cache_home is not None else None
                 ),
@@ -427,6 +429,7 @@ def process_document_page(
                 method=request.dewarp_method,
                 uvdoc_cache_home=request.uvdoc_cache_home,
                 auto_use_uvdoc=request.auto_dewarp_uvdoc,
+                auto_use_uvdoc_grid=request.auto_dewarp_uvdoc_grid,
                 model=request.dewarp_model,
             ),
             encode_diagnostics=asdict,

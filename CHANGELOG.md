@@ -42,6 +42,17 @@ All notable changes to UniScan are documented here. The project follows Semantic
 - Selectable hybrid, Hough-line, and foreground-box deskew estimators.
 - Direct CLI access to the OpenCV quad, Hough, and minimum-rectangle boundary backends.
 
+### Added
+
+- Bundled UVDoc page rectifier (`--dewarp uvdoc`, GUI **Page model (UVDoc)**): a grid-based model
+  that flattens the whole page surface, including perspective, and returns the page without its
+  photographed background. It runs on the CPU through ONNX Runtime in roughly 150 ms per page, and
+  its weights ship with UniScan under MIT/Apache-2.0 terms.
+- Automatic dewarp now builds both the text-line and UVDoc candidates and keeps whichever measures
+  flatter, so pure page waves still take the cheap text-line path while photographed pages take the
+  page model. A user-adjusted wave model outranks both, and `--no-auto-dewarp-page-model` restores
+  text-line-only behaviour.
+
 ### Changed
 
 - Camera frame acquisition now runs on a background stream: the preview never blocks the UI on

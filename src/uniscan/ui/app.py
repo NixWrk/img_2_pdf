@@ -32,6 +32,7 @@ from uniscan.core.dewarp import (
     DEWARP_METHOD_AUTO,
     DEWARP_METHOD_NONE,
     DEWARP_METHOD_TEXTLINE,
+    DEWARP_METHOD_UVDOC,
     DewarpModel,
     estimate_textline_dewarp_model,
     interpolate_control_curve,
@@ -122,6 +123,7 @@ RESOLUTIONS = [
 DEWARP_UI_METHODS = {
     "None": DEWARP_METHOD_NONE,
     "Automatic (validated)": DEWARP_METHOD_AUTO,
+    "Page model (UVDoc)": DEWARP_METHOD_UVDOC,
     "Text lines (offline)": DEWARP_METHOD_TEXTLINE,
 }
 DESKEW_UI_METHODS = {
