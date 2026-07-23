@@ -11,6 +11,7 @@ from uniscan.core.dewarp import (
     DEWARP_METHOD_TEXTLINE,
     DewarpDiagnostics,
     DewarpModel,
+    _candidate_rejection_reason,
     apply_dewarp_model,
     dewarp_document,
     estimate_textline_dewarp_model,
@@ -236,7 +237,7 @@ def test_auto_dewarp_rejects_candidate_without_curvature_improvement(monkeypatch
 
     assert diagnostics.applied is False
     assert diagnostics.selected_method == DEWARP_METHOD_NONE
-    assert diagnostics.reason == "textline_rejected:curvature_not_improved"
+    assert diagnostics.reason == "textline_rejected:geometry_not_improved"
     np.testing.assert_array_equal(corrected, image)
 
 
@@ -278,6 +279,43 @@ def test_measure_dewarp_quality_reports_curvature() -> None:
 
     assert curved_metrics.line_count >= 3
     assert curved_metrics.curvature_rms_px > straight_metrics.curvature_rms_px + 1.0
+
+
+def test_quality_gate_accepts_measurably_reduced_perspective() -> None:
+    flat = np.full((600, 800, 3), 255, dtype=np.uint8)
+    for index in range(8):
+        cv2.putText(
+            flat,
+            "LONG DOCUMENT TEXT LINE",
+            (80, 100 + index * 55),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 0),
+            2,
+            cv2.LINE_AA,
+        )
+    corners = np.float32([[0, 0], [799, 0], [799, 599], [0, 599]])
+    trapezoid = np.float32([[150, 30], [650, 30], [770, 570], [30, 570]])
+    perspective = cv2.warpPerspective(
+        flat,
+        cv2.getPerspectiveTransform(corners, trapezoid),
+        (800, 600),
+        borderValue=(255, 255, 255),
+    )
+
+    before = measure_dewarp_quality(perspective)
+    after = measure_dewarp_quality(flat)
+
+    assert before.perspective_score > after.perspective_score + 0.04
+    assert (
+        _candidate_rejection_reason(
+            before,
+            after,
+            require_curvature_improvement=True,
+            allow_reframing=True,
+        )
+        is None
+    )
 
 
 def test_dewarp_none_and_invalid_method() -> None:

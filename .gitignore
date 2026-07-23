@@ -28,6 +28,7 @@ src/uniscan/office_lens/models/*.ort
 src/uniscan/office_lens/models/*.pt
 src/uniscan/office_lens/models/*.pth
 src/uniscan/office_lens/models/*.safetensors
+src/uniscan/models/docshadow_sd7k.onnx
 OCRmypdf_plugins.rar
 OCRmypdf_plugins/*_NIX/
 camscan_suhren/

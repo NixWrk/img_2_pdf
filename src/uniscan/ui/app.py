@@ -39,6 +39,12 @@ from uniscan.core.dewarp import (
 )
 from uniscan.core.pipeline import PageResult, PipelineOptions, process_loaded_items
 from uniscan.core.processing import PageProcessingRequest, process_document_page
+from uniscan.core.lighting import (
+    SHADOW_METHOD_AUTO,
+    SHADOW_METHOD_CLASSICAL,
+    SHADOW_METHOD_DOCSHADOW,
+    SHADOW_METHOD_NONE,
+)
 from uniscan.core.orientation import ORIENTATION_METHOD_AUTO, ORIENTATION_METHOD_NONE
 from uniscan.core.preprocess import (
     DESKEW_METHOD_NONE,
@@ -143,6 +149,12 @@ DESPECKLE_UI_STRENGTHS = {
     "Conservative": "conservative",
     "Normal": "normal",
     "Strong": "strong",
+}
+SHADOW_UI_METHODS = {
+    "None": SHADOW_METHOD_NONE,
+    "Automatic (validated)": SHADOW_METHOD_AUTO,
+    "Model (DocShadow)": SHADOW_METHOD_DOCSHADOW,
+    "Classical": SHADOW_METHOD_CLASSICAL,
 }
 PAGE_LAYOUT_UI_METHODS = {
     "Keep source page": "none",
@@ -626,7 +638,7 @@ class UnifiedScanApp(ctk.CTk):
         self.preprocess_brightness_var = tk.IntVar(value=10)
         self.preprocess_denoise_var = tk.IntVar(value=4)
         self.preprocess_threshold_var = tk.IntVar(value=170)
-        self.preprocess_illumination_var = tk.BooleanVar(value=False)
+        self.shadow_method_var = tk.StringVar(value="None")
         self.binarization_method_var = tk.StringVar(value="None")
         self.binarization_window_var = tk.IntVar(value=31)
         self.binarization_k_var = tk.DoubleVar(value=0.2)
@@ -1316,13 +1328,6 @@ class UnifiedScanApp(ctk.CTk):
             variable=self.lightweight_preview_var,
             command=self.update_page_preview,
         ).pack(anchor="w", padx=6, pady=(0, 6))
-        ctk.CTkCheckBox(
-            processing,
-            text="Correct uneven lighting",
-            variable=self.preprocess_illumination_var,
-            command=self.update_page_preview,
-        ).pack(anchor="w", padx=6, pady=(0, 10))
-
         ctk.CTkLabel(processing, text="Remove page waves", anchor="w").pack(
             fill=ctk.X, padx=6, pady=(0, 2)
         )
@@ -1339,6 +1344,16 @@ class UnifiedScanApp(ctk.CTk):
             justify="left",
             wraplength=230,
             text_color=("#60646c", "#a0a4ab"),
+        ).pack(fill=ctk.X, padx=6, pady=(0, 10))
+
+        ctk.CTkLabel(processing, text="Even page lighting", anchor="w").pack(
+            fill=ctk.X, padx=6, pady=(0, 2)
+        )
+        ctk.CTkOptionMenu(
+            processing,
+            values=list(SHADOW_UI_METHODS),
+            variable=self.shadow_method_var,
+            command=lambda _value: self.update_page_preview(),
         ).pack(fill=ctk.X, padx=6, pady=(0, 10))
 
         ctk.CTkLabel(processing, text="Binarization", anchor="w").pack(
@@ -2330,7 +2345,9 @@ class UnifiedScanApp(ctk.CTk):
             denoise=int(self.preprocess_denoise_var.get()),
             threshold=int(self.preprocess_threshold_var.get()),
             apply_threshold=apply_threshold,
-            correct_illumination=bool(self.preprocess_illumination_var.get()),
+            # Lighting has one canonical stage after geometry correction.
+            # The legacy cleanup flag stays off to prevent double correction.
+            correct_illumination=False,
             binarization_method=binarization_method,
             binarization_window=int(self.binarization_window_var.get()),
             binarization_k=(
@@ -2425,6 +2442,7 @@ class UnifiedScanApp(ctk.CTk):
             dewarp_method=dewarp_method,
             dewarp_model=self._entry_dewarp_model(entry),
             dewarp_already_applied=self._entry_was_dewarped(entry, dewarp_method),
+            shadow_method=SHADOW_UI_METHODS.get(self.shadow_method_var.get(), SHADOW_METHOD_NONE),
             postprocess_name=self.postprocess_var.get(),
             preprocess_settings=self._current_preprocess_settings(),
             page_layout=PAGE_LAYOUT_UI_METHODS.get(self.page_layout_var.get(), "none"),
@@ -5989,12 +6007,15 @@ class UnifiedScanApp(ctk.CTk):
             command=self._on_review_processing_slider_change,
         ).grid(row=3, column=1, sticky="ew", padx=8, pady=(4, 8))
 
-        ctk.CTkCheckBox(
+        ctk.CTkLabel(body, text="Even page lighting").grid(
+            row=4, column=0, sticky="w", padx=8, pady=(0, 8)
+        )
+        ctk.CTkOptionMenu(
             body,
-            text="Correct uneven lighting (experimental)",
-            variable=self.preprocess_illumination_var,
-            command=self.update_page_preview,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
+            values=list(SHADOW_UI_METHODS),
+            variable=self.shadow_method_var,
+            command=lambda _value: self.update_page_preview(),
+        ).grid(row=4, column=1, sticky="ew", padx=8, pady=(0, 8))
 
         ctk.CTkLabel(body, text="Adaptive window").grid(row=5, column=0, sticky="w", padx=8, pady=4)
         ctk.CTkSlider(

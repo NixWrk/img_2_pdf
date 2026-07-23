@@ -65,7 +65,7 @@ def _app_for_processing() -> UnifiedScanApp:
         "preprocess_brightness_var": 0,
         "preprocess_denoise_var": 0,
         "preprocess_threshold_var": 170,
-        "preprocess_illumination_var": False,
+        "shadow_method_var": "None",
         "binarization_method_var": "None",
         "binarization_window_var": 31,
         "binarization_k_var": 0.2,

@@ -67,8 +67,9 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.page_preview_after_frame.winfo_manager() == "grid"
         assert app.page_preview_before_frame.winfo_manager() == ""
         assert app.tabs._name_list == [app.tab_review_name, app.tab_camera_name]
-        app.preprocess_illumination_var.set(True)
-        assert app._current_preprocess_settings().correct_illumination is True
+        app.shadow_method_var.set("Classical")
+        assert app._processing_request().shadow_method == "classical"
+        assert app._current_preprocess_settings().correct_illumination is False
         assert app._drag_drop_error is None
         assert app.toolbar_add_files_button.cget("text") == "+ Add files"
         assert app.toolbar_add_folder_button.cget("text") == "Add folder"

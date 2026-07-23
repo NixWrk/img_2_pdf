@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "assets": {
+    "uvdoc_graph": {
+      "filename": "UVDoc_grid.onnx",
+      "size": 242890,
+      "sha256": "044b406398e8accf2b8c896043f22d318221e443bb095c55d184e97f3eb003f7",
+      "license": "Apache-2.0",
+      "source": "https://huggingface.co/fredcallagan/uvdoc-grid-onnx"
+    },
+    "uvdoc_data": {
+      "filename": "UVDoc_grid.onnx.data",
+      "size": 31588352,
+      "sha256": "3a58a04944e59578200d7b0ed02ccb3ade934e9d88efa21454fbb8b53fa40f02",
+      "license": "Apache-2.0",
+      "source": "https://huggingface.co/fredcallagan/uvdoc-grid-onnx"
+    },
+    "docshadow_sd7k": {
+      "filename": "docshadow_sd7k.onnx",
+      "size": 120041674,
+      "sha256": "8c09b9320a0fb3c53806cdf9cb8410b3706c77caed81f4ec1cb0bf2cbd14b049",
+      "license": "MIT",
+      "source": "https://github.com/fabio-sim/DocShadow-ONNX-TensorRT/releases/tag/v1.0.0",
+      "url": "https://github.com/fabio-sim/DocShadow-ONNX-TensorRT/releases/download/v1.0.0/docshadow_sd7k.onnx"
+    }
+  }
+}

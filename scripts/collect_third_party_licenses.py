@@ -105,6 +105,20 @@ ROBOTO_ASSET_DESTINATIONS = frozenset(
 CUSTOMTKINTER_SHAPES_ASSET_DESTINATION = "customtkinter/assets/fonts/customtkinter_shapes_font.otf"
 ROBOTO_NOTICE_RELATIVE_PATH = Path("ASSETS/Roboto-Apache-2.0.txt")
 ROBOTO_NOTICE_SOURCE = ROOT / "licenses" / "Roboto-Apache-2.0.txt"
+MODEL_ASSET_DESTINATIONS = frozenset(
+    {
+        "uniscan/models/uvdoc_grid.onnx",
+        "uniscan/models/uvdoc_grid.onnx.data",
+        "uniscan/models/docshadow_sd7k.onnx",
+    }
+)
+MODEL_ASSET_SOURCES = {
+    "uniscan/models/uvdoc_grid.onnx": ROOT / "src/uniscan/models/UVDoc_grid.onnx",
+    "uniscan/models/uvdoc_grid.onnx.data": ROOT / "src/uniscan/models/UVDoc_grid.onnx.data",
+    "uniscan/models/docshadow_sd7k.onnx": ROOT / "src/uniscan/models/docshadow_sd7k.onnx",
+}
+UVDOC_NOTICE_RELATIVE_PATH = Path("ASSETS/UVDoc-ONNX-Apache-2.0.txt")
+DOCSHADOW_NOTICE_RELATIVE_PATH = Path("ASSETS/DocShadow-MIT.txt")
 
 
 @dataclass(frozen=True)
@@ -348,6 +362,21 @@ def collect_frozen_asset_notices(output_dir: Path, entries: list[FrozenEntry]) -
         missing = sorted(ROBOTO_ASSET_DESTINATIONS - present_roboto)
         raise RuntimeError("Frozen Roboto asset set is incomplete: " + ", ".join(missing))
 
+    present_models = set(normalized_entries) & MODEL_ASSET_DESTINATIONS
+    if present_models and present_models != MODEL_ASSET_DESTINATIONS:
+        missing = sorted(MODEL_ASSET_DESTINATIONS - present_models)
+        raise RuntimeError("Frozen model asset set is incomplete: " + ", ".join(missing))
+    wrong_sources = sorted(
+        destination
+        for destination in present_models
+        if _normalized_path(normalized_entries[destination].source)
+        != _normalized_path(MODEL_ASSET_SOURCES[destination])
+    )
+    if wrong_sources:
+        raise RuntimeError(
+            "Frozen model asset has an unexpected source: " + ", ".join(wrong_sources)
+        )
+
     reviewed_destinations = set(present_roboto)
     if CUSTOMTKINTER_SHAPES_ASSET_DESTINATION in normalized_entries:
         reviewed_destinations.add(CUSTOMTKINTER_SHAPES_ASSET_DESTINATION)
@@ -376,6 +405,30 @@ def collect_frozen_asset_notices(output_dir: Path, entries: list[FrozenEntry]) -
         labels[_display_frozen_destination(entry.destination)] = (
             "customtkinter; MIT; customtkinter distribution license"
         )
+    if present_models:
+        notices = (
+            (
+                ROOT / "src/uniscan/models/LICENSE",
+                UVDOC_NOTICE_RELATIVE_PATH,
+                "UVDoc ONNX export; Apache-2.0",
+                {"uniscan/models/uvdoc_grid.onnx", "uniscan/models/uvdoc_grid.onnx.data"},
+            ),
+            (
+                ROOT / "src/uniscan/models/DOCSHADOW-LICENSE",
+                DOCSHADOW_NOTICE_RELATIVE_PATH,
+                "DocShadow ONNX export; MIT",
+                {"uniscan/models/docshadow_sd7k.onnx"},
+            ),
+        )
+        for source, relative_notice, label, destinations in notices:
+            if not source.is_file():
+                raise RuntimeError(f"Frozen model license is missing: {source}")
+            notice = Path(output_dir) / relative_notice
+            notice.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, notice)
+            for asset in sorted(destinations):
+                display = _display_frozen_destination(normalized_entries[asset].destination)
+                labels[display] = f"{label}; {relative_notice.as_posix()}"
     return labels
 
 

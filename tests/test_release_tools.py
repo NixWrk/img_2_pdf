@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
 
 from scripts.collect_third_party_licenses import (
     CUSTOMTKINTER_SHAPES_ASSET_DESTINATION,
+    MODEL_ASSET_DESTINATIONS,
+    MODEL_ASSET_SOURCES,
     FrozenEntry,
     collect_frozen_asset_notices,
     collect_licenses,
@@ -16,6 +19,7 @@ from scripts.audit_portable_contents import (
     REQUIRED_PATHS,
     ROBOTO_ASSET_DESTINATIONS,
     ROBOTO_NOTICE_PATH,
+    MODEL_NOTICE_PATHS,
     RUNTIME_NOTICE_MARKERS,
     audit_portable_contents,
 )
@@ -144,6 +148,13 @@ def test_release_workflow_treats_tag_name_as_data() -> None:
     assert 'gh release create "$env:RELEASE_TAG"' in workflow
 
 
+def test_windows_spec_drops_foreign_copies_of_system_crt_forwarders() -> None:
+    spec = (Path(__file__).parents[1] / "uniscan.spec").read_text(encoding="utf-8")
+
+    assert 'startswith("api-ms-win-")' in spec
+    assert '== "ucrtbase.dll"' in spec
+
+
 def test_runtime_notices_include_python_tcl_and_tk(tmp_path: Path) -> None:
     runtime = tmp_path / "runtime"
     runtime.mkdir()
@@ -203,19 +214,19 @@ def test_portable_content_audit_rejects_model_weights(tmp_path: Path) -> None:
     tkdnd.parent.mkdir(parents=True)
     tkdnd.write_text("package provide tkdnd 1", encoding="utf-8")
 
-    audit_portable_contents(root)
+    audit_portable_contents(root, approved_model_assets={})
 
     model = root / "unlicensed.ort"
     model.write_bytes(b"model")
     with pytest.raises(RuntimeError, match="forbidden"):
-        audit_portable_contents(root)
+        audit_portable_contents(root, approved_model_assets={})
 
     model.unlink()
     leaked_native = root / "_internal/mupdfcpp64.dll"
     leaked_native.parent.mkdir(parents=True, exist_ok=True)
     leaked_native.write_bytes(b"native")
     with pytest.raises(RuntimeError, match="forbidden"):
-        audit_portable_contents(root)
+        audit_portable_contents(root, approved_model_assets={})
 
 
 def test_portable_content_audit_rejects_invalid_runtime_notice(tmp_path: Path) -> None:
@@ -233,7 +244,7 @@ def test_portable_content_audit_rejects_invalid_runtime_notice(tmp_path: Path) -
     )
 
     with pytest.raises(RuntimeError, match="runtime notice is invalid"):
-        audit_portable_contents(root)
+        audit_portable_contents(root, approved_model_assets={})
 
 
 def test_portable_content_audit_requires_roboto_notice_and_inventory(tmp_path: Path) -> None:
@@ -251,7 +262,7 @@ def test_portable_content_audit_requires_roboto_notice_and_inventory(tmp_path: P
         path.write_bytes(b"font")
 
     with pytest.raises(RuntimeError, match="missing their Apache-2.0 license notice"):
-        audit_portable_contents(root)
+        audit_portable_contents(root, approved_model_assets={})
 
     notice = root / ROBOTO_NOTICE_PATH
     notice.parent.mkdir(parents=True, exist_ok=True)
@@ -265,4 +276,62 @@ def test_portable_content_audit_requires_roboto_notice_and_inventory(tmp_path: P
         encoding="utf-8",
     )
 
-    audit_portable_contents(root)
+    audit_portable_contents(root, approved_model_assets={})
+
+
+def test_frozen_asset_notices_license_the_exact_model_set(tmp_path: Path) -> None:
+    entries = [
+        FrozenEntry(destination, MODEL_ASSET_SOURCES[destination], "DATA")
+        for destination in MODEL_ASSET_DESTINATIONS
+    ]
+
+    labels = collect_frozen_asset_notices(tmp_path / "licenses", entries)
+    normalized = {destination.lower(): label for destination, label in labels.items()}
+
+    assert set(normalized) == MODEL_ASSET_DESTINATIONS
+    assert normalized["uniscan/models/uvdoc_grid.onnx"].startswith("UVDoc ONNX export; Apache-2.0;")
+    assert normalized["uniscan/models/docshadow_sd7k.onnx"].startswith(
+        "DocShadow ONNX export; MIT;"
+    )
+
+
+def test_portable_content_audit_accepts_only_pinned_model_hashes(tmp_path: Path) -> None:
+    root = tmp_path / "portable"
+    for relative in REQUIRED_PATHS:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(RUNTIME_NOTICE_MARKERS.get(relative, "portable"), encoding="utf-8")
+    tkdnd = root / "_internal/tkinterdnd2/tkdnd/win-x64/tkdnd.tcl"
+    tkdnd.parent.mkdir(parents=True)
+    tkdnd.write_text("package provide tkdnd 1", encoding="utf-8")
+
+    payloads = {
+        "uniscan/models/uvdoc_grid.onnx": b"uvdoc-graph",
+        "uniscan/models/uvdoc_grid.onnx.data": b"uvdoc-data",
+        "uniscan/models/docshadow_sd7k.onnx": b"docshadow",
+    }
+    approved = {}
+    for destination, payload in payloads.items():
+        path = root / "_internal" / destination
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        approved[destination] = (len(payload), hashlib.sha256(payload).hexdigest())
+    for model, relative in MODEL_NOTICE_PATHS.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        source = (
+            Path(__file__).parents[1] / "src/uniscan/models/LICENSE"
+            if model == "uvdoc"
+            else Path(__file__).parents[1] / "src/uniscan/models/DOCSHADOW-LICENSE"
+        )
+        path.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    (root / "THIRD_PARTY_LICENSES/FROZEN_PAYLOAD.txt").write_text(
+        "\n".join(payloads) + "\nUVDoc ONNX export; Apache-2.0\nDocShadow ONNX export; MIT\n",
+        encoding="utf-8",
+    )
+
+    audit_portable_contents(root, approved_model_assets=approved)
+
+    (root / "_internal/uniscan/models/docshadow_sd7k.onnx").write_bytes(b"tampered")
+    with pytest.raises(RuntimeError, match="SHA-256 verification"):
+        audit_portable_contents(root, approved_model_assets=approved)

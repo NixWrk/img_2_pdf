@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from uniscan.core.lighting import SHADOW_METHOD_CHOICES
 from uniscan.diagnostics import diagnostics_json, format_diagnostics, run_diagnostics
 from uniscan.io import DEFAULT_MAX_INPUT_PIXELS
 from uniscan.tools import (
@@ -158,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
     convert_parser.add_argument(
         "--illumination-correction",
         action="store_true",
-        help="Opt in to local shadow and glare correction.",
+        help="Deprecated alias for --shadow classical.",
     )
     convert_parser.add_argument(
         "--orientation",
@@ -188,6 +189,12 @@ def main(argv: list[str] | None = None) -> int:
         dest="auto_dewarp_uvdoc_grid",
         action="store_false",
         help="Keep --dewarp auto on text lines only, without the bundled UVDoc page model.",
+    )
+    convert_parser.add_argument(
+        "--shadow",
+        choices=SHADOW_METHOD_CHOICES,
+        default="none",
+        help="Even out page lighting after geometry correction.",
     )
     convert_parser.add_argument(
         "--page-layout",
@@ -374,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
                 dewarp_method=args.dewarp,
                 auto_dewarp_uvdoc=args.auto_dewarp_uvdoc,
                 auto_dewarp_uvdoc_grid=args.auto_dewarp_uvdoc_grid,
+                shadow_method=args.shadow,
                 page_layout=args.page_layout,
                 page_margin_mm=args.page_margin_mm,
                 horizontal_alignment=args.align_x,

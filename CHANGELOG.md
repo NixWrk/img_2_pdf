@@ -53,7 +53,21 @@ All notable changes to UniScan are documented here. The project follows Semantic
   page model. A user-adjusted wave model outranks both, and `--no-auto-dewarp-page-model` restores
   text-line-only behaviour.
 
+- Bundled DocShadow shadow remover and a validated lighting stage that runs after geometry
+  correction (`--shadow auto|classical|docshadow`). Automatic mode only acts on a page with
+  measurable shadow, prefers the model, falls back to the classical OpenCV normalization, and
+  keeps a candidate only when the page ends up more evenly lit with its ink and contrast intact.
+- `docs/model_evaluation.md` records which models from the survey can and cannot be bundled, with
+  the licence and delivery reasons, so rejected ones are not re-evaluated later.
+
 ### Changed
+
+- DocShadow is fetched from its immutable upstream v1.0.0 release asset during Windows builds,
+  published atomically only after pinned size/SHA-256 verification, and removed from Git history.
+- Model content identities now participate in persistent stage-cache keys; bundled assets are
+  verified before session creation, and GUI/batch reports retain shadow-stage diagnostics.
+- UVDoc automatic acceptance now measures projective line convergence as well as curvature, and
+  the legacy illumination option is a single-stage alias instead of a second correction pass.
 
 - Camera frame acquisition now runs on a background stream: the preview never blocks the UI on
   device reads, every shutter press waits for a guaranteed-fresh frame instead of stale

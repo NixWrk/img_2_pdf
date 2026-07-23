@@ -56,6 +56,8 @@ class ProcessingRecipe:
     dewarp_already_applied: bool
     uvdoc_cache_home: str | None
     auto_dewarp_uvdoc: bool
+    auto_dewarp_uvdoc_grid: bool
+    shadow_method: str
     postprocess_name: str
     preprocess_settings: dict[str, object] | None
     page_layout: str
@@ -69,7 +71,7 @@ class ProcessingRecipe:
     @classmethod
     def from_request(cls, request: PageProcessingRequest) -> "ProcessingRecipe":
         return cls(
-            schema_version=1,
+            schema_version=2,
             orientation_method=request.orientation_method,
             deskew_method=request.deskew_method,
             dewarp_method=request.dewarp_method,
@@ -77,6 +79,8 @@ class ProcessingRecipe:
             dewarp_already_applied=request.dewarp_already_applied,
             uvdoc_cache_home=str(request.uvdoc_cache_home) if request.uvdoc_cache_home else None,
             auto_dewarp_uvdoc=request.auto_dewarp_uvdoc,
+            auto_dewarp_uvdoc_grid=request.auto_dewarp_uvdoc_grid,
+            shadow_method=request.shadow_method,
             postprocess_name=request.postprocess_name,
             preprocess_settings=(
                 asdict(request.preprocess_settings) if request.preprocess_settings else None
@@ -91,7 +95,7 @@ class ProcessingRecipe:
         )
 
     def to_request(self) -> PageProcessingRequest:
-        if type(self.schema_version) is not int or self.schema_version != 1:
+        if type(self.schema_version) is not int or self.schema_version not in (1, 2):
             raise ValueError(f"Unsupported processing recipe: {self.schema_version}")
         model = DewarpModel(**self.dewarp_model) if self.dewarp_model is not None else None
         settings = (
@@ -107,6 +111,8 @@ class ProcessingRecipe:
             dewarp_already_applied=self.dewarp_already_applied,
             uvdoc_cache_home=Path(self.uvdoc_cache_home) if self.uvdoc_cache_home else None,
             auto_dewarp_uvdoc=self.auto_dewarp_uvdoc,
+            auto_dewarp_uvdoc_grid=self.auto_dewarp_uvdoc_grid,
+            shadow_method=self.shadow_method,
             postprocess_name=self.postprocess_name,
             preprocess_settings=settings,
             page_layout=self.page_layout,
@@ -122,14 +128,20 @@ class ProcessingRecipe:
     def from_payload(cls, payload: object) -> "ProcessingRecipe":
         if not isinstance(payload, dict):
             raise ValueError("Processing recipe is not an object.")
+        normalized = dict(payload)
+        if normalized.get("schema_version") == 1:
+            # Version 1 predates the bundled page model and shadow stage.
+            normalized.setdefault("auto_dewarp_uvdoc_grid", True)
+            normalized.setdefault("shadow_method", "none")
         try:
-            recipe = cls(**payload)
+            recipe = cls(**normalized)
         except TypeError as exc:
             raise ValueError("Processing recipe fields are invalid.") from exc
         string_fields = (
             recipe.orientation_method,
             recipe.deskew_method,
             recipe.dewarp_method,
+            recipe.shadow_method,
             recipe.postprocess_name,
             recipe.page_layout,
             recipe.horizontal_alignment,

@@ -21,6 +21,11 @@ from uniscan.core.layout import (
     PAGE_LAYOUT_CHOICES,
     VERTICAL_ALIGNMENTS,
 )
+from uniscan.core.lighting import (
+    SHADOW_METHOD_CHOICES,
+    SHADOW_METHOD_CLASSICAL,
+    SHADOW_METHOD_NONE,
+)
 from uniscan.core.cleanup import (
     BINARIZATION_CHOICES,
     BINARIZATION_NONE,
@@ -119,6 +124,8 @@ class PageRunReport:
     dewarp_max_displacement_px: float = 0.0
     dewarp_curvature_before_px: float = 0.0
     dewarp_curvature_after_px: float = 0.0
+    dewarp_perspective_before: float = 0.0
+    dewarp_perspective_after: float = 0.0
     dewarp_blank_border_before: float = 0.0
     dewarp_blank_border_after: float = 0.0
     dewarp_edge_ink_before: float = 0.0
@@ -126,6 +133,16 @@ class PageRunReport:
     dewarp_aspect_change: float = 0.0
     dewarp_duration_ms: float = 0.0
     dewarp_reason: str | None = None
+    shadow_method: str = "none"
+    shadow_applied: bool = False
+    shadow_selected_method: str = "none"
+    shadow_unevenness_before: float = 0.0
+    shadow_unevenness_after: float = 0.0
+    shadow_before: float = 0.0
+    shadow_after: float = 0.0
+    shadow_glare_after: float = 0.0
+    shadow_duration_ms: float = 0.0
+    shadow_reason: str | None = None
     page_layout: str = "none"
     layout_applied: bool = False
     content_box: tuple[int, int, int, int] | None = None
@@ -861,11 +878,13 @@ def _report_payload(
     postprocess_name: str,
     preprocess_settings: PreprocessSettings | None,
     illumination_correction: bool,
+    legacy_illumination_correction: bool,
     orientation_method: str,
     deskew_method: str,
     dewarp_method: str,
     auto_dewarp_uvdoc: bool,
     auto_dewarp_uvdoc_grid: bool,
+    shadow_method: str,
     page_layout: str,
     page_margin_mm: float,
     horizontal_alignment: str,
@@ -885,7 +904,7 @@ def _report_payload(
     fallback_pages = sum(page.fallback_reason is not None for page in pages)
     effective_preprocess = preprocess_settings or PreprocessSettings()
     return {
-        "schemaVersion": 3,
+        "schemaVersion": 4,
         "outputPdf": str(output_pdf),
         "reportPath": str(report_path),
         "imagesDirectory": str(images_dir) if images_dir is not None else None,
@@ -913,11 +932,13 @@ def _report_payload(
         "threshold": effective_preprocess.threshold,
         "applyThreshold": effective_preprocess.apply_threshold,
         "illuminationCorrection": illumination_correction,
+        "legacyIlluminationCorrectionRequested": legacy_illumination_correction,
         "orientationMethod": orientation_method,
         "deskewMethod": deskew_method,
         "dewarpMethod": dewarp_method,
         "autoDewarpUvdoc": auto_dewarp_uvdoc,
         "autoDewarpPageModel": auto_dewarp_uvdoc_grid,
+        "shadowMethod": shadow_method,
         "pageLayout": page_layout,
         "pageMarginMm": page_margin_mm,
         "horizontalAlignment": horizontal_alignment,
@@ -961,6 +982,8 @@ def _report_payload(
                 "dewarpMaxDisplacementPx": page.dewarp_max_displacement_px,
                 "dewarpCurvatureBeforePx": page.dewarp_curvature_before_px,
                 "dewarpCurvatureAfterPx": page.dewarp_curvature_after_px,
+                "dewarpPerspectiveBefore": page.dewarp_perspective_before,
+                "dewarpPerspectiveAfter": page.dewarp_perspective_after,
                 "dewarpBlankBorderBefore": page.dewarp_blank_border_before,
                 "dewarpBlankBorderAfter": page.dewarp_blank_border_after,
                 "dewarpEdgeInkBefore": page.dewarp_edge_ink_before,
@@ -968,6 +991,16 @@ def _report_payload(
                 "dewarpAspectChange": page.dewarp_aspect_change,
                 "dewarpDurationMs": page.dewarp_duration_ms,
                 "dewarpReason": page.dewarp_reason,
+                "shadowMethod": page.shadow_method,
+                "shadowApplied": page.shadow_applied,
+                "shadowSelectedMethod": page.shadow_selected_method,
+                "shadowUnevennessBefore": page.shadow_unevenness_before,
+                "shadowUnevennessAfter": page.shadow_unevenness_after,
+                "shadowBefore": page.shadow_before,
+                "shadowAfter": page.shadow_after,
+                "shadowGlareAfter": page.shadow_glare_after,
+                "shadowDurationMs": page.shadow_duration_ms,
+                "shadowReason": page.shadow_reason,
                 "pageLayout": page.page_layout,
                 "layoutApplied": page.layout_applied,
                 "contentBox": list(page.content_box) if page.content_box is not None else None,
@@ -1090,6 +1123,7 @@ def run_batch_pipeline(
     dewarp_method: str = "none",
     auto_dewarp_uvdoc: bool = False,
     auto_dewarp_uvdoc_grid: bool = True,
+    shadow_method: str = "none",
     page_layout: str = "none",
     page_margin_mm: float = 10.0,
     horizontal_alignment: str = "center",
@@ -1106,6 +1140,7 @@ def run_batch_pipeline(
     cancel_cb: CancelCb | None = None,
 ) -> BatchPipelineResult:
     """Run the complete streaming pre-OCR pipeline and atomically publish its outputs."""
+    legacy_illumination_correction = bool(illumination_correction)
     legacy_dpi = int(pdf_dpi)
     input_dpi = int(input_pdf_dpi) if input_pdf_dpi is not None else legacy_dpi
     output_dpi = int(output_pdf_dpi) if output_pdf_dpi is not None else legacy_dpi
@@ -1130,6 +1165,11 @@ def run_batch_pipeline(
     orientation_method = orientation_method.strip().lower()
     deskew_method = deskew_method.strip().lower()
     dewarp_method = dewarp_method.strip().lower()
+    shadow_method = shadow_method.strip().lower()
+    # The old flag is now only a compatibility spelling for the classical
+    # method. An explicit --shadow value wins, and only one stage ever runs.
+    if illumination_correction and shadow_method == SHADOW_METHOD_NONE:
+        shadow_method = SHADOW_METHOD_CLASSICAL
     page_layout = page_layout.strip().lower()
     binarization_method = binarization_method.strip().lower()
     despeckle_strength = despeckle_strength.strip().lower()
@@ -1150,6 +1190,8 @@ def run_batch_pipeline(
         raise ValueError(f"Unsupported deskew method: {deskew_method}")
     if dewarp_method not in DEWARP_METHOD_CHOICES:
         raise ValueError(f"Unsupported dewarp method: {dewarp_method}")
+    if shadow_method not in SHADOW_METHOD_CHOICES:
+        raise ValueError(f"Unsupported shadow removal method: {shadow_method}")
     if auto_dewarp_uvdoc and dewarp_method != DEWARP_METHOD_AUTO:
         raise ValueError("auto_dewarp_uvdoc requires dewarp_method='auto'.")
     if page_layout not in PAGE_LAYOUT_CHOICES:
@@ -1226,19 +1268,15 @@ def run_batch_pipeline(
     if preprocess_settings is not None:
         preprocess_settings = replace(
             preprocess_settings,
-            correct_illumination=bool(illumination_correction),
+            correct_illumination=False,
             binarization_method=binarization_method,
             binarization_window=int(binarization_window),
             binarization_k=binarization_k,
             despeckle_strength=despeckle_strength,
         )
-    elif (
-        illumination_correction
-        or binarization_method != BINARIZATION_NONE
-        or despeckle_strength != DESPECKLE_NONE
-    ):
+    elif binarization_method != BINARIZATION_NONE or despeckle_strength != DESPECKLE_NONE:
         preprocess_settings = PreprocessSettings(
-            correct_illumination=bool(illumination_correction),
+            correct_illumination=False,
             binarization_method=binarization_method,
             binarization_window=int(binarization_window),
             binarization_k=binarization_k,
@@ -1306,6 +1344,7 @@ def run_batch_pipeline(
                         uvdoc_cache_home=uvdoc_cache_home,
                         auto_dewarp_uvdoc=auto_dewarp_uvdoc,
                         auto_dewarp_uvdoc_grid=auto_dewarp_uvdoc_grid,
+                        shadow_method=shadow_method,
                         postprocess_name=postprocess_name,
                         preprocess_settings=preprocess_settings,
                         page_layout=page_layout,
@@ -1331,6 +1370,7 @@ def run_batch_pipeline(
                     )
                 deskew_angle = processing_diagnostics.deskew_angle_degrees
                 dewarp_diagnostics = processing_diagnostics.dewarp
+                shadow_diagnostics = processing_diagnostics.shadow
                 despeckle_diagnostics = processing_diagnostics.despeckle
                 layout_diagnostics = processing_diagnostics.layout
                 lighting = processing_diagnostics.lighting
@@ -1369,6 +1409,8 @@ def run_batch_pipeline(
                         dewarp_max_displacement_px=dewarp_diagnostics.max_displacement_px,
                         dewarp_curvature_before_px=dewarp_diagnostics.curvature_before_px,
                         dewarp_curvature_after_px=dewarp_diagnostics.curvature_after_px,
+                        dewarp_perspective_before=dewarp_diagnostics.perspective_before,
+                        dewarp_perspective_after=dewarp_diagnostics.perspective_after,
                         dewarp_blank_border_before=dewarp_diagnostics.blank_border_before,
                         dewarp_blank_border_after=dewarp_diagnostics.blank_border_after,
                         dewarp_edge_ink_before=dewarp_diagnostics.edge_ink_before,
@@ -1376,6 +1418,16 @@ def run_batch_pipeline(
                         dewarp_aspect_change=dewarp_diagnostics.aspect_change,
                         dewarp_duration_ms=dewarp_diagnostics.duration_ms,
                         dewarp_reason=dewarp_diagnostics.reason,
+                        shadow_method=shadow_diagnostics.method,
+                        shadow_applied=shadow_diagnostics.applied,
+                        shadow_selected_method=shadow_diagnostics.selected_method,
+                        shadow_unevenness_before=shadow_diagnostics.unevenness_before,
+                        shadow_unevenness_after=shadow_diagnostics.unevenness_after,
+                        shadow_before=shadow_diagnostics.shadow_before,
+                        shadow_after=shadow_diagnostics.shadow_after,
+                        shadow_glare_after=shadow_diagnostics.glare_after,
+                        shadow_duration_ms=shadow_diagnostics.duration_ms,
+                        shadow_reason=shadow_diagnostics.reason,
                         page_layout=page_layout,
                         layout_applied=layout_diagnostics.applied,
                         content_box=(
@@ -1433,12 +1485,14 @@ def run_batch_pipeline(
             preprocess_preset=preprocess_preset,
             postprocess_name=postprocess_name,
             preprocess_settings=preprocess_settings,
-            illumination_correction=bool(illumination_correction),
+            illumination_correction=shadow_method != SHADOW_METHOD_NONE,
+            legacy_illumination_correction=legacy_illumination_correction,
             orientation_method=orientation_method,
             deskew_method=deskew_method,
             dewarp_method=dewarp_method,
             auto_dewarp_uvdoc=bool(auto_dewarp_uvdoc),
             auto_dewarp_uvdoc_grid=bool(auto_dewarp_uvdoc_grid),
+            shadow_method=shadow_method,
             page_layout=page_layout,
             page_margin_mm=float(page_margin_mm),
             horizontal_alignment=horizontal_alignment,

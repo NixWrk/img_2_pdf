@@ -34,6 +34,8 @@ def test_runtime_diagnostics_pass_without_camera() -> None:
     assert payload["ok"] is True
     assert any(check["name"] == "optional:office-lens" for check in payload["checks"])
     assert any(check["name"] == "optional:office-lens-classifier" for check in payload["checks"])
+    assert any(check["name"] == "model:uvdoc" for check in payload["checks"])
+    assert any(check["name"] == "model:docshadow" for check in payload["checks"])
 
 
 def test_office_lens_quad_model_does_not_require_classifier(tmp_path, monkeypatch) -> None:

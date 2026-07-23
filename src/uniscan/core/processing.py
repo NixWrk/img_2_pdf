@@ -25,6 +25,12 @@ from .dewarp import (
     DewarpModel,
     dewarp_document,
 )
+from .lighting import (
+    SHADOW_METHOD_CHOICES,
+    SHADOW_METHOD_NONE,
+    ShadowDiagnostics,
+    remove_document_shadows,
+)
 from .layout import (
     PAGE_LAYOUT_CHOICES,
     PAGE_LAYOUT_NONE,
@@ -50,7 +56,7 @@ from .preprocess import (
 from uniscan.storage.stage_cache import ProcessingStageCache
 
 CancelCb = Callable[[], bool]
-PROCESSING_ALGORITHM_VERSION = 3
+PROCESSING_ALGORITHM_VERSION = 4
 
 
 @dataclass(slots=True)
@@ -65,6 +71,7 @@ class PageProcessingRequest:
     uvdoc_cache_home: Path | None = None
     auto_dewarp_uvdoc: bool = False
     auto_dewarp_uvdoc_grid: bool = True
+    shadow_method: str = SHADOW_METHOD_NONE
     postprocess_name: str = "None"
     preprocess_settings: PreprocessSettings | None = None
     page_layout: str = PAGE_LAYOUT_NONE
@@ -88,6 +95,7 @@ class PageProcessingDiagnostics:
     deskew_line_count: int
     deskew_reason: str
     dewarp: DewarpDiagnostics
+    shadow: ShadowDiagnostics
     despeckle: DespeckleDiagnostics
     layout: PageLayoutDiagnostics
     lighting: LightingDiagnostics | None
@@ -107,15 +115,14 @@ def _cancelled(request: PageProcessingRequest) -> None:
 
 
 def _uses_unidentified_uvdoc(request: PageProcessingRequest) -> bool:
-    """Whether this run may invoke model-backed UVDoc without a stable model identity."""
+    """Whether PaddleOCR UVDoc may run without a stable model identity."""
     if request.dewarp_already_applied:
         # The already-warped pixels are the controller input and therefore part
         # of the source fingerprint.
         return False
-    # This is intentionally conservative for auto: before executing the stage
-    # we cannot prove that deterministic textline correction will win, so
-    # model-independent persistent hits are disabled through all downstream
-    # stages whenever UVDoc is allowed.
+    # The bundled ONNX UVDoc has an exact content identity in its cache key.
+    # PaddleOCR manages its own downloaded weights, so its branch remains
+    # conservatively non-cacheable until that adapter exposes an identity.
     return request.dewarp_method == "paddleocr_uvdoc" or (
         request.dewarp_method == "auto" and request.auto_dewarp_uvdoc
     )
@@ -312,6 +319,8 @@ def _dewarp_from_dict(payload: dict[str, object]) -> DewarpDiagnostics:
         "curvature_rms_px",
         "curvature_before_px",
         "curvature_after_px",
+        "perspective_before",
+        "perspective_after",
         "blank_border_before",
         "blank_border_after",
         "edge_ink_before",
@@ -321,6 +330,26 @@ def _dewarp_from_dict(payload: dict[str, object]) -> DewarpDiagnostics:
     ):
         _finite_float(getattr(diagnostics, field_name), field_name=f"dewarp {field_name}")
     _optional_reason(diagnostics.reason, field_name="dewarp reason")
+    return diagnostics
+
+
+def _shadow_from_dict(payload: dict[str, object]) -> ShadowDiagnostics:
+    diagnostics = ShadowDiagnostics(**payload)
+    if diagnostics.method not in SHADOW_METHOD_CHOICES:
+        raise ValueError("Invalid cached shadow method.")
+    if diagnostics.selected_method not in SHADOW_METHOD_CHOICES:
+        raise ValueError("Invalid cached selected shadow method.")
+    _strict_bool(diagnostics.applied, field_name="shadow applied flag")
+    for field_name in (
+        "unevenness_before",
+        "unevenness_after",
+        "shadow_before",
+        "shadow_after",
+        "glare_after",
+        "duration_ms",
+    ):
+        _finite_float(getattr(diagnostics, field_name), field_name=f"shadow {field_name}")
+    _optional_reason(diagnostics.reason, field_name="shadow reason")
     return diagnostics
 
 
@@ -411,6 +440,13 @@ def process_document_page(
                 {"version": 1, "already_applied": True, "method": request.dewarp_method},
             )
     else:
+        uvdoc_identity = None
+        if request.dewarp_method == "uvdoc" or (
+            request.dewarp_method == "auto" and request.auto_dewarp_uvdoc_grid
+        ):
+            from .uvdoc import model_identity as uvdoc_model_identity
+
+            uvdoc_identity = uvdoc_model_identity()
         dewarped, dewarp, upstream_key = _run_stage(
             stage="dewarp",
             image=deskewed,
@@ -420,6 +456,7 @@ def process_document_page(
                 "model": asdict(request.dewarp_model) if request.dewarp_model is not None else None,
                 "auto_uvdoc": request.auto_dewarp_uvdoc,
                 "auto_uvdoc_grid": request.auto_dewarp_uvdoc_grid,
+                "uvdoc_model_identity": uvdoc_identity,
                 "uvdoc_cache": (
                     str(request.uvdoc_cache_home) if request.uvdoc_cache_home is not None else None
                 ),
@@ -439,6 +476,30 @@ def process_document_page(
             durations=durations,
             cache_hits=cache_hits,
         )
+
+    _cancelled(request)
+    shadow_model_identity = None
+    if request.shadow_method in ("auto", "docshadow"):
+        from .docshadow import model_identity as docshadow_model_identity
+
+        shadow_model_identity = docshadow_model_identity()
+    lit, shadow, upstream_key = _run_stage(
+        stage="lighting",
+        image=dewarped,
+        upstream_key=upstream_key,
+        options={
+            "method": request.shadow_method,
+            "model_identity": shadow_model_identity,
+        },
+        operation=lambda: remove_document_shadows(dewarped, method=request.shadow_method),
+        encode_diagnostics=asdict,
+        decode_diagnostics=_shadow_from_dict,
+        cacheable=(request.shadow_method != SHADOW_METHOD_NONE and cache_safe_after_dewarp),
+        request=request,
+        durations=durations,
+        cache_hits=cache_hits,
+    )
+    dewarped = lit
 
     _cancelled(request)
     if request.postprocess_name not in POSTPROCESSING_OPTIONS:
@@ -517,7 +578,7 @@ def process_document_page(
     lighting = None
     if request.lighting_diagnostics:
         _cancelled(request)
-        lighting = _timed("lighting", durations, lambda: analyze_lighting(dewarped))
+        lighting = _timed("lighting_diagnostics", durations, lambda: analyze_lighting(dewarped))
     _cancelled(request)
     return PageProcessingResult(
         image=laid_out,
@@ -532,6 +593,7 @@ def process_document_page(
             deskew_line_count=int(deskew_payload.get("line_count", 0)),
             deskew_reason=str(deskew_payload.get("reason", "unknown")),
             dewarp=dewarp,
+            shadow=shadow,
             despeckle=despeckle,
             layout=layout,
             lighting=lighting,

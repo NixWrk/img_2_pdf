@@ -54,7 +54,14 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "uniscan.office_lens" = ["models/README.md"]
-"uniscan" = ["models/*.onnx", "models/*.onnx.data", "models/README.md", "models/LICENSE"]
+"uniscan" = [
+  "models/UVDoc_grid.onnx",
+  "models/UVDoc_grid.onnx.data",
+  "models/README.md",
+  "models/manifest.json",
+  "models/LICENSE",
+  "models/DOCSHADOW-LICENSE",
+]
 
 [tool.ruff]
 line-length = 100

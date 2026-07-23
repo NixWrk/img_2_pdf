@@ -12,6 +12,7 @@ from uniscan.session import (
     AutosaveSessionLock,
     CROP_STATE_APPLIED,
     CommittedPageProcessing,
+    ProcessingRecipe,
     SessionInUseError,
     UnsafeSessionLockError,
     acquire_autosave_lock,
@@ -344,7 +345,12 @@ def test_manifest_v2_round_trips_committed_recipe_and_v1_migrates(tmp_path) -> N
     manifest = tmp_path / "autosave.json"
     session = create_persistent_session(tmp_path)
     entry = session.add_image(name="processed", image=_image(40))
-    request = PageProcessingRequest(postprocess_name="Grayscale", page_dpi=240)
+    request = PageProcessingRequest(
+        postprocess_name="Grayscale",
+        page_dpi=240,
+        auto_dewarp_uvdoc_grid=False,
+        shadow_method="auto",
+    )
     result = process_document_page(entry.original_image, request)
     entry.current_image = result.image
     entry.committed_processing = CommittedPageProcessing.from_result(
@@ -362,6 +368,8 @@ def test_manifest_v2_round_trips_committed_recipe_and_v1_migrates(tmp_path) -> N
     assert committed is not None
     assert committed.recipe.page_dpi == 240
     assert committed.recipe.postprocess_name == "Grayscale"
+    assert committed.recipe.auto_dewarp_uvdoc_grid is False
+    assert committed.recipe.shadow_method == "auto"
     assert "layout" in committed.diagnostics
 
     payload["schemaVersion"] = 1
@@ -369,6 +377,18 @@ def test_manifest_v2_round_trips_committed_recipe_and_v1_migrates(tmp_path) -> N
     manifest.write_text(json.dumps(payload), encoding="utf-8")
     restored_v1 = CaptureSession.restore_manifest(manifest)
     assert restored_v1.entries[0].committed_processing is None
+
+
+def test_processing_recipe_v1_defaults_new_model_stages_safely() -> None:
+    payload = ProcessingRecipe.from_request(PageProcessingRequest()).to_payload()
+    payload["schema_version"] = 1
+    payload.pop("auto_dewarp_uvdoc_grid")
+    payload.pop("shadow_method")
+
+    restored = ProcessingRecipe.from_payload(payload).to_request()
+
+    assert restored.auto_dewarp_uvdoc_grid is True
+    assert restored.shadow_method == "none"
 
 
 def test_invalid_optional_recipe_is_dropped_without_quarantining_page(tmp_path) -> None:

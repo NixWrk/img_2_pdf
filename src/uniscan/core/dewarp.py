@@ -36,6 +36,8 @@ class DewarpDiagnostics:
     curvature_rms_px: float = 0.0
     curvature_before_px: float = 0.0
     curvature_after_px: float = 0.0
+    perspective_before: float = 0.0
+    perspective_after: float = 0.0
     blank_border_before: float = 0.0
     blank_border_after: float = 0.0
     edge_ink_before: float = 0.0
@@ -51,6 +53,7 @@ class DewarpQualityMetrics:
 
     curvature_rms_px: float
     line_count: int
+    perspective_score: float
     blank_border_ratio: float
     edge_ink_ratio: float
     aspect_ratio: float
@@ -298,6 +301,72 @@ def _line_curves(mask: np.ndarray) -> list[np.ndarray]:
     return curves
 
 
+def _perspective_score(mask: np.ndarray) -> float:
+    """Estimate convergence of otherwise parallel, long text lines.
+
+    Curvature alone cannot prove that a planar trapezoid was rectified: its
+    baselines can be perfectly straight both before and after correction. The
+    page-wide line envelope, however, narrows monotonically toward a projective
+    vanishing point. This score measures that trend and baseline convergence.
+    """
+    height, width = mask.shape[:2]
+    join_width = max(15, width // 35)
+    connected = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (join_width, 3)),
+        iterations=1,
+    )
+    contours, _hierarchy = cv2.findContours(
+        connected,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    lines: list[tuple[float, float, float, float]] = []
+    for contour in contours:
+        x, y, line_width, line_height = cv2.boundingRect(contour)
+        if line_width < width * 0.3 or line_height < 3 or line_height > height * 0.09:
+            continue
+        if y <= 1 or y + line_height >= height - 1:
+            continue
+        crop = mask[y : y + line_height, x : x + line_width]
+        sample_x: list[float] = []
+        sample_y: list[float] = []
+        for local_x in range(line_width):
+            ink_y = np.flatnonzero(crop[:, local_x])
+            if ink_y.size:
+                sample_x.append(float(x + local_x))
+                sample_y.append(float(y + np.median(ink_y)))
+        if len(sample_x) < max(20, int(line_width * 0.15)):
+            continue
+        xs = np.asarray(sample_x, dtype=np.float64)
+        fitted = _robust_baseline(xs, np.asarray(sample_y, dtype=np.float64))
+        if fitted is None:
+            continue
+        slope = float(np.polyfit(xs, fitted, 1)[0])
+        lines.append((y + line_height * 0.5, float(xs.min()), float(xs.max()), slope))
+    if len(lines) < 3:
+        return 0.0
+
+    evidence = np.asarray(lines, dtype=np.float64)
+    widths = evidence[:, 2] - evidence[:, 1]
+    # Short headings and ragged final lines do not describe the page envelope.
+    keep = widths >= max(width * 0.3, float(np.percentile(widths, 70)) * 0.72)
+    evidence = evidence[keep]
+    if evidence.shape[0] < 3 or float(np.ptp(evidence[:, 0])) < height * 0.15:
+        return 0.0
+    y_normalized = (evidence[:, 0] - evidence[:, 0].min()) / max(1.0, float(np.ptp(evidence[:, 0])))
+    width_normalized = (evidence[:, 2] - evidence[:, 1]) / max(1.0, float(width))
+    width_trend = abs(float(np.polyfit(y_normalized, width_normalized, 1)[0]))
+    correlation = 0.0
+    if float(np.std(width_normalized)) > 1e-6:
+        correlation = abs(float(np.corrcoef(y_normalized, width_normalized)[0, 1]))
+    envelope_convergence = width_trend * correlation
+    slopes = evidence[:, 3]
+    baseline_convergence = float(np.percentile(slopes, 90) - np.percentile(slopes, 10))
+    return max(0.0, envelope_convergence, baseline_convergence)
+
+
 def _aggregate_curve(curves: list[np.ndarray], height: int) -> np.ndarray | None:
     if len(curves) < 3:
         return None
@@ -338,12 +407,13 @@ def _border_values(gray: np.ndarray, border: int) -> np.ndarray:
 def measure_dewarp_quality(image: np.ndarray) -> DewarpQualityMetrics:
     """Measure local curvature and common warp artifacts without recognizing text."""
     if image.size == 0 or len(image.shape) < 2:
-        return DewarpQualityMetrics(0.0, 0, 1.0, 0.0, 0.0)
+        return DewarpQualityMetrics(0.0, 0, 0.0, 1.0, 0.0, 0.0)
 
     analysis, scale = _resize_for_analysis(image)
     gray = _to_gray(analysis)
     mask = _foreground_mask(gray)
     curves = _line_curves(mask)
+    perspective = _perspective_score(mask)
     curve = _aggregate_curve(curves, analysis.shape[0])
     curvature = 0.0
     if curve is not None:
@@ -360,6 +430,7 @@ def measure_dewarp_quality(image: np.ndarray) -> DewarpQualityMetrics:
     return DewarpQualityMetrics(
         curvature_rms_px=round(curvature, 3),
         line_count=len(curves),
+        perspective_score=round(perspective, 6),
         blank_border_ratio=round(blank_border, 6),
         edge_ink_ratio=round(edge_ink, 6),
         aspect_ratio=round(width / max(1.0, float(height)), 6),
@@ -378,14 +449,15 @@ def _candidate_rejection_reason(
     ``allow_reframing`` loosens the framing limits for whole-page rectifiers
     that legitimately drop the photographed background: their output is the
     page alone, so content sits closer to the edge and the aspect ratio
-    changes by design. Curvature evidence stays the deciding factor.
+    changes by design. Either curvature or projective convergence can provide
+    the deciding geometry evidence.
     """
     if after.aspect_ratio <= 0.0:
         return "invalid_output_size"
     aspect_change = abs(float(np.log(after.aspect_ratio / max(1e-6, before.aspect_ratio))))
     if aspect_change > (0.45 if allow_reframing else 0.15):
         return "excessive_aspect_change"
-    if after.blank_border_ratio > before.blank_border_ratio + 0.15:
+    if not allow_reframing and after.blank_border_ratio > before.blank_border_ratio + 0.15:
         return "new_blank_borders"
     if not allow_reframing and after.edge_ink_ratio > before.edge_ink_ratio + 0.04:
         return "content_moved_to_edge"
@@ -393,8 +465,16 @@ def _candidate_rejection_reason(
         if after.line_count < 3:
             return "textline_evidence_lost"
         required_improvement = max(0.15, before.curvature_rms_px * 0.05)
-        if after.curvature_rms_px > before.curvature_rms_px - required_improvement:
-            return "curvature_not_improved"
+        curvature_improved = (
+            after.curvature_rms_px <= before.curvature_rms_px - required_improvement
+        )
+        perspective_improvement = max(0.02, before.perspective_score * 0.1)
+        perspective_improved = (
+            before.perspective_score >= 0.04
+            and after.perspective_score <= before.perspective_score - perspective_improvement
+        )
+        if not curvature_improved and not perspective_improved:
+            return "geometry_not_improved"
     return None
 
 
@@ -412,6 +492,8 @@ def _quality_diagnostics(
         diagnostics,
         curvature_before_px=before.curvature_rms_px,
         curvature_after_px=after.curvature_rms_px,
+        perspective_before=before.perspective_score,
+        perspective_after=after.perspective_score,
         blank_border_before=before.blank_border_ratio,
         blank_border_after=after.blank_border_ratio,
         edge_ink_before=before.edge_ink_ratio,
@@ -677,6 +759,7 @@ def _automatic_dewarp(
             # perspective and whole-surface deformation.
             if (
                 textline_after is None
+                or grid_after.perspective_score + 0.01 < textline_after.perspective_score
                 or grid_after.curvature_rms_px < textline_after.curvature_rms_px
             ):
                 return (
@@ -685,9 +768,7 @@ def _automatic_dewarp(
                         grid_diagnostics,
                         method=DEWARP_METHOD_AUTO,
                         selected_method=DEWARP_METHOD_UVDOC,
-                        reason=(
-                            None if textline_reason is None else f"textline:{textline_reason}"
-                        ),
+                        reason=(None if textline_reason is None else f"textline:{textline_reason}"),
                     ),
                     grid_after,
                 )

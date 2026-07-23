@@ -19,6 +19,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from uniscan.model_assets import model_file_identity, verify_model_asset
+
 MODEL_FILENAME = "UVDoc_grid.onnx"
 MODEL_DIR = Path(__file__).resolve().parent.parent / "models"
 MODEL_ENV_VAR = "UNISCAN_UVDOC_MODEL"
@@ -51,6 +53,16 @@ def is_available() -> bool:
     return True
 
 
+def model_identity() -> str:
+    """Content identity used by persistent processing-cache keys."""
+    path = model_path()
+    parts = [model_file_identity(path)]
+    external_data = path.with_name(f"{path.name}.data")
+    if external_data.is_file():
+        parts.append(model_file_identity(external_data))
+    return "uvdoc:" + ":".join(parts)
+
+
 def _load_session():
     """Return a cached inference session for the configured model."""
     path = model_path()
@@ -58,6 +70,9 @@ def _load_session():
         raise FileNotFoundError(
             f"UVDoc model is missing: {path}. Set {MODEL_ENV_VAR} to a UVDoc ONNX file."
         )
+    if not os.environ.get(MODEL_ENV_VAR):
+        verify_model_asset("uvdoc_graph", path)
+        verify_model_asset("uvdoc_data", path.with_name(f"{path.name}.data"))
     key = str(path.resolve())
     with _session_lock:
         session = _session_cache.get(key)
@@ -68,9 +83,7 @@ def _load_session():
         except ImportError as exc:  # pragma: no cover - depends on optional install
             raise RuntimeError("UVDoc rectification requires onnxruntime.") from exc
         # Sessions are expensive to build and safe to share across threads.
-        session = onnxruntime.InferenceSession(
-            str(path), providers=["CPUExecutionProvider"]
-        )
+        session = onnxruntime.InferenceSession(str(path), providers=["CPUExecutionProvider"])
         _session_cache[key] = session
         return session
 

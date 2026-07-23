@@ -52,20 +52,22 @@ in the background. Export uses the last committed pixels for each page, so chang
 controls without applying them does not silently alter an export. If A4 or Letter layout was
 applied at one DPI, reapply it before exporting at another DPI.
 
-## Optional model backends
+## Model backends
 
 Headless boundary detection is disabled by default. When `--detect` is enabled,
-`--backend auto` selects the built-in OpenCV hybrid policy. The portable package does not include
-Office Lens model weights, ONNX Runtime, PaddleOCR, or UVDoc weights.
+`--backend auto` selects the built-in OpenCV hybrid policy. The portable package includes ONNX
+Runtime, the pinned UVDoc whole-page rectifier, and the pinned DocShadow lighting model. Their
+exact SHA-256 identities and copied licenses are recorded under `THIRD_PARTY_LICENSES`. Use
+`--dewarp auto|uvdoc` for geometry and `--shadow auto|docshadow|classical` for lighting.
 
 The Office Lens adapter is a bring-your-own-model source-installation feature for compatible
 weights that the user is legally permitted to use. The required quad model and optional automatic
 mode classifier are documented in the source repository's `docs/office_lens_onnx.md`; they cannot
 be enabled by copying unverified model files into this portable package.
 
-UVDoc is also a source-installation feature. When explicitly selected, PaddleOCR may initialize or
-download its own model cache. The bundled offline text-line dewarper does not require that optional
-runtime.
+PaddleOCR UVDoc remains an optional source-installation fallback. When explicitly selected, it may
+initialize or download its own model cache; those weights are not in the portable package. The
+built-in text-line dewarper requires no model runtime.
 
 ## Output safety
 

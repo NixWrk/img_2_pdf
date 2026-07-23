@@ -8,6 +8,8 @@ Record Windows version, artifact SHA-256, camera model, and operator in the rele
 - [ ] Run `uniscan.exe doctor` and confirm all non-camera checks are `ok`.
 - [ ] Run `uniscan.exe doctor --camera --camera-index 0` with the target camera connected.
 - [ ] Start `uniscan.exe`; verify the Workspace renders without a neighboring Camera tab.
+- [ ] Confirm `--dewarp uvdoc` and `--shadow docshadow` run without downloading anything on the
+      clean machine; inspect the JSON report for selected model, latency, and before/after evidence.
 
 ## Camera and recovery
 

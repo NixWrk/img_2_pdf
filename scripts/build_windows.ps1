@@ -30,6 +30,11 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "Release dependency installation failed." }
     }
 
+    # DocShadow is deliberately not a Git blob. Fetch the immutable v1.0.0
+    # release asset and publish it only after its pinned size and SHA-256 match.
+    & $Python scripts\download_model_assets.py --asset docshadow_sd7k --target src\uniscan\models
+    if ($LASTEXITCODE -ne 0) { throw "Pinned DocShadow asset download failed." }
+
     if (-not $SkipTests) {
         & $Python -m pip check
         if ($LASTEXITCODE -ne 0) { throw "Dependency check failed." }
@@ -76,12 +81,12 @@ try {
     $Version = (& $Python -c "from uniscan import __version__; print(__version__)").Trim()
     $ArtifactVersion = $Version
     if ($env:GITHUB_REF_TYPE -ne "tag") {
-        $Commit = (& git rev-parse --short=12 HEAD 2>$null)
+        $Commit = (& git -c core.excludesFile= rev-parse --short=12 HEAD 2>$null)
         if ($LASTEXITCODE -ne 0 -or -not $Commit) {
             $Commit = Get-Date -Format "yyyyMMddHHmmss"
         }
         $ArtifactVersion = "$Version-dev-$($Commit.Trim())"
-        $Dirty = (& git status --porcelain 2>$null)
+        $Dirty = (& git -c core.excludesFile= status --porcelain 2>$null)
         if ($LASTEXITCODE -eq 0 -and $Dirty) {
             $ArtifactVersion = "$ArtifactVersion-dirty"
         }

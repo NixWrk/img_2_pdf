@@ -11,6 +11,9 @@
 - Licenses: upstream UVDoc is MIT; the ONNX export is published under Apache-2.0. `LICENSE` in
   this directory is the export's license text. Both permit redistribution, so unlike the Office
   Lens adapter these weights ship with UniScan.
+- Pinned identity: graph SHA-256
+  `044b406398e8accf2b8c896043f22d318221e443bb095c55d184e97f3eb003f7`; external data SHA-256
+  `3a58a04944e59578200d7b0ed02ccb3ade934e9d88efa21454fbb8b53fa40f02`.
 
 ### Interface
 
@@ -25,6 +28,31 @@ axis). `uniscan.core.uvdoc` upsamples it to the page size, converts it to pixel 
 feeds `cv2.remap`, so the original full-resolution image is sampled directly.
 
 Set `UNISCAN_UVDOC_MODEL` to use a different UVDoc ONNX file.
+
+## DocShadow shadow remover
+
+- File: `docshadow_sd7k.onnx` (~120 MB), the SD7K-trained variant.
+- Source: <https://github.com/fabio-sim/DocShadow-ONNX-TensorRT> (MIT), an ONNX export of
+  <https://github.com/CXH-Research/DocShadow-SD7K> (MIT), from *High-Resolution Document Shadow
+  Removal via A Large-Scale Real-World Dataset and A Frequency-Aware Shadow Erasing Net*,
+  ICCV 2023. `DOCSHADOW-LICENSE` is the export's licence text.
+- Delivery: immutable upstream release asset `v1.0.0`; SHA-256
+  `8c09b9320a0fb3c53806cdf9cb8410b3706c77caed81f4ec1cb0bf2cbd14b049`, size
+  `120041674` bytes. It is downloaded atomically by `scripts/download_model_assets.py` and is
+  accepted only after both size and SHA-256 match; it is not stored as a Git blob.
+- Interface: input `image` `(batch, 3, height, width)` float32 RGB in `[0, 1]`; output `result`
+  in the same layout. Both spatial dimensions are dynamic.
+
+`uniscan.core.docshadow` runs it at 256x256 and keeps only the ratio between its result and its
+input as a smoothed, single-channel illumination map, which is then applied to the full-resolution
+page. Running the network at page resolution would be several times slower for no measurable gain,
+and using its output directly would resample every glyph.
+
+Set `UNISCAN_DOCSHADOW_MODEL` to use a different DocShadow ONNX file.
+
+Machine-readable provenance and exact identities are in `manifest.json`. Bundled default assets
+are verified again before the first ONNX Runtime session is created. Environment overrides are
+allowed for development and their content SHA-256 becomes part of processing-cache keys.
 
 ## Adding other weights
 

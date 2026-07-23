@@ -64,6 +64,7 @@ def test_processing_controller_runs_canonical_stages() -> None:
         "cleanup",
         "layout",
         "lighting",
+        "lighting_diagnostics",
     }
 
 
@@ -403,3 +404,61 @@ def test_processing_cache_does_not_reuse_uvdoc_without_model_identity(
     assert second.diagnostics.cache_hits == ()
     assert not np.array_equal(first.image, second.image)
     assert cache.stats.writes == 0
+
+
+def test_processing_cache_keys_bundled_uvdoc_by_model_content(tmp_path, monkeypatch) -> None:
+    cache = ProcessingStageCache(tmp_path / "stages", max_bytes=64 * 1024 * 1024)
+    first_model = tmp_path / "first.onnx"
+    second_model = tmp_path / "second.onnx"
+    first_model.write_bytes(b"first-uvdoc")
+    second_model.write_bytes(b"second-uvdoc")
+    monkeypatch.setenv("UNISCAN_UVDOC_MODEL", str(first_model))
+    image = np.full((100, 120, 3), 220, dtype=np.uint8)
+    calls = 0
+
+    def model_backed_dewarp(source, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return source.copy(), DewarpDiagnostics(method="uvdoc", applied=True)
+
+    monkeypatch.setattr("uniscan.core.processing.dewarp_document", model_backed_dewarp)
+    request = PageProcessingRequest(dewarp_method="uvdoc", stage_cache=cache)
+
+    process_document_page(image, request)
+    cached = process_document_page(image, request)
+    monkeypatch.setenv("UNISCAN_UVDOC_MODEL", str(second_model))
+    changed = process_document_page(image, request)
+
+    assert calls == 2
+    assert "dewarp" in cached.diagnostics.cache_hits
+    assert "dewarp" not in changed.diagnostics.cache_hits
+
+
+def test_processing_cache_keys_docshadow_by_model_content(tmp_path, monkeypatch) -> None:
+    cache = ProcessingStageCache(tmp_path / "stages", max_bytes=64 * 1024 * 1024)
+    first_model = tmp_path / "first.onnx"
+    second_model = tmp_path / "second.onnx"
+    first_model.write_bytes(b"first-docshadow")
+    second_model.write_bytes(b"second-docshadow")
+    monkeypatch.setenv("UNISCAN_DOCSHADOW_MODEL", str(first_model))
+    image = np.full((100, 120, 3), 220, dtype=np.uint8)
+    calls = 0
+
+    def model_backed_lighting(source, *, method):
+        from uniscan.core.lighting import ShadowDiagnostics
+
+        nonlocal calls
+        calls += 1
+        return source.copy(), ShadowDiagnostics(method=method, applied=True)
+
+    monkeypatch.setattr("uniscan.core.processing.remove_document_shadows", model_backed_lighting)
+    request = PageProcessingRequest(shadow_method="docshadow", stage_cache=cache)
+
+    process_document_page(image, request)
+    cached = process_document_page(image, request)
+    monkeypatch.setenv("UNISCAN_DOCSHADOW_MODEL", str(second_model))
+    changed = process_document_page(image, request)
+
+    assert calls == 2
+    assert "lighting" in cached.diagnostics.cache_hits
+    assert "lighting" not in changed.diagnostics.cache_hits

@@ -277,7 +277,7 @@ def test_report_records_complete_effective_processing_configuration(tmp_path) ->
     )
 
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
-    assert report["schemaVersion"] == 3
+    assert report["schemaVersion"] == 4
     assert report["pdfDpi"] == 200
     assert report["inputPdfDpi"] == 200
     assert report["outputPdfDpi"] == 200
@@ -557,6 +557,7 @@ def test_run_batch_pipeline_reports_cleanup_and_lighting_diagnostics(tmp_path) -
         binarization_method="sauvola",
         binarization_window=31,
         despeckle_strength="conservative",
+        shadow_method="classical",
         lighting_diagnostics=True,
     )
 
@@ -565,13 +566,21 @@ def test_run_batch_pipeline_reports_cleanup_and_lighting_diagnostics(tmp_path) -
     page = result.pages[0]
     assert page.binarization_method == "sauvola"
     assert page.despeckle_removed_components >= 1
-    assert page.shadow_fraction is not None and page.shadow_fraction > 0.05
+    assert page.shadow_method == "classical"
+    assert page.shadow_applied is True
+    assert page.shadow_selected_method == "classical"
+    assert page.shadow_duration_ms >= 0.0
+    assert page.shadow_before > 0.05
+    assert page.shadow_fraction is not None and page.shadow_fraction < page.shadow_before
     assert page.glare_fraction is not None and page.glare_fraction > 0.001
-    assert "uneven_shadow" in page.lighting_warnings
+    assert "uneven_shadow" not in page.lighting_warnings
+    assert "possible_glare" in page.lighting_warnings
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert report["binarizationMethod"] == "sauvola"
     assert report["despeckleStrength"] == "conservative"
     assert report["lightingDiagnostics"] is True
+    assert report["shadowMethod"] == "classical"
+    assert report["pages"][0]["shadowSelectedMethod"] == "classical"
     assert report["pages"][0]["despeckleRemovedComponents"] >= 1
 
 
@@ -799,6 +808,8 @@ def test_cli_convert_runs_end_to_end(tmp_path, capsys) -> None:
     assert output_pdf.exists()
     report = json.loads(output_pdf.with_suffix(".pdf.report.json").read_text(encoding="utf-8"))
     assert report["illuminationCorrection"] is True
+    assert report["legacyIlluminationCorrectionRequested"] is True
+    assert report["shadowMethod"] == "classical"
     assert report["inputPdfDpi"] == 144
     assert report["outputPdfDpi"] == 96
     assert report["maxInputPixels"] == 1_000_000

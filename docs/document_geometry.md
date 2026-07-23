@@ -69,8 +69,9 @@ action because it uses layout evidence rather than a small-angle line estimate.
 Page dewarping is disabled by default in the CLI (`--dewarp none`). The GUI starts with
 **Automatic (validated)** so photographed pages immediately show a conservative corrected preview;
 the preview must still be applied before export. `--dewarp auto` measures curvature, blank
-borders, edge ink, and aspect ratio before and after correction, and rejects a candidate that does
-not improve the measurable geometry or introduces artifacts.
+borders, edge ink, aspect ratio, text-line curvature, and projective convergence before and after
+correction, and rejects a candidate that does not improve measurable geometry or introduces
+artifacts.
 
 Automatic mode builds two candidates and keeps the flatter one. The built-in text-line method
 models vertical displacement only, so it wins on pure page waves. The bundled UVDoc page model
@@ -79,8 +80,9 @@ returns the page without its photographed background, so it wins on real photogr
 user-adjusted wave model outranks both and skips the extra inference. `--no-auto-dewarp-page-model`
 keeps automatic mode on text lines alone.
 
-Because UVDoc reframes the page, its framing checks are relaxed; the curvature evidence decides
-instead. When neither the source nor the result exposes at least three text lines there is nothing
+Because UVDoc reframes the page, blank-background framing checks are relaxed; either reduced
+curvature or reduced line convergence must prove that geometry improved. When neither the source
+nor the result exposes at least three text lines there is nothing
 to verify, so the page is left unchanged: photographs, near-blank scans and sparse pages are
 protected from a forced warp, while a page that is unreadable until it is flattened is accepted
 once rectification reveals its lines.
@@ -114,7 +116,7 @@ page. PDF allocation is checked using PDFium's rounded-up render dimensions; an 
 fails before rendering instead of being silently downsampled. A4/Letter layout also refuses an
 output canvas above 150,000,000 pixels before allocating it.
 
-The batch JSON report uses schema version 3. It records `inputPdfDpi`, `outputPdfDpi`,
+The batch JSON report uses schema version 4. It records `inputPdfDpi`, `outputPdfDpi`,
 `pdfJpegQuality`, and `maxInputPixels`; `pdfDpi` remains as a compatibility alias for
 `outputPdfDpi`. The report also records the requested orientation policy globally and the applied
 angle, confidence, and reason for each page, plus the spread decision and confidence.
@@ -133,6 +135,13 @@ protected and retained.
 highlight fraction, all clipped pixels, illumination range/unevenness, and warning codes. A glare
 warning means detail may be absent in the source; illumination correction must not claim to recover
 such clipped detail.
+
+`--shadow auto|docshadow|classical` is the one lighting-correction stage and always runs after
+geometry. Automatic mode uses DocShadow only when the page measurably needs correction, validates
+the result, and falls back to the classical method. The legacy `--illumination-correction` option
+is an alias for `--shadow classical`; it no longer enables a second cleanup correction. Per-page
+diagnostics record requested/selected methods, applied/no-op state, before/after evidence, latency,
+and rejection reason.
 
 `--dewarp textline` is the built-in offline mode: it requires no optional model weights or
 third-party inference runtime. It:
@@ -155,8 +164,8 @@ populate on first use. The PaddleOCR package and downloaded model artifacts must
 their own applicable terms; UniScan neither distributes those weights nor records a stable model
 binary identity in a processing recipe.
 
-The GUI offers **None**, validated automatic text-line correction, and the explicit offline
-text-line method; it does not enable the UVDoc fallback. Workspace Processing exposes
+The GUI offers **None**, **Automatic (validated)**, **Page model (UVDoc)**, and the explicit offline
+text-line method. Workspace Processing exposes
 **Page perspective** and **Edit page waves** directly. The inline perspective editor shows
 draggable corner handles beside a live rectified result. Changed corners are saved when navigating
 with Prev/Next or leaving with Done; Reset and Auto Detect remain explicit replacement actions.
@@ -201,10 +210,10 @@ its current custom license is non-commercial and share-alike despite the reposit
 
 ## Diagnostics and examples
 
-The schema-3 JSON run report records requested and selected methods, orientation decision, deskew
+The schema-4 JSON run report records requested and selected methods, orientation decision, deskew
 angle, whether dewarp was applied, supporting text lines, maximum displacement, curvature
-before/after, blank-border and edge-ink ratios, aspect change, dewarp latency, and any no-op or
-rejection reason.
+and perspective evidence before/after, blank-border and edge-ink ratios, aspect change, dewarp
+latency, lighting correction evidence, and any no-op or rejection reason.
 
 Synthetic regression tests cover curved and straight pages. Real examples should be added before
 tuning thresholds: camera photos near a book spine, rippled loose paper, roller-scanner waves, and

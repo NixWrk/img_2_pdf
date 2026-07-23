@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import platform
 import sys
 import tempfile
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from uniscan.io.camera_service import CaptureFactory, CameraService, _opencv_capture_factory
 from uniscan.office_lens import CLASSIFIER_MODEL, QUAD_MODEL
+from uniscan.model_assets import model_asset, verify_model_asset
 
 
 RUNTIME_MODULES = (
@@ -21,6 +23,7 @@ RUNTIME_MODULES = (
     "customtkinter",
     "img2pdf",
     "numpy",
+    "onnxruntime",
     "PIL",
     "pypdfium2",
     "tkinterdnd2",
@@ -154,6 +157,47 @@ def _optional_office_lens_check() -> DiagnosticCheck:
     return _optional_office_lens_checks()[0]
 
 
+def _bundled_model_checks() -> tuple[DiagnosticCheck, DiagnosticCheck]:
+    """Verify the exact on-disk identities used by the built-in model stages."""
+    from uniscan.core import docshadow, uvdoc
+
+    uvdoc_path = uvdoc.model_path()
+    try:
+        if os.environ.get(uvdoc.MODEL_ENV_VAR):
+            _open_onnx_session(uvdoc_path)
+            uvdoc_detail = f"custom model loaded from {uvdoc_path}"
+        else:
+            verify_model_asset("uvdoc_graph", uvdoc_path)
+            verify_model_asset("uvdoc_data", uvdoc_path.with_name(f"{uvdoc_path.name}.data"))
+            uvdoc_detail = f"pinned SHA-256 verified: {model_asset('uvdoc_graph').sha256}"
+        uvdoc_check = DiagnosticCheck("model:uvdoc", True, uvdoc_detail)
+    except Exception as exc:
+        uvdoc_check = DiagnosticCheck("model:uvdoc", False, str(exc))
+
+    docshadow_path = docshadow.model_path()
+    if not docshadow_path.is_file():
+        docshadow_check = DiagnosticCheck(
+            "model:docshadow",
+            True,
+            "disabled in this source checkout; run scripts/download_model_assets.py",
+            blocking=False,
+        )
+    else:
+        try:
+            if os.environ.get(docshadow.MODEL_ENV_VAR):
+                _open_onnx_session(docshadow_path)
+                docshadow_detail = f"custom model loaded from {docshadow_path}"
+            else:
+                verify_model_asset("docshadow_sd7k", docshadow_path)
+                docshadow_detail = (
+                    "pinned SHA-256 verified: " + model_asset("docshadow_sd7k").sha256
+                )
+            docshadow_check = DiagnosticCheck("model:docshadow", True, docshadow_detail)
+        except Exception as exc:
+            docshadow_check = DiagnosticCheck("model:docshadow", False, str(exc), blocking=False)
+    return uvdoc_check, docshadow_check
+
+
 def _gui_runtime_check() -> DiagnosticCheck:
     """Create a real TkDND root so frozen native payload failures are observable."""
     root = None
@@ -186,6 +230,7 @@ def run_diagnostics(
         )
     ]
     checks.extend(_module_checks(RUNTIME_MODULES))
+    checks.extend(_bundled_model_checks())
     checks.extend(_optional_office_lens_checks())
     if check_gui_runtime:
         checks.append(_gui_runtime_check())

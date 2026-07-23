@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 REQUIRED_PATHS = (
@@ -22,7 +27,6 @@ REQUIRED_PATHS = (
 FORBIDDEN_NAMES = {".ds_store"}
 FORBIDDEN_SUFFIXES = {
     ".lib",
-    ".onnx",
     ".ort",
     ".pdmodel",
     ".pdparams",
@@ -32,7 +36,17 @@ FORBIDDEN_SUFFIXES = {
     ".pyo",
     ".safetensors",
 }
-FORBIDDEN_PATH_TOKENS = {"fitz", "mupdf", "onnxruntime"}
+FORBIDDEN_MODEL_SUFFIXES = (
+    ".onnx",
+    ".onnx.data",
+    ".ort",
+    ".pdmodel",
+    ".pdparams",
+    ".pt",
+    ".pth",
+    ".safetensors",
+)
+FORBIDDEN_PATH_TOKENS = {"fitz", "mupdf"}
 ALLOWED_TKDND_PLATFORMS = {"win-x64", "win-x64-tcl9"}
 RUNTIME_NOTICE_MARKERS = {
     "THIRD_PARTY_LICENSES/RUNTIME/PYTHON-PSF-LICENSE.txt": "Python Software Foundation",
@@ -53,14 +67,45 @@ ROBOTO_NOTICE_MARKERS = (
     "Apache License",
     "Version 2.0",
 )
+MODEL_NOTICE_PATHS = {
+    "uvdoc": "THIRD_PARTY_LICENSES/ASSETS/UVDoc-ONNX-Apache-2.0.txt",
+    "docshadow": "THIRD_PARTY_LICENSES/ASSETS/DocShadow-MIT.txt",
+}
+MODEL_NOTICE_MARKERS = {
+    "uvdoc": ("Apache License", "Version 2.0"),
+    "docshadow": ("MIT License", "Copyright (c) 2023"),
+}
+
+
+def _approved_model_assets() -> dict[str, tuple[int, str]]:
+    manifest = json.loads((ROOT / "src/uniscan/models/manifest.json").read_text(encoding="utf-8"))
+    return {
+        f"uniscan/models/{entry['filename']}".lower(): (entry["size"], entry["sha256"])
+        for entry in manifest["assets"].values()
+    }
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _normalized_payload_destination(relative: str) -> str:
     return relative.lower().removeprefix("_internal/")
 
 
-def audit_portable_contents(root: Path) -> None:
+def audit_portable_contents(
+    root: Path,
+    *,
+    approved_model_assets: dict[str, tuple[int, str]] | None = None,
+) -> None:
     root = Path(root)
+    approved_models = (
+        _approved_model_assets() if approved_model_assets is None else approved_model_assets
+    )
     missing = [relative for relative in REQUIRED_PATHS if not (root / relative).is_file()]
     if missing:
         raise RuntimeError(f"Portable artifact is missing: {', '.join(missing)}")
@@ -68,13 +113,20 @@ def audit_portable_contents(root: Path) -> None:
     forbidden: list[str] = []
     tkdnd_platforms: set[str] = set()
     payload_destinations: set[str] = set()
+    payload_paths: dict[str, Path] = {}
     for path in root.rglob("*"):
         if not path.is_file():
             continue
         relative = path.relative_to(root).as_posix()
         relative_lower = relative.lower()
-        payload_destinations.add(_normalized_payload_destination(relative))
+        normalized_destination = _normalized_payload_destination(relative)
+        payload_destinations.add(normalized_destination)
+        payload_paths[normalized_destination] = path
         if path.name.lower() in FORBIDDEN_NAMES or path.suffix.lower() in FORBIDDEN_SUFFIXES:
+            forbidden.append(relative)
+        if relative_lower.endswith(FORBIDDEN_MODEL_SUFFIXES) and (
+            normalized_destination not in approved_models
+        ):
             forbidden.append(relative)
         if any(token in relative_lower for token in FORBIDDEN_PATH_TOKENS):
             forbidden.append(relative)
@@ -90,6 +142,32 @@ def audit_portable_contents(root: Path) -> None:
         raise RuntimeError(f"Portable artifact contains unrelated TkDND platforms: {unexpected}")
     if "win-x64" not in tkdnd_platforms:
         raise RuntimeError("Portable artifact is missing the Windows x64 TkDND runtime")
+
+    missing_models = sorted(set(approved_models) - payload_destinations)
+    if missing_models:
+        raise RuntimeError(
+            "Portable artifact is missing approved model assets: " + ", ".join(missing_models)
+        )
+    for destination, (expected_size, expected_hash) in approved_models.items():
+        path = payload_paths[destination]
+        if path.stat().st_size != expected_size or _sha256(path) != expected_hash:
+            raise RuntimeError(f"Portable model asset failed SHA-256 verification: {destination}")
+    if approved_models:
+        for model_name, relative in MODEL_NOTICE_PATHS.items():
+            notice_path = root / relative
+            if not notice_path.is_file():
+                raise RuntimeError(f"Portable {model_name} model is missing its license notice")
+            notice = notice_path.read_text(encoding="utf-8")
+            if any(marker not in notice for marker in MODEL_NOTICE_MARKERS[model_name]):
+                raise RuntimeError(f"Portable {model_name} model license notice is invalid")
+        inventory = (
+            (root / "THIRD_PARTY_LICENSES/FROZEN_PAYLOAD.txt").read_text(encoding="utf-8").lower()
+        )
+        if any(destination not in inventory for destination in approved_models) or (
+            "uvdoc onnx export; apache-2.0" not in inventory
+            or "docshadow onnx export; mit" not in inventory
+        ):
+            raise RuntimeError("Portable frozen inventory does not license its model assets")
 
     roboto_candidates = {
         destination

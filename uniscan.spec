@@ -17,8 +17,11 @@ datas = collect_data_files(
 datas += [
     ("src/uniscan/models/UVDoc_grid.onnx", "uniscan/models"),
     ("src/uniscan/models/UVDoc_grid.onnx.data", "uniscan/models"),
+    ("src/uniscan/models/docshadow_sd7k.onnx", "uniscan/models"),
     ("src/uniscan/models/LICENSE", "uniscan/models"),
+    ("src/uniscan/models/DOCSHADOW-LICENSE", "uniscan/models"),
     ("src/uniscan/models/README.md", "uniscan/models"),
+    ("src/uniscan/models/manifest.json", "uniscan/models"),
 ]
 hiddenimports = collect_submodules("tkinterdnd2")
 
@@ -36,6 +39,17 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# Windows 10/11 provide the Universal CRT and API-set forwarders. PyInstaller
+# can accidentally resolve copies from an unrelated PATH entry (for example a
+# JDK) and freeze those foreign binaries. Never redistribute those copies.
+a.binaries = [
+    entry
+    for entry in a.binaries
+    if not (
+        entry[0].replace("\\", "/").rsplit("/", 1)[-1].lower().startswith("api-ms-win-")
+        or entry[0].replace("\\", "/").rsplit("/", 1)[-1].lower() == "ucrtbase.dll"
+    )
+]
 pyz = PYZ(a.pure)
 
 exe = EXE(
