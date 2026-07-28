@@ -358,6 +358,21 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         help="Candidate as NAME=OUTPUT_DIR; repeat for every model.",
     )
+    model_parser.add_argument(
+        "--tesseract",
+        default=None,
+        help="Tesseract executable; requires --ocr-subset and records the exact version.",
+    )
+    model_parser.add_argument(
+        "--tesseract-language",
+        default=None,
+        help="Optional Tesseract language passed as -l (default uses the engine default).",
+    )
+    model_parser.add_argument(
+        "--ocr-subset",
+        default=None,
+        help="Named OCR subset from the imported benchmark manifest.",
+    )
 
     args = parser.parse_args(argv)
     if args.version:
@@ -480,6 +495,9 @@ def main(argv: list[str] | None = None) -> int:
                 corpus_dir=args.input,
                 output_path=args.output,
                 candidates=parse_candidate_specs(args.candidate),
+                tesseract_executable=args.tesseract,
+                tesseract_language=args.tesseract_language,
+                ocr_subset=args.ocr_subset,
             )
             print(summarize_model_tournament(report))
         except (OSError, RuntimeError, ValueError) as exc:

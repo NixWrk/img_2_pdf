@@ -451,6 +451,8 @@ Quality-first model tournament (candidate licences are recorded but never scored
 
 See [the tournament manifest and candidate contract](docs/model_tournament.md) and the
 [current model shortlist](docs/model_evaluation.md).
+The tournament guide also documents the fail-closed `docunet-corrected`/`dir300` importer,
+known `64_1`/`64_2` correction, versioned OCR subsets and hash-bound official LD/AAD results.
 
 Build the Windows x64 portable ZIP, SHA-256 file, frozen-runtime smoke tests, and dependency-license
 inventory:

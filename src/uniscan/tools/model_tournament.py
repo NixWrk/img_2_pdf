@@ -13,6 +13,14 @@ import cv2
 import numpy as np
 
 from uniscan.io import imread_unicode
+from uniscan.tools.document_metrics import (
+    DOCUNET_MS_SSIM_WEIGHTS,
+    aad_opencv_dis_proxy,
+    docunet_ms_ssim,
+    levenshtein_distance,
+    tesseract_text,
+    tesseract_version,
+)
 
 
 SUPPORTED_TASKS = frozenset({"geometry", "lighting", "restoration"})
@@ -39,6 +47,10 @@ class TournamentCaseScore:
     psnr_score: float
     quality_score: float
     latency_ms: float | None
+    docunet_ms_ssim: float | None
+    aad_opencv_dis_proxy: float | None
+    ocr_edit_distance: int | None
+    ocr_cer: float | None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -53,6 +65,10 @@ class TournamentCaseScore:
             "psnrScore": self.psnr_score,
             "qualityScore": self.quality_score,
             "latencyMs": self.latency_ms,
+            "docunetMsSsim": self.docunet_ms_ssim,
+            "aadOpenCvDisProxy": self.aad_opencv_dis_proxy,
+            "ocrEditDistance": self.ocr_edit_distance,
+            "ocrCer": self.ocr_cer,
         }
 
 
@@ -70,6 +86,9 @@ class CandidateTournamentResult:
     quality_score: float | None
     mean_latency_ms: float | None
     categories: dict[str, float]
+    geometry_metrics: dict[str, float]
+    output_set_sha256: str | None
+    official_evaluation: dict[str, object] | None
     cases: tuple[TournamentCaseScore, ...]
 
     def to_dict(self) -> dict[str, object]:
@@ -84,6 +103,9 @@ class CandidateTournamentResult:
             "qualityScore": self.quality_score,
             "meanLatencyMs": self.mean_latency_ms,
             "categories": self.categories,
+            "geometryMetrics": self.geometry_metrics,
+            "outputSetSha256": self.output_set_sha256,
+            "officialEvaluation": self.official_evaluation,
             "cases": [case.to_dict() for case in self.cases],
         }
 
@@ -96,6 +118,9 @@ class ModelTournamentReport:
     task: str
     manifest_sha256: str
     metric_weights: dict[str, float]
+    benchmark_profile: dict[str, object] | None
+    metric_implementations: dict[str, object]
+    ocr_runtime: dict[str, object] | None
     winner: str | None
     ranking: tuple[str, ...]
     candidates: tuple[CandidateTournamentResult, ...]
@@ -108,6 +133,9 @@ class ModelTournamentReport:
             "task": self.task,
             "manifestSha256": self.manifest_sha256,
             "metricWeights": self.metric_weights,
+            "benchmarkProfile": self.benchmark_profile,
+            "metricImplementations": self.metric_implementations,
+            "ocrRuntime": self.ocr_runtime,
             "winner": self.winner,
             "ranking": list(self.ranking),
             "candidates": [candidate.to_dict() for candidate in self.candidates],
@@ -172,6 +200,35 @@ def load_model_tournament_manifest(corpus_dir: Path) -> dict[str, object]:
     if task not in SUPPORTED_TASKS:
         raise ValueError(f"Tournament task must be one of: {', '.join(sorted(SUPPORTED_TASKS))}.")
     _validated_metric_weights(payload.get("metricWeights"), str(task))
+    benchmark_profile = payload.get("benchmarkProfile")
+    if benchmark_profile is not None:
+        if task != "geometry" or not isinstance(benchmark_profile, dict):
+            raise ValueError("benchmarkProfile is supported only for geometry manifests.")
+        profile_id = benchmark_profile.get("id")
+        target_area = benchmark_profile.get("targetAreaPixels")
+        ms_weights = benchmark_profile.get("msSsimWeights")
+        if profile_id not in {"docunet-corrected", "dir300"}:
+            raise ValueError("benchmarkProfile.id must be docunet-corrected or dir300.")
+        if benchmark_profile.get("protocolVersion") != 1:
+            raise ValueError("benchmarkProfile.protocolVersion must be 1.")
+        if target_area != 598400:
+            raise ValueError("benchmarkProfile.targetAreaPixels must be the published value 598400.")
+        if (
+            not isinstance(ms_weights, list)
+            or len(ms_weights) != 5
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or float(value) < 0
+                for value in ms_weights
+            )
+            or any(
+                not math.isclose(float(value), expected, abs_tol=1e-9)
+                for value, expected in zip(ms_weights, DOCUNET_MS_SSIM_WEIGHTS)
+            )
+        ):
+            raise ValueError("benchmarkProfile.msSsimWeights must match the published five weights.")
     if not isinstance(cases, list) or not cases:
         raise ValueError("Tournament manifest must contain at least one case.")
 
@@ -193,6 +250,25 @@ def load_model_tournament_manifest(corpus_dir: Path) -> dict[str, object]:
             raise ValueError(f"Tournament input is missing: {input_path}")
         if not reference_path.is_file():
             raise ValueError(f"Tournament reference is missing: {reference_path}")
+        for field, file_path in (
+            ("inputSha256", input_path),
+            ("referenceSha256", reference_path),
+        ):
+            expected_sha256 = case.get(field)
+            if expected_sha256 is None:
+                continue
+            if (
+                not isinstance(expected_sha256, str)
+                or len(expected_sha256) != 64
+                or any(character not in "0123456789abcdefABCDEF" for character in expected_sha256)
+            ):
+                raise ValueError(f"Tournament case {case_id} {field} must be a SHA-256 digest.")
+            actual_sha256 = _sha256(file_path)
+            if actual_sha256 != expected_sha256.lower():
+                raise ValueError(
+                    f"Tournament case {case_id} {field} mismatch: expected "
+                    f"{expected_sha256.lower()}, got {actual_sha256}."
+                )
         output = case.get("output", Path(str(case["input"])).name)
         _safe_relative_path(corpus, output, field=f"case {case_id} output")
         weight = case.get("weight", 1.0)
@@ -206,6 +282,13 @@ def load_model_tournament_manifest(corpus_dir: Path) -> dict[str, object]:
         category = case.get("category", "default")
         if not isinstance(category, str) or not category.strip():
             raise ValueError(f"Tournament case {case_id} category must be a non-empty string.")
+        subsets = case.get("subsets", [])
+        if (
+            not isinstance(subsets, list)
+            or any(not isinstance(value, str) or not value.strip() for value in subsets)
+            or len(set(subsets)) != len(subsets)
+        ):
+            raise ValueError(f"Tournament case {case_id} subsets must be unique strings.")
     return payload
 
 
@@ -240,6 +323,59 @@ def _candidate_metadata(root: Path) -> dict[str, object]:
     if not isinstance(outputs, dict):
         raise ValueError(f"Candidate outputs must be an object: {path}")
     return payload
+
+
+def _output_set_sha256(scores: list[TournamentCaseScore]) -> str:
+    digest = hashlib.sha256()
+    for score in sorted(scores, key=lambda item: item.case_id):
+        digest.update(score.case_id.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(score.output_sha256.encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _official_evaluation(
+    root: Path,
+    *,
+    manifest_sha256: str,
+    output_set_sha256: str,
+    benchmark_profile: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    path = root / "official-metrics.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read official metric sidecar: {path}: {exc}") from exc
+    if not isinstance(payload, dict) or payload.get("schemaVersion") != 1:
+        raise ValueError(f"Unsupported official metric sidecar schema: {path}")
+    expected_profile = benchmark_profile.get("id") if benchmark_profile else None
+    if payload.get("benchmarkProfile") != expected_profile:
+        raise ValueError(f"Official metric sidecar benchmarkProfile does not match: {path}")
+    if payload.get("manifestSha256") != manifest_sha256:
+        raise ValueError(f"Official metric sidecar manifest SHA-256 does not match: {path}")
+    if payload.get("outputSetSha256") != output_set_sha256:
+        raise ValueError(f"Official metric sidecar output-set SHA-256 does not match: {path}")
+    metrics = payload.get("metrics")
+    allowed = {"msSsim", "ld", "aad", "editDistance", "cer"}
+    if not isinstance(metrics, dict) or not metrics or not set(metrics).issubset(allowed):
+        raise ValueError(f"Official metric sidecar metrics are invalid: {path}")
+    for name, value in metrics.items():
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) < 0
+        ):
+            raise ValueError(f"Official metric {name} must be finite and non-negative: {path}")
+    implementation = payload.get("implementation")
+    if not isinstance(implementation, dict) or not implementation:
+        raise ValueError(f"Official metric sidecar must identify its implementation: {path}")
+    result = dict(payload)
+    result["sidecarSha256"] = _sha256(path)
+    return result
 
 
 def _candidate_output(
@@ -328,6 +464,12 @@ def _score_candidate(
     corpus: Path,
     cases: list[dict[str, object]],
     weights: Mapping[str, float],
+    manifest_sha256: str,
+    benchmark_profile: Mapping[str, object] | None,
+    tesseract_executable: str | Path | None,
+    tesseract_language: str | None,
+    ocr_subset: str | None,
+    reference_ocr_cache: dict[Path, str],
 ) -> CandidateTournamentResult:
     resolved_root = root.resolve(strict=False)
     metadata: dict[str, object] = {}
@@ -335,6 +477,13 @@ def _score_candidate(
         if not resolved_root.is_dir():
             raise ValueError(f"Candidate output directory is missing: {resolved_root}")
         metadata = _candidate_metadata(resolved_root)
+        metadata_profile = metadata.get("benchmarkProfile")
+        expected_profile = benchmark_profile.get("id") if benchmark_profile else None
+        if metadata_profile is not None and metadata_profile != expected_profile:
+            raise ValueError(
+                f"Candidate {name} benchmark profile {metadata_profile!r} does not match "
+                f"{expected_profile!r}."
+            )
         scores: list[TournamentCaseScore] = []
         weighted_quality = 0.0
         total_weight = 0.0
@@ -363,6 +512,38 @@ def _score_candidate(
             ssim = _ssim(reference, candidate)
             edge_f1 = _edge_f1(reference, candidate)
             psnr_db, psnr_score = _psnr(reference, candidate)
+            profile_ms_ssim: float | None = None
+            aad_proxy: float | None = None
+            if benchmark_profile is not None:
+                target_area = int(benchmark_profile["targetAreaPixels"])
+                profile_ms_ssim = docunet_ms_ssim(
+                    reference, candidate, target_area=target_area
+                )
+                aad_proxy = aad_opencv_dis_proxy(
+                    reference, candidate, target_area=target_area
+                )
+            ocr_edit_distance: int | None = None
+            ocr_cer: float | None = None
+            if ocr_subset is not None and ocr_subset in case.get("subsets", []):
+                if tesseract_executable is None:
+                    raise ValueError("OCR subset selected without a Tesseract executable.")
+                reference_text = reference_ocr_cache.get(reference_path)
+                if reference_text is None:
+                    reference_text = tesseract_text(
+                        reference_path,
+                        executable=tesseract_executable,
+                        language=tesseract_language,
+                    )
+                    reference_ocr_cache[reference_path] = reference_text
+                if not reference_text:
+                    raise ValueError(f"Tesseract returned empty reference text: {reference_path}")
+                candidate_text = tesseract_text(
+                    output_path,
+                    executable=tesseract_executable,
+                    language=tesseract_language,
+                )
+                ocr_edit_distance = levenshtein_distance(reference_text, candidate_text)
+                ocr_cer = ocr_edit_distance / len(reference_text)
             quality = (
                 weights["ssim"] * ssim + weights["edgeF1"] * edge_f1 + weights["psnr"] * psnr_score
             )
@@ -384,6 +565,10 @@ def _score_candidate(
                     psnr_score=psnr_score,
                     quality_score=quality,
                     latency_ms=latency,
+                    docunet_ms_ssim=profile_ms_ssim,
+                    aad_opencv_dis_proxy=aad_proxy,
+                    ocr_edit_distance=ocr_edit_distance,
+                    ocr_cer=ocr_cer,
                 )
             )
         latencies = [score.latency_ms for score in scores if score.latency_ms is not None]
@@ -392,6 +577,32 @@ def _score_candidate(
             / sum(weight for _score, weight in values)
             for category, values in sorted(category_scores.items())
         }
+        geometry_metrics: dict[str, float] = {}
+        profile_scores = [score.docunet_ms_ssim for score in scores if score.docunet_ms_ssim is not None]
+        aad_scores = [
+            score.aad_opencv_dis_proxy
+            for score in scores
+            if score.aad_opencv_dis_proxy is not None
+        ]
+        edit_distances = [
+            score.ocr_edit_distance for score in scores if score.ocr_edit_distance is not None
+        ]
+        cer_scores = [score.ocr_cer for score in scores if score.ocr_cer is not None]
+        if profile_scores:
+            geometry_metrics["docunetMsSsim"] = sum(profile_scores) / len(profile_scores)
+        if aad_scores:
+            geometry_metrics["aadOpenCvDisProxy"] = sum(aad_scores) / len(aad_scores)
+        if edit_distances:
+            geometry_metrics["ocrEditDistance"] = sum(edit_distances) / len(edit_distances)
+        if cer_scores:
+            geometry_metrics["ocrCer"] = sum(cer_scores) / len(cer_scores)
+        output_set_sha256 = _output_set_sha256(scores)
+        official_evaluation = _official_evaluation(
+            resolved_root,
+            manifest_sha256=manifest_sha256,
+            output_set_sha256=output_set_sha256,
+            benchmark_profile=benchmark_profile,
+        )
         return CandidateTournamentResult(
             name=name,
             output_root=str(resolved_root),
@@ -407,6 +618,9 @@ def _score_candidate(
             quality_score=weighted_quality / total_weight,
             mean_latency_ms=(sum(latencies) / len(latencies) if latencies else None),
             categories=categories,
+            geometry_metrics=geometry_metrics,
+            output_set_sha256=output_set_sha256,
+            official_evaluation=official_evaluation,
             cases=tuple(scores),
         )
     except (OSError, RuntimeError, ValueError) as exc:
@@ -425,6 +639,9 @@ def _score_candidate(
             quality_score=None,
             mean_latency_ms=None,
             categories={},
+            geometry_metrics={},
+            output_set_sha256=None,
+            official_evaluation=None,
             cases=(),
         )
 
@@ -434,6 +651,9 @@ def run_model_tournament(
     corpus_dir: Path,
     output_path: Path,
     candidates: Mapping[str, Path],
+    tesseract_executable: str | Path | None = None,
+    tesseract_language: str | None = None,
+    ocr_subset: str | None = None,
 ) -> ModelTournamentReport:
     """Score complete candidate output sets; licenses are recorded but never scored."""
     corpus = Path(corpus_dir).resolve(strict=False)
@@ -443,6 +663,29 @@ def run_model_tournament(
     task = str(manifest["task"])
     weights = _validated_metric_weights(manifest.get("metricWeights"), task)
     cases = list(manifest["cases"])
+    benchmark_profile = manifest.get("benchmarkProfile")
+    if benchmark_profile is not None and not isinstance(benchmark_profile, dict):
+        raise ValueError("benchmarkProfile must be an object.")
+    available_subsets = sorted(
+        {str(subset) for case in cases for subset in case.get("subsets", [])}
+    )
+    if (tesseract_executable is None) != (ocr_subset is None):
+        raise ValueError("Tesseract executable and OCR subset must be provided together.")
+    if ocr_subset is not None and ocr_subset not in available_subsets:
+        raise ValueError(
+            f"Unknown OCR subset {ocr_subset!r}; available: {', '.join(available_subsets)}"
+        )
+    ocr_runtime: dict[str, object] | None = None
+    if tesseract_executable is not None:
+        ocr_runtime = {
+            "executable": str(tesseract_executable),
+            "version": tesseract_version(tesseract_executable),
+            "language": tesseract_language,
+            "subset": ocr_subset,
+            "driver": "direct-cli-v1",
+        }
+    manifest_sha256 = _sha256(corpus / "manifest.json")
+    reference_ocr_cache: dict[Path, str] = {}
     results = tuple(
         _score_candidate(
             name,
@@ -450,6 +693,12 @@ def run_model_tournament(
             corpus=corpus,
             cases=cases,
             weights=weights,
+            manifest_sha256=manifest_sha256,
+            benchmark_profile=benchmark_profile,
+            tesseract_executable=tesseract_executable,
+            tesseract_language=tesseract_language,
+            ocr_subset=ocr_subset,
+            reference_ocr_cache=reference_ocr_cache,
         )
         for name, root in candidates.items()
     )
@@ -461,8 +710,31 @@ def run_model_tournament(
     report = ModelTournamentReport(
         corpus_version=str(manifest["corpusVersion"]),
         task=task,
-        manifest_sha256=_sha256(corpus / "manifest.json"),
+        manifest_sha256=manifest_sha256,
         metric_weights=weights,
+        benchmark_profile=benchmark_profile,
+        metric_implementations=(
+            {
+                "docunetMsSsim": {
+                    "implementation": "uniscan-python-opencv-v1",
+                    "publishedProtocol": True,
+                    "officialMatlabComparable": False,
+                    "reason": "MATLAB ssim/impyramid results vary by release.",
+                },
+                "aadOpenCvDisProxy": {
+                    "implementation": "AAD equations with OpenCV DIS fast flow",
+                    "officialMetric": False,
+                    "reason": "Published AAD requires the official MATLAB SIFTflow implementation.",
+                },
+                "officialEvaluation": {
+                    "sidecar": "official-metrics.json",
+                    "integrity": "manifest and candidate output-set SHA-256 required",
+                },
+            }
+            if benchmark_profile is not None
+            else {}
+        ),
+        ocr_runtime=ocr_runtime,
         winner=ranking[0] if ranking else None,
         ranking=ranking,
         candidates=results,
@@ -487,7 +759,14 @@ def summarize_model_tournament(report: ModelTournamentReport) -> str:
     else:
         for rank, name in enumerate(report.ranking, start=1):
             candidate = next(item for item in report.candidates if item.name == name)
-            lines.append(f"{rank}. {name}: quality={candidate.quality_score:.6f}")
+            suffix = ""
+            if candidate.geometry_metrics:
+                rendered = ", ".join(
+                    f"{metric}={value:.6f}"
+                    for metric, value in candidate.geometry_metrics.items()
+                )
+                suffix = f"; {rendered}"
+            lines.append(f"{rank}. {name}: quality={candidate.quality_score:.6f}{suffix}")
     for candidate in report.candidates:
         if not candidate.eligible:
             lines.append(f"- {candidate.name}: excluded from ranking ({candidate.error})")

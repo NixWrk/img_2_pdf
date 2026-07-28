@@ -70,10 +70,12 @@ sets the case weights and the explicit SSIM/edge-F1/PSNR weights. Candidate meta
 identity, licence, delivery and per-case latency. The report hashes the manifest and every submitted
 output.
 
-Current image metrics are a fast, framework-independent first gate. A final geometry decision must
-also include the official benchmark protocol where available (MS-SSIM/LD or AAD) and OCR CER on the
-same OCR version. Lighting selection must include paired real shadows, colour fidelity, clipped-detail
-checks and OCR CER. Human review remains required for hallucinated/missing glyphs, ruling, stamps and
+Current image metrics are a fast, framework-independent first gate. Standard DocUNet/DIR300 imports
+now add a protocol-compatible OpenCV MS-SSIM, an explicitly non-official DIS-flow AAD proxy, named
+OCR subsets with a recorded Tesseract version, and a hash-bound sidecar hook for official MATLAB
+SIFTflow LD/AAD. A final geometry decision must use that official sidecar rather than relabelling the
+proxy. Lighting selection must include paired real shadows, colour fidelity, clipped-detail checks
+and OCR CER. Human review remains required for hallucinated/missing glyphs, ruling, stamps and
 photographs that aggregate metrics can hide.
 
 See [the model tournament guide](model_tournament.md) for the manifest and command. The first serious

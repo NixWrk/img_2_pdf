@@ -131,6 +131,16 @@ def test_manifest_rejects_paths_outside_corpus(tmp_path: Path) -> None:
         load_model_tournament_manifest(corpus)
 
 
+def test_manifest_rejects_changed_hash_bound_corpus_image(tmp_path: Path) -> None:
+    corpus, _reference = _paired_corpus(tmp_path)
+    payload = json.loads((corpus / "manifest.json").read_text(encoding="utf-8"))
+    payload["cases"][0]["referenceSha256"] = "0" * 64
+    (corpus / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="referenceSha256 mismatch"):
+        load_model_tournament_manifest(corpus)
+
+
 def test_candidate_specs_require_unique_name_and_path(tmp_path: Path) -> None:
     assert parse_candidate_specs([f"one={tmp_path}"]) == {"one": tmp_path}
     with pytest.raises(ValueError, match="expected NAME=OUTPUT_DIR"):
@@ -172,3 +182,71 @@ def test_candidate_registry_includes_restricted_models_in_quality_pool() -> None
     assert candidates["docscanner-l"]["priority"] == 1
     assert candidates["shadocnet"]["status"] == "runnable-external-release-assets"
     assert candidates["mmdir"]["license"] == "CC-BY-NC-ND-4.0"
+
+
+def test_standard_profile_adds_geometry_metrics_and_hash_bound_official_sidecar(
+    tmp_path: Path,
+) -> None:
+    corpus, reference = _paired_corpus(tmp_path)
+    manifest_path = corpus / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["benchmarkProfile"] = {
+        "id": "docunet-corrected",
+        "protocolVersion": 1,
+        "targetAreaPixels": 598400,
+        "msSsimWeights": [0.0448, 0.2856, 0.3001, 0.2363, 0.1333],
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    candidate = tmp_path / "candidate"
+    _write(candidate / "page-1.png", reference)
+    report_path = tmp_path / "report.json"
+
+    first = run_model_tournament(
+        corpus_dir=corpus,
+        output_path=report_path,
+        candidates={"exact": candidate},
+    )
+    result = first.candidates[0]
+    assert result.geometry_metrics["docunetMsSsim"] == pytest.approx(1.0001)
+    assert result.geometry_metrics["aadOpenCvDisProxy"] == pytest.approx(0.0)
+    assert result.output_set_sha256 is not None
+
+    (candidate / "official-metrics.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "benchmarkProfile": "docunet-corrected",
+                "manifestSha256": first.manifest_sha256,
+                "outputSetSha256": result.output_set_sha256,
+                "implementation": {"matlab": "R2019a", "flow": "official SIFTflow"},
+                "metrics": {"msSsim": 1.0, "ld": 0.0, "aad": 0.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    second = run_model_tournament(
+        corpus_dir=corpus,
+        output_path=report_path,
+        candidates={"exact": candidate},
+    )
+    assert second.candidates[0].official_evaluation is not None
+    assert second.candidates[0].official_evaluation["metrics"]["ld"] == 0.0
+    assert len(second.candidates[0].official_evaluation["sidecarSha256"]) == 64
+
+
+def test_ocr_subset_requires_tesseract_and_known_subset(tmp_path: Path) -> None:
+    corpus, reference = _paired_corpus(tmp_path)
+    manifest_path = corpus / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["cases"][0]["subsets"] = ["ocr-test"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    candidate = tmp_path / "candidate"
+    _write(candidate / "page-1.png", reference)
+
+    with pytest.raises(ValueError, match="provided together"):
+        run_model_tournament(
+            corpus_dir=corpus,
+            output_path=tmp_path / "report.json",
+            candidates={"exact": candidate},
+            ocr_subset="ocr-test",
+        )

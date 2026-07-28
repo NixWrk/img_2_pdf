@@ -43,6 +43,12 @@ from .model_tournament import (
     run_model_tournament,
     summarize_model_tournament,
 )
+from .standard_geometry import (
+    STANDARD_GEOMETRY_PROFILES,
+    import_standard_geometry_candidate,
+    import_standard_geometry_corpus,
+    sha256_tree,
+)
 
 __all__ = [
     "DESKEW_METHOD_CHOICES",
@@ -78,4 +84,8 @@ __all__ = [
     "parse_candidate_specs",
     "run_model_tournament",
     "summarize_model_tournament",
+    "STANDARD_GEOMETRY_PROFILES",
+    "import_standard_geometry_candidate",
+    "import_standard_geometry_corpus",
+    "sha256_tree",
 ]
