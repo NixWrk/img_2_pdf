@@ -56,6 +56,8 @@ allowed for development and their content SHA-256 becomes part of processing-cac
 
 ## Adding other weights
 
-Do not add model binaries to this repository without documented provenance and compatible terms.
-Weights that cannot be redistributed belong behind an environment variable instead, the way
-`uniscan.office_lens` handles the optional Office Lens models.
+Model quality is ranked independently of licence family. Every candidate still needs documented
+provenance, a content identity and recorded terms. Use `uniscan benchmark-models` to compare outputs
+from incompatible frameworks before adding a production dependency. Winning weights may be bundled,
+downloaded with an exact SHA-256, or kept behind an external/BYOM adapter according to their actual
+distribution and use terms.

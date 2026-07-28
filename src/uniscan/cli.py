@@ -22,12 +22,15 @@ from uniscan.tools import (
     run_batch_pipeline,
     run_crop_benchmark,
     run_geometry_benchmark,
+    run_model_tournament,
     run_quality_benchmark,
     summarize_benchmark_results,
     summarize_geometry_report,
+    summarize_model_tournament,
     summarize_quality_report,
     validate_quality_baseline,
     validate_geometry_baseline,
+    parse_candidate_specs,
 )
 
 
@@ -343,6 +346,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional committed threshold file; regressions return exit code 2.",
     )
 
+    model_parser = subparsers.add_parser(
+        "benchmark-models",
+        help="Rank precomputed outputs from any document model against paired references.",
+    )
+    model_parser.add_argument("--input", required=True, type=Path, help="Paired corpus folder.")
+    model_parser.add_argument("--output", required=True, type=Path, help="JSON report path.")
+    model_parser.add_argument(
+        "--candidate",
+        required=True,
+        action="append",
+        help="Candidate as NAME=OUTPUT_DIR; repeat for every model.",
+    )
+
     args = parser.parse_args(argv)
     if args.version:
         from uniscan import __version__
@@ -458,6 +474,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"uniscan: error: {exc}", file=sys.stderr)
             return 2
         return 0
+    if args.command == "benchmark-models":
+        try:
+            report = run_model_tournament(
+                corpus_dir=args.input,
+                output_path=args.output,
+                candidates=parse_candidate_specs(args.candidate),
+            )
+            print(summarize_model_tournament(report))
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"uniscan: error: {exc}", file=sys.stderr)
+            return 2
+        return 0 if report.winner is not None else 1
     from uniscan.ui import run_app
 
     return run_app()

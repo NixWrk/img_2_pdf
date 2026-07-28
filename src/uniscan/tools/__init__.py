@@ -34,6 +34,15 @@ from .geometry_benchmark import (
     summarize_geometry_report,
     validate_geometry_baseline,
 )
+from .model_tournament import (
+    CandidateTournamentResult,
+    ModelTournamentReport,
+    TournamentCaseScore,
+    load_model_tournament_manifest,
+    parse_candidate_specs,
+    run_model_tournament,
+    summarize_model_tournament,
+)
 
 __all__ = [
     "DESKEW_METHOD_CHOICES",
@@ -62,4 +71,11 @@ __all__ = [
     "run_geometry_benchmark",
     "summarize_geometry_report",
     "validate_geometry_baseline",
+    "TournamentCaseScore",
+    "CandidateTournamentResult",
+    "ModelTournamentReport",
+    "load_model_tournament_manifest",
+    "parse_candidate_specs",
+    "run_model_tournament",
+    "summarize_model_tournament",
 ]

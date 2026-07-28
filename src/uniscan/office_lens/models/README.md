@@ -11,4 +11,5 @@ containing both files:
 - `triclass_doc_classifier.ort`
 
 The normal `auto` detector does not depend on these files and uses the OpenCV hybrid backend.
-Do not add model binaries to this repository without documented provenance and compatible terms.
+Office Lens may enter the same quality-first tournament as every other candidate. Before changing
+its production delivery, record the exact weights, provenance, licence metadata and permitted use.

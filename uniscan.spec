@@ -35,7 +35,8 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     # onnxruntime is required: it runs the bundled UVDoc rectifier.
-    excludes=["fitz", "pymupdf"],
+    # No dependency is excluded by licence family; Analysis follows declared/imported runtime code.
+    excludes=[],
     noarchive=False,
     optimize=0,
 )

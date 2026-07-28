@@ -187,7 +187,7 @@ settings, **Apply preview to pages** commits the
 full-resolution result, and export publishes that committed generation without replaying different
 global settings.
 
-## Automation and source policy
+## Automation and quality policy
 
 Once dewarping is enabled, its workflow is automatic-first. A user may adjust the model's control
 points when confidence or the preview is unsatisfactory, but does not need to construct the model
@@ -195,18 +195,18 @@ from scratch. A new
 automatic backend is accepted only when:
 
 - its implementation is available in a public repository;
-- the code and model weights have explicit, compatible terms;
-- inference works locally without a mandatory hosted service;
+- its exact implementation/weights and licence metadata are recorded;
+- it can produce reproducible outputs locally, in an isolated model environment, or through an
+  explicitly configured service;
 - it can fail without damaging the page and fall back to another backend;
-- it can be compared on the same geometry corpus and timing report.
+- it can be compared on the same paired geometry corpus and quality report.
 
 [PaddleOCR UVDoc](https://github.com/PaddlePaddle/PaddleOCR) is the currently integrated optional
 model candidate and provides document unwarping in its upstream project. This does not make it the
-default, and package licensing does not by itself establish the provenance or redistribution terms
-of downloaded weights. [DewarpNet](https://github.com/cvlab-stonybrook/DewarpNet) is an
-MIT-licensed automatic comparison candidate, but requires modernization and separate verification
-of the downloaded weights. [DocTr](https://github.com/fh2019ustc/DocTr) is not a merge candidate:
-its current custom license is non-commercial and share-alike despite the repository being public.
+default. DocScanner-L, DvD, DocTr++, DocGeoNet and DocRes are eligible regardless of their licence
+family and run as external candidates until a winning implementation has a production adapter.
+Licence affects only the permitted use and delivery mechanism, never its benchmark score. See the
+[quality-first candidate review](model_evaluation.md) and [tournament contract](model_tournament.md).
 
 ## Diagnostics and examples
 
@@ -225,6 +225,10 @@ The generated `benchmarks/geometry_v1` corpus locks the automatic behavior for f
 orientations, small-angle skew, curved/straight lines, sparse graphics, a synthetic photo, and a
 blank page. `uniscan benchmark-geometry` compares accuracy and p95 latency with its committed
 baseline.
+
+That synthetic regression corpus protects current behavior; it does not select the best research
+model. `uniscan benchmark-models` ranks model outputs against paired flat references and records
+model/output identities, categories and licence metadata without using licence in the score.
 
 OCR is explicitly out of scope. The existing geometry-based orientation handles automatic
 0/90/270-degree candidates plus explicit 180-degree rotation; a future dedicated image-classifier

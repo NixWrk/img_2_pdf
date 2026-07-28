@@ -1,4 +1,4 @@
-"""Fail-closed license gate for the Windows portable distribution."""
+"""Fail-closed license inventory for the Windows portable distribution."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from importlib.metadata import (
 )
 import os
 from pathlib import Path, PurePosixPath
-import re
 import shutil
 import sys
 import tomllib
@@ -25,40 +24,9 @@ from packaging.utils import canonicalize_name
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT_DISTRIBUTION = canonicalize_name("uniscan")
-# fitz/pymupdf stay out for licensing (AGPL). onnxruntime was excluded with
-# them while its only use was the optional Office Lens adapter, whose weights
-# cannot be redistributed; it is now a redistributable MIT runtime that the
-# bundled UVDoc page model needs, so it ships with the portable build.
-FORBIDDEN_DISTRIBUTIONS = {"fitz", "pymupdf"}
 LICENSE_MARKERS = ("license", "copying", "notice")
 NOTICE_SUFFIXES = {"", ".htm", ".html", ".ijg", ".md", ".rst", ".txt"}
 NATIVE_SUFFIXES = {".dll", ".dylib", ".exe", ".pyd", ".so"}
-
-# Canonical SPDX identifiers reviewed for redistribution in the portable ZIP.
-# GPL/AGPL/SSPL/BUSL are intentionally absent and rejected explicitly below.
-ALLOWED_RUNTIME_LICENSE_IDS = frozenset(
-    {
-        "0BSD",
-        "Apache-2.0",
-        "BSD-2-Clause",
-        "BSD-3-Clause",
-        "CC-BY-4.0",
-        "CC0-1.0",
-        "LGPL-3.0-only",
-        "LGPL-3.0-or-later",
-        "HPND",
-        "MIT",
-        "MIT-CMU",
-        "MPL-2.0",
-        "PSF-2.0",
-        "Zlib",
-    }
-)
-ALLOWED_BUILD_LICENSE_IDS = ALLOWED_RUNTIME_LICENSE_IDS | {
-    "LicenseRef-PyInstaller-GPL-Exception",
-    "LicenseRef-PyInstaller-Hooks-Build-Only",
-}
-DENIED_LICENSE_PREFIXES = ("AGPL-", "BUSL-", "GPL-", "SSPL-")
 
 # These projects publish missing, non-SPDX, or contradictory metadata. Overrides
 # are version-specific so an upstream release cannot silently inherit an older
@@ -182,20 +150,15 @@ def _resolved_distributions() -> list[object]:
     return [record[0] for record in _resolved_distribution_scopes().values()]
 
 
-def _license_ids(expression: str) -> set[str]:
-    return {
-        token
-        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9.+-]*", expression)
-        if token not in {"AND", "OR", "WITH"}
-    }
-
-
 def validate_distribution_license(dist: object, *, scope: str) -> str:
-    """Return a canonical expression or reject forbidden/unknown metadata."""
+    """Return a canonical expression or reject missing/ambiguous metadata.
+
+    License family is deliberately not an eligibility or quality criterion. The
+    inventory still fails closed when it cannot identify a license, because a
+    distributable artifact needs enough information to satisfy its obligations.
+    """
     name = str(dist.metadata["Name"])
     key = canonicalize_name(name)
-    if key in FORBIDDEN_DISTRIBUTIONS:
-        raise RuntimeError(f"Forbidden distribution in {scope} scope: {name}")
 
     version_overrides = LICENSE_OVERRIDES.get(key)
     if version_overrides is not None:
@@ -219,19 +182,6 @@ def validate_distribution_license(dist: object, *, scope: str) -> str:
             f"Unknown or ambiguous license for {name} {dist.version}: {raw!r}"
         ) from exc
 
-    identifiers = _license_ids(expression)
-    denied = sorted(
-        identifier for identifier in identifiers if identifier.startswith(DENIED_LICENSE_PREFIXES)
-    )
-    if denied:
-        raise RuntimeError(f"Forbidden license for {name} {dist.version}: {', '.join(denied)}")
-    allowed = ALLOWED_BUILD_LICENSE_IDS if scope == "build" else ALLOWED_RUNTIME_LICENSE_IDS
-    unknown = sorted(identifiers - allowed)
-    if unknown:
-        raise RuntimeError(
-            f"License policy has no {scope} approval for {name} {dist.version}: "
-            f"{', '.join(unknown)}"
-        )
     return expression
 
 
@@ -573,7 +523,8 @@ def collect_licenses(
 
     index_lines = [
         "UniScan third-party license inventory",
-        "Policy: fail-closed canonical SPDX allowlist; GPL/AGPL/unknown licenses are rejected.",
+        "Policy: quality-first; license family does not affect model or dependency ranking.",
+        "Distribution: canonical license metadata and shipped notices are still required.",
         "",
     ]
     for key, (dist, scopes) in scoped.items():

@@ -438,6 +438,20 @@ Quality baselines:
   --baseline benchmarks\geometry_v1\baseline.json
 ```
 
+Quality-first model tournament (candidate licences are recorded but never scored):
+
+```powershell
+.\.venv\Scripts\python.exe -m uniscan benchmark-models `
+  --input benchmarks\geometry-real-v1 `
+  --candidate uvdoc=out\uvdoc `
+  --candidate docscanner-l=out\docscanner-l `
+  --candidate dvd=out\dvd `
+  --output out\geometry-tournament.json
+```
+
+See [the tournament manifest and candidate contract](docs/model_tournament.md) and the
+[current model shortlist](docs/model_evaluation.md).
+
 Build the Windows x64 portable ZIP, SHA-256 file, frozen-runtime smoke tests, and dependency-license
 inventory:
 

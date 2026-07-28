@@ -33,8 +33,11 @@ All notable changes to UniScan are documented here. The project follows Semantic
 - Atomic bounded lossless stage cache with pixel/options/upstream fingerprints, dependency-aware
   invalidation, corrupt-entry fallback, GUI persistence/clear action, optional CLI persistence, and
   hit/miss/write/eviction diagnostics.
-- Fail-closed release metadata/x64 checks, dependency-license compatibility and frozen-payload
+- Fail-closed release metadata/x64 checks, complete dependency-licence inventory and frozen-payload
   audit with runtime notices, native GUI smoke, and draft-only tagged releases.
+- Quality-first, licence-agnostic model tournament for paired geometry/lighting/restoration outputs,
+  including explicit metric/case weights, category scores, model/output identities and a shared
+  research-candidate registry.
 
 - Independent boundary, deskew, and local-dewarp stages with per-page JSON diagnostics.
 - Offline text-line dewarp for curved or wavy pages, with confidence-based no-op fallback.

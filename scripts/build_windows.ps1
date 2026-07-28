@@ -71,7 +71,7 @@ try {
         --portable-root dist\uniscan `
         --pyinstaller-toc build\uniscan\PYZ-00.toc `
         --pyinstaller-toc build\uniscan\COLLECT-00.toc
-    if ($LASTEXITCODE -ne 0) { throw "Third-party license compatibility audit failed." }
+    if ($LASTEXITCODE -ne 0) { throw "Third-party license inventory audit failed." }
     & $Python scripts\audit_portable_contents.py dist\uniscan
     if ($LASTEXITCODE -ne 0) { throw "Portable content audit failed." }
 

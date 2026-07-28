@@ -46,7 +46,6 @@ FORBIDDEN_MODEL_SUFFIXES = (
     ".pth",
     ".safetensors",
 )
-FORBIDDEN_PATH_TOKENS = {"fitz", "mupdf"}
 ALLOWED_TKDND_PLATFORMS = {"win-x64", "win-x64-tcl9"}
 RUNTIME_NOTICE_MARKERS = {
     "THIRD_PARTY_LICENSES/RUNTIME/PYTHON-PSF-LICENSE.txt": "Python Software Foundation",
@@ -127,8 +126,6 @@ def audit_portable_contents(
         if relative_lower.endswith(FORBIDDEN_MODEL_SUFFIXES) and (
             normalized_destination not in approved_models
         ):
-            forbidden.append(relative)
-        if any(token in relative_lower for token in FORBIDDEN_PATH_TOKENS):
             forbidden.append(relative)
         parts = tuple(part.lower() for part in path.parts)
         if "tkdnd" in parts:

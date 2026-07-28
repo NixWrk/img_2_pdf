@@ -1,0 +1,179 @@
+{
+  "schemaVersion": 1,
+  "reviewedAt": "2026-07-28",
+  "selectionPolicy": "quality-first-license-agnostic",
+  "candidates": [
+    {
+      "id": "uvdoc-onnx",
+      "tasks": ["geometry"],
+      "source": "https://github.com/tanguymagne/UVDoc",
+      "status": "integrated-baseline",
+      "priority": 0,
+      "license": "MIT AND Apache-2.0",
+      "delivery": "bundled",
+      "runtime": "onnxruntime-cpu"
+    },
+    {
+      "id": "paddleocr-uvdoc",
+      "tasks": ["geometry"],
+      "source": "https://github.com/PaddlePaddle/PaddleOCR",
+      "status": "integrated-optional-baseline",
+      "priority": 0,
+      "license": "record-exact-weight-terms-at-run",
+      "delivery": "runtime-download",
+      "runtime": "paddleocr"
+    },
+    {
+      "id": "docscanner-l",
+      "tasks": ["geometry"],
+      "source": "https://github.com/fh2019ustc/DocScanner",
+      "status": "runnable-external",
+      "priority": 1,
+      "license": "LicenseRef-DocScanner-NonCommercial-ShareAlike",
+      "delivery": "external",
+      "runtime": "pytorch-gpu-reference"
+    },
+    {
+      "id": "dvd",
+      "tasks": ["geometry"],
+      "source": "https://github.com/hanquansanren/DvD",
+      "status": "runnable-external",
+      "priority": 1,
+      "license": "AGPL-3.0-only",
+      "delivery": "external",
+      "runtime": "pytorch-diffusion"
+    },
+    {
+      "id": "doctr-plus",
+      "tasks": ["geometry"],
+      "source": "https://github.com/fh2019ustc/DocTr-Plus",
+      "status": "runnable-external",
+      "priority": 2,
+      "license": "LicenseRef-DocTr-NonCommercial-ShareAlike",
+      "delivery": "external",
+      "runtime": "pytorch"
+    },
+    {
+      "id": "docgeonet",
+      "tasks": ["geometry"],
+      "source": "https://github.com/fh2019ustc/DocGeoNet",
+      "status": "runnable-external",
+      "priority": 2,
+      "license": "LicenseRef-DocGeoNet-NonCommercial-ShareAlike",
+      "delivery": "external",
+      "runtime": "pytorch"
+    },
+    {
+      "id": "docres",
+      "tasks": ["geometry", "lighting", "restoration"],
+      "source": "https://github.com/ZZZHANG-jx/DocRes",
+      "status": "runnable-external",
+      "priority": 1,
+      "license": "MIT",
+      "delivery": "external",
+      "runtime": "pytorch"
+    },
+    {
+      "id": "docshadow-sd7k",
+      "tasks": ["lighting"],
+      "source": "https://github.com/fabio-sim/DocShadow-ONNX-TensorRT",
+      "status": "integrated-baseline",
+      "priority": 0,
+      "license": "MIT",
+      "delivery": "runtime-download-and-portable-bundle",
+      "runtime": "onnxruntime-cpu"
+    },
+    {
+      "id": "shadocnet",
+      "tasks": ["lighting"],
+      "source": "https://github.com/CXH-Research/ShadocNet",
+      "status": "runnable-external-release-assets",
+      "priority": 1,
+      "license": "MIT",
+      "delivery": "external",
+      "runtime": "pytorch",
+      "release": "https://github.com/CXH-Research/ShadocNet/releases/tag/Weights",
+      "assetNote": "Detector assets are about 699 MB and removal assets about 1.12 GB; upstream publishes no digest. Pin SHA-256 after controlled download."
+    },
+    {
+      "id": "doctr-illtr",
+      "tasks": ["geometry", "lighting"],
+      "source": "https://github.com/fh2019ustc/DocTr",
+      "status": "runnable-external",
+      "priority": 2,
+      "license": "LicenseRef-DocTr-NonCommercial-ShareAlike",
+      "delivery": "external",
+      "runtime": "pytorch"
+    },
+    {
+      "id": "docnlc",
+      "tasks": ["lighting", "restoration"],
+      "source": "https://github.com/RylonW/DocNLC",
+      "status": "runnable-external",
+      "priority": 2,
+      "license": "not-published",
+      "delivery": "external",
+      "runtime": "pytorch-cuda-reference"
+    },
+    {
+      "id": "udoc-gan",
+      "tasks": ["lighting"],
+      "source": "https://github.com/harrytea/UDoc-GAN",
+      "status": "runnable-external",
+      "priority": 2,
+      "license": "not-published",
+      "delivery": "external",
+      "runtime": "pytorch"
+    },
+    {
+      "id": "classical-lighting",
+      "tasks": ["lighting"],
+      "source": "uniscan.core.lighting",
+      "status": "integrated-baseline",
+      "priority": 0,
+      "license": "project-code",
+      "delivery": "bundled",
+      "runtime": "opencv-cpu"
+    },
+    {
+      "id": "mmdir",
+      "tasks": ["lighting", "restoration"],
+      "source": "https://github.com/xiaomore/MMDIR",
+      "status": "tracked-benchmark-and-results-only",
+      "priority": 3,
+      "license": "CC-BY-NC-ND-4.0",
+      "delivery": "unavailable",
+      "runtime": "unavailable"
+    },
+    {
+      "id": "forcennet",
+      "tasks": ["geometry"],
+      "source": "https://github.com/caipeng328/ForCenNet",
+      "status": "tracked-no-code-or-weights",
+      "priority": 3,
+      "license": "not-published",
+      "delivery": "unavailable",
+      "runtime": "unavailable"
+    },
+    {
+      "id": "aadd",
+      "tasks": ["geometry"],
+      "source": "https://github.com/chaoyunwang/AADD",
+      "status": "tracked-results-only",
+      "priority": 3,
+      "license": "not-published",
+      "delivery": "unavailable",
+      "runtime": "unavailable"
+    },
+    {
+      "id": "arbdr",
+      "tasks": ["geometry"],
+      "source": "https://github.com/chaoyunwang/ArbDR",
+      "status": "tracked-results-only",
+      "priority": 3,
+      "license": "not-published",
+      "delivery": "unavailable",
+      "runtime": "unavailable"
+    }
+  ]
+}

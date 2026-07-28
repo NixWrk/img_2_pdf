@@ -1,71 +1,110 @@
-# Model evaluation for geometry, lighting and bleed-through
+# Quality-first model evaluation
 
-UniScan redistributes a portable Windows build, so every bundled model has to clear the same
-fail-closed licence gate as the Python dependencies (`scripts/collect_third_party_licenses.py`):
-permissive SPDX only, GPL/AGPL and "non-commercial" terms rejected. The target machine has no
-discrete GPU, so CUDA-only inference is equally disqualifying. This file records what was checked
-against those two constraints, so a rejected model is not re-evaluated from scratch later.
+UniScan ranks document models by measured output quality, not by licence family. GPL, AGPL,
+non-commercial, research-only, proprietary and unknown/custom terms do not remove a candidate from
+the benchmark. Licence metadata is recorded in the report so that the chosen model can be delivered
+and used in a way that satisfies its actual terms.
 
-Verified 2026-07-23 by reading each project's licence file directly, not its paper or summaries.
+This policy separates three decisions that used to be conflated:
 
-## Geometric rectification
+1. **Quality:** one paired corpus, one set of metrics, no licence term in the score.
+2. **Runtime:** CPU/GPU memory, latency and package size are reported separately and never change the
+   quality winner.
+3. **Delivery:** `bundled`, verified `runtime-download`, or `external`/BYOM. Distribution still
+   carries the applicable notices and obligations; an unidentified licence remains an inventory
+   error, not a quality failure.
 
-| Model | Licence | Weights | Verdict |
-| --- | --- | --- | --- |
-| **UVDoc** | MIT (model), Apache-2.0 (ONNX export) | ONNX, 30 MB, bundled | **Integrated.** `--dewarp uvdoc`; exact graph/data hashes are pinned |
-| **DewarpNet** | MIT | PyTorch checkpoints only | Possible, but needs PyTorch and is a 2019 model UVDoc supersedes |
-| **page_dewarp** | MIT | none needed | Redundant: the built-in text-line dewarp is the same cubic sheet idea |
-| **D2Dewarp** | CC BY-NC-ND 4.0 | — | **Rejected.** Non-commercial *and* no-derivatives; CUDA-only |
-| **DvD** | AGPL-3.0, builds on DocGeoNet weights | — | **Rejected.** AGPL is barred for the same reason as PyMuPDF |
-| **DocScanner** | Custom: "Any Commercial Use ... is strictly prohibited" | — | **Rejected.** Non-commercial |
-| **DocGeoNet** | Custom: same non-commercial terms as DocScanner | — | **Rejected.** Non-commercial |
-| **RDGR / DocProj** | MIT | PyTorch | Needs visible text *and* borders; heavy install for a refinement stage |
-| DocTr++, ForCenNet, AADD, BookNet | — | not released or not reproducible | Out of scope, as the source report already notes |
+The source review below was refreshed on 2026-07-28 from official repositories and papers. Published
+paper tables are useful for prioritising experiments, but they are not treated as UniScan results.
+Only `uniscan benchmark-models` can select a winner for our capture distribution.
+The same shortlist is stored machine-readably in `benchmarks/model_candidates.json`.
 
-## Lighting and shadows
+## Geometry tournament
 
-| Model | Licence | Weights | Verdict |
-| --- | --- | --- | --- |
-| **DocShadow (FSENet)** | MIT (model), MIT (ONNX export) | SD7K ONNX, 120 MB | **Integrated.** Immutable v1.0.0 release asset, size and SHA-256 pinned |
-| **DocRes** | MIT | PyTorch `.pkl` on OneDrive; no ONNX export published | **Deferred.** See below |
-| **DocTr / IllTr** | non-commercial (same author as DocScanner) | — | **Rejected.** Non-commercial |
-| **Classical OpenCV normalization** | n/a | none | Already implemented as `correct_illumination` |
+| Candidate | Reproducible status | Tournament decision |
+| --- | --- | --- |
+| **UVDoc ONNX** | Integrated CPU baseline; graph/data hashes pinned | Run on every geometry corpus |
+| **PaddleOCR UVDoc** | Optional upstream runtime/cache | Run as an independent candidate, not alias it to bundled UVDoc |
+| **DocScanner-L** | [Official code and pretrained model](https://github.com/fh2019ustc/DocScanner); 8.5 M parameters; DocUNet evaluation published | **Priority 1 external candidate** |
+| **DvD** | [Official AGPL code and four pretrained files](https://github.com/hanquansanren/DvD); DocUNet/DIR300 outputs published | **Priority 1 external candidate**; GPU/latency measured separately |
+| **DocTr++** | [Official code and pretrained model](https://github.com/fh2019ustc/DocTr-Plus); designed for incomplete/in-the-wild boundaries | **Priority 2 external candidate** |
+| **DocGeoNet** | [Official code, weights and DIR300 protocol](https://github.com/fh2019ustc/DocGeoNet) | Priority 2 reference baseline |
+| **DocRes** | [Official MIT code and weights](https://github.com/ZZZHANG-jx/DocRes); supports dewarping plus restoration tasks | Priority 2 joint-model candidate |
+| DewarpNet, RDGR/DocProj, D2Dewarp | Older but runnable/reference implementations | Add when their published outputs or weights are available locally |
 
-### Why DocRes is deferred despite an MIT licence
+The newest claimed methods are tracked but cannot enter a reproducible inference tournament yet.
+[ForCenNet](https://github.com/caipeng328/ForCenNet) still lists result/evaluation release as TODO;
+[AADD](https://github.com/chaoyunwang/AADD) says full code and models are coming later; and
+[ArbDR](https://github.com/chaoyunwang/ArbDR) says its code is still being organised. Their paper
+claims are not substituted for executable outputs.
 
-DocRes is the source report's primary lighting recommendation and its licence is fine. It is
-blocked on delivery, not terms:
+## Lighting and restoration tournament
 
-- no ONNX export is published, and its weights are PyTorch pickles hosted on OneDrive, which is
-  not scriptable as a reproducible download;
-- running it would add PyTorch to a portable build that is currently around 100 MB. Torch alone is
-  an order of magnitude larger, which defeats the point of the portable ZIP;
-- it needs its DTSPrompt prior tensors alongside the image, so it is not a drop-in ONNX session.
+| Candidate | Reproducible status | Tournament decision |
+| --- | --- | --- |
+| **DocShadow / FSENet** | Integrated CPU baseline; immutable v1.0.0 ONNX asset, size and SHA-256 pinned | Run on every lighting corpus |
+| **DocRes** | One generalist checkpoint covers deshadowing, appearance, deblurring, binarisation, dewarping and end-to-end restoration | **Priority 1 external candidate** |
+| **ShaDocNet** | [Official archived MIT code and release weights](https://github.com/CXH-Research/ShadocNet); separate ~699 MB detector and ~1.12 GB remover assets | **Priority 1 external candidate**; pin locally computed SHA-256 because upstream supplies none |
+| **DocTr / IllTr** | [Official code and pretrained models](https://github.com/fh2019ustc/DocTr) for geometry plus illumination | Priority 2 joint-pipeline candidate |
+| **DocNLC** | [Official code and OneDrive model zoo](https://github.com/RylonW/DocNLC) for shadow/noise/blur/watermark/background degradations; no repository licence file found | Priority 2 external candidate; unknown terms do not affect score |
+| **UDoc-GAN** | [Official code and pretrained outputs/models](https://github.com/harrytea/UDoc-GAN) for unpaired illumination correction | Priority 2 external candidate |
+| **Classical OpenCV normalisation** | Built in, deterministic, no weights | Mandatory non-neural baseline |
 
-Reconsider if an ONNX export with recorded provenance appears, or if the project ever accepts a
-PyTorch runtime for a separate, non-portable install profile.
+DocRes is no longer deferred because of PyTorch size or delivery inconvenience. It can run in an
+isolated external environment and submit output images to the same tournament. If it wins, runtime
+engineering follows the quality decision: export/optimise it if faithful, ship a separate runtime,
+or keep it external. We do not replace a better result with a worse one merely because the latter is
+easier to bundle.
 
-## Delivery and runtime decision
+[MMDIR (CVPR 2026)](https://github.com/xiaomore/MMDIR) is the strongest new mixed-degradation
+lead found in this review: its paper reports competitive/superior perceptual results across blur,
+shadow, watermark and seal removal. The official repository currently publishes MixedDoc and the
+authors' predicted outputs, but no inference code or weights, so it is tracked rather than called a
+runnable candidate. Its CC BY-NC-ND terms are not the blocker; missing executable inference is.
 
-`src/uniscan/models/manifest.json` is the authority for filenames, sizes, SHA-256 values, sources,
-and licenses. UVDoc stays in the wheel because its two files total about 30 MB. DocShadow exceeds
-GitHub's normal Git-object limit, so the Windows build downloads the immutable upstream v1.0.0
-release asset, verifies it into a temporary file, and atomically publishes it only after the exact
-size and SHA-256 match. The portable audit then hashes all three frozen assets again and requires
-their copied license notices and inventory entries.
+## Benchmark contract
 
-Both models use ONNX Runtime's CPU provider. UVDoc automatic acceptance is evidence-gated: reduced
-text curvature or projective line convergence must be measurable, otherwise the source is kept.
-DocShadow automatic mode similarly requires improved lighting evidence without unacceptable ink or
-contrast loss and falls back to the classical method. Explicit model modes remain available for
-operator-reviewed pages. Actual model content identities, including environment overrides, are
-part of persistent processing-cache keys.
+The tournament consumes precomputed output directories, so models with mutually incompatible
+frameworks can be compared without contaminating the production environment. The paired manifest
+sets the case weights and the explicit SSIM/edge-F1/PSNR weights. Candidate metadata records model
+identity, licence, delivery and per-case latency. The report hashes the manifest and every submitted
+output.
+
+Current image metrics are a fast, framework-independent first gate. A final geometry decision must
+also include the official benchmark protocol where available (MS-SSIM/LD or AAD) and OCR CER on the
+same OCR version. Lighting selection must include paired real shadows, colour fidelity, clipped-detail
+checks and OCR CER. Human review remains required for hallucinated/missing glyphs, ruling, stamps and
+photographs that aggregate metrics can hide.
+
+See [the model tournament guide](model_tournament.md) for the manifest and command. The first serious
+run should contain:
+
+- corrected DocUNet and DIR300 geometry pairs;
+- released AnyPhotoDoc6300 subsets for difficult real photographs;
+- paired SD7K/RealDAE lighting cases;
+- consented UniScan camera captures split by flat sheet, book spine, crease, glare, hard shadow,
+  coloured paper, tables and sparse content.
+
+No final winner is claimed until those same cases have outputs from at least UVDoc, DocScanner-L and
+DvD for geometry, and classical, DocShadow, DocRes and ShaDocNet for lighting. MMDIR joins as soon as
+its authors publish runnable inference or outputs for the identical cases.
+
+## Current production assets
+
+`src/uniscan/models/manifest.json` remains the authority for filenames, sources, exact sizes,
+SHA-256 values and licence metadata of production assets. UVDoc stays in the wheel. DocShadow is
+downloaded from the immutable upstream v1.0.0 release asset into a temporary file, accepted only
+after its exact size and SHA-256 match, and then included in the portable build. The portable audit
+hashes all frozen model assets again and requires their notices and inventory entries.
+
+Both current models use ONNX Runtime's CPU provider. Automatic acceptance remains evidence-gated so
+that a model can lose to the unchanged input on an individual page even when it wins overall.
+Explicit model modes remain available for operator review, and actual model-content identities are
+part of persistent cache keys.
 
 ## Bleed-through
 
-The source report's own conclusion holds: bleed-through cannot be removed reliably by a shadow
-model, because the show-through text has the same structure as the wanted text. The dependable
-route is registering the front and back scans of the same sheet, which is a capture-workflow
-feature rather than a model, and no model here is a substitute for it. DSR-GAN, DSRDiff and DE-GAN
-were not evaluated further: the report already flags their reproducibility as unconfirmed, and
-the OCR-facing binarization they feed is explicitly out of scope for UniScan.
+Bleed-through is a separate paired-capture problem: show-through glyphs can have the same structure
+as wanted text, so a shadow model is not a reliable remover. Front/back registration should be its
+own tournament task, with OCR and preservation metrics; no geometry or shadow winner is implicitly
+declared suitable for it.

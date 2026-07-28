@@ -69,7 +69,8 @@ def test_license_inventory_contains_runtime_dependencies(tmp_path: Path) -> None
     for package in ("img2pdf", "numpy", "opencv-python", "pypdfium2", "tkinterdnd2"):
         assert package in index
     assert "pymupdf" not in index
-    assert "fail-closed canonical spdx allowlist" in index
+    assert "quality-first" in index
+    assert "license family does not affect" in index
     img2pdf_line = next(line for line in index.splitlines() if line.startswith("img2pdf "))
     assert img2pdf_line.endswith(" - lgpl-3.0-or-later")
     assert not (output / "RUNTIME").exists()
@@ -83,13 +84,15 @@ class _FakeDistribution:
         self.version = version
 
 
-@pytest.mark.parametrize("expression", ["AGPL-3.0-only", "GPL-3.0-only"])
-def test_license_policy_rejects_forbidden_copyleft(expression: str) -> None:
-    with pytest.raises(RuntimeError, match="Forbidden license"):
+@pytest.mark.parametrize("expression", ["AGPL-3.0-only", "GPL-3.0-only", "BUSL-1.1"])
+def test_license_inventory_accepts_any_canonical_license_family(expression: str) -> None:
+    assert (
         validate_distribution_license(
-            _FakeDistribution("fake-forbidden", expression),
+            _FakeDistribution("fake-research", expression),
             scope="runtime",
         )
+        == expression
+    )
 
 
 def test_license_policy_accepts_reviewed_hpnd_runtime_license() -> None:
@@ -121,12 +124,14 @@ def test_license_policy_rejects_unknown_or_ambiguous_distribution() -> None:
         )
 
 
-def test_license_policy_rejects_forbidden_distribution_even_with_permissive_metadata() -> None:
-    with pytest.raises(RuntimeError, match="Forbidden distribution"):
+def test_license_inventory_does_not_block_distribution_names() -> None:
+    assert (
         validate_distribution_license(
-            _FakeDistribution("PyMuPDF", "MIT"),
+            _FakeDistribution("PyMuPDF", "AGPL-3.0-only"),
             scope="runtime",
         )
+        == "AGPL-3.0-only"
+    )
 
 
 def test_license_override_rejects_unreviewed_distribution_version() -> None:
@@ -218,13 +223,6 @@ def test_portable_content_audit_rejects_model_weights(tmp_path: Path) -> None:
 
     model = root / "unlicensed.ort"
     model.write_bytes(b"model")
-    with pytest.raises(RuntimeError, match="forbidden"):
-        audit_portable_contents(root, approved_model_assets={})
-
-    model.unlink()
-    leaked_native = root / "_internal/mupdfcpp64.dll"
-    leaked_native.parent.mkdir(parents=True, exist_ok=True)
-    leaked_native.write_bytes(b"native")
     with pytest.raises(RuntimeError, match="forbidden"):
         audit_portable_contents(root, approved_model_assets={})
 

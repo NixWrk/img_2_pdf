@@ -12,8 +12,9 @@ acquire/import -> find page -> orient -> deskew -> dewarp -> clean -> review -> 
 ```
 
 Text recognition, searchable-PDF assembly, and cloud processing are not current product
-requirements. Dependency-license compatibility and Authenticode signing are release gates rather
-than runtime features. A geometry or orientation model may classify an image, but it must not recognize
+requirements. Complete dependency/model licence inventory and Authenticode signing are release
+gates rather than runtime features. Licence family is not a quality-selection criterion. A geometry
+or orientation model may classify an image, but it must not recognize
 or store text. Manual control points remain available as a correction layer over automatic
 dewarping.
 
@@ -26,8 +27,9 @@ Every processing stage must:
 - produce the same full-resolution result from GUI and CLI settings;
 - have synthetic regression coverage before becoming the default.
 
-GPL ScanTailor Advanced code is a design reference only and is not copied into this MIT project.
-New code and model weights must have explicit compatible terms.
+Code and model weights under any licence family may be evaluated. Their exact terms, provenance and
+content identity must be recorded; the selected delivery path must then satisfy those terms. Current
+ScanTailor-derived behavior remains an independent OpenCV/NumPy implementation.
 
 ## Current baseline
 
@@ -213,8 +215,8 @@ are visible before a release is accepted.
 - OCR, searchable PDF, language packs, and text-based orientation.
 - Cloud APIs and hosted processing.
 - A public installer, store distribution, SBOM, vulnerability attestations, and reproducible
-  release provenance. The existing dependency-license compatibility check remains mandatory for
-  every portable build. Authenticode is optional for a local personal artifact, but mandatory
+  release provenance. The existing dependency/model licence inventory remains mandatory for every
+  portable build. Authenticode is optional for a local personal artifact, but mandatory
   before publishing a Windows executable or portable ZIP.
 - ScanTailor project import/export compatibility.
 - Manual mesh construction; editable automatic-model control points remain supported.
