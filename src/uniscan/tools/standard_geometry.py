@@ -47,21 +47,25 @@ class StandardGeometryProfile:
     subsets: dict[str, frozenset[str]]
 
     def document_id(self, case_id: str) -> str:
-        return case_id.partition("_")[0] if self.id == "docunet-corrected" else case_id
+        return case_id.partition("_")[0] if self.id.startswith("docunet-") else case_id
 
 
-def _docunet_case_ids() -> tuple[str, ...]:
-    return tuple(f"{document}_{view}" for document in range(1, 66) for view in (1, 2))
+def _docunet_case_ids(document_count: int = 65) -> tuple[str, ...]:
+    return tuple(
+        f"{document}_{view}"
+        for document in range(1, document_count + 1)
+        for view in (1, 2)
+    )
 
 
 def _docunet_subset(documents: Iterable[int]) -> frozenset[str]:
     return frozenset(f"{document}_{view}" for document in documents for view in (1, 2))
 
 
-STANDARD_GEOMETRY_PROFILES: dict[str, StandardGeometryProfile] = {
-    "docunet-corrected": StandardGeometryProfile(
-        id="docunet-corrected",
-        case_ids=_docunet_case_ids(),
+def _docunet_profile(profile_id: str, *, document_count: int) -> StandardGeometryProfile:
+    return StandardGeometryProfile(
+        id=profile_id,
+        case_ids=_docunet_case_ids(document_count),
         input_templates=("{case} copy.png", "{case}.png"),
         reference_templates=("{document}.png",),
         candidate_templates=(
@@ -76,6 +80,18 @@ STANDARD_GEOMETRY_PROFILES: dict[str, StandardGeometryProfile] = {
             "docunet-ocr-setting-1": _docunet_subset(DOCUNET_OCR_SETTING_1),
             "docunet-ocr-setting-2": _docunet_subset(DOCUNET_OCR_SETTING_2),
         },
+    )
+
+
+STANDARD_GEOMETRY_PROFILES: dict[str, StandardGeometryProfile] = {
+    "docunet-corrected": _docunet_profile(
+        "docunet-corrected", document_count=65
+    ),
+    # The official DvD result archive stops at document 64. Keep that published
+    # coverage explicit so DvD can be compared with complete 128-case outputs
+    # without weakening the canonical 130-case DocUNet profile.
+    "docunet-corrected-common-128": _docunet_profile(
+        "docunet-corrected-common-128", document_count=64
     ),
     "dir300": StandardGeometryProfile(
         id="dir300",

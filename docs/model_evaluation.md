@@ -25,8 +25,8 @@ The same shortlist is stored machine-readably in `benchmarks/model_candidates.js
 | --- | --- | --- |
 | **UVDoc ONNX** | Integrated CPU baseline; graph/data hashes pinned | Run on every geometry corpus |
 | **PaddleOCR UVDoc** | Optional upstream runtime/cache | Run as an independent candidate, not alias it to bundled UVDoc |
-| **DocScanner-L** | [Official code and pretrained model](https://github.com/fh2019ustc/DocScanner); 8.5 M parameters; DocUNet evaluation published | **Priority 1 external candidate** |
-| **DvD** | [Official AGPL code and four pretrained files](https://github.com/hanquansanren/DvD); DocUNet/DIR300 outputs published | **Priority 1 external candidate**; GPU/latency measured separately |
+| **DocScanner-L** | [Official code and pretrained model](https://github.com/fh2019ustc/DocScanner); 8.5 M parameters; DocUNet evaluation published | **Priority 1 production spike**; best OCR in the local DocUNet run |
+| **DvD** | [Official AGPL code and four pretrained files](https://github.com/hanquansanren/DvD); DocUNet/DIR300 outputs published | **Geometry-quality leader / GPU spike**; runtime and exportability still unproved |
 | **DocTr++** | [Official code and pretrained model](https://github.com/fh2019ustc/DocTr-Plus); designed for incomplete/in-the-wild boundaries | **Priority 2 external candidate** |
 | **DocGeoNet** | [Official code, weights and DIR300 protocol](https://github.com/fh2019ustc/DocGeoNet) | Priority 2 reference baseline |
 | **DocRes** | [Official MIT code and weights](https://github.com/ZZZHANG-jx/DocRes); supports dewarping plus restoration tasks | Priority 2 joint-model candidate |
@@ -87,9 +87,13 @@ run should contain:
 - consented UniScan camera captures split by flat sheet, book spine, crease, glare, hard shadow,
   coloured paper, tables and sparse content.
 
-No final winner is claimed until those same cases have outputs from at least UVDoc, DocScanner-L and
-DvD for geometry, and classical, DocShadow, DocRes and ShaDocNet for lighting. MMDIR joins as soon as
-its authors publish runnable inference or outputs for the identical cases.
+The first three-way corrected DocUNet run is now recorded in
+[the 2026-07-28 geometry evidence](geometry_benchmark_2026-07-28.md): DvD wins geometric fidelity,
+while DocScanner-L wins OCR and is the next production integration target. That result is a
+DocUNet checkpoint, not a universal winner; DIR300 and real-camera cases are still required.
+Lighting remains open until classical, DocShadow, DocRes and ShaDocNet have outputs for identical
+paired cases. MMDIR joins as soon as its authors publish runnable inference or outputs for those
+cases.
 
 ## Current production assets
 

@@ -31,7 +31,9 @@
       "priority": 1,
       "license": "LicenseRef-DocScanner-NonCommercial-ShareAlike",
       "delivery": "external",
-      "runtime": "pytorch-gpu-reference"
+      "runtime": "pytorch-gpu-reference",
+      "benchmarkDecision": "docunet-ocr-leader-next-production-spike",
+      "evidence": "docs/geometry_benchmark_2026-07-28.md"
     },
     {
       "id": "dvd",
@@ -41,7 +43,9 @@
       "priority": 1,
       "license": "AGPL-3.0-only",
       "delivery": "external",
-      "runtime": "pytorch-diffusion"
+      "runtime": "pytorch-diffusion",
+      "benchmarkDecision": "docunet-geometry-leader-gpu-spike",
+      "evidence": "docs/geometry_benchmark_2026-07-28.md"
     },
     {
       "id": "doctr-plus",

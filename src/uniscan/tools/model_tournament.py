@@ -24,6 +24,9 @@ from uniscan.tools.document_metrics import (
 
 
 SUPPORTED_TASKS = frozenset({"geometry", "lighting", "restoration"})
+SUPPORTED_BENCHMARK_PROFILES = frozenset(
+    {"docunet-corrected", "docunet-corrected-common-128", "dir300"}
+)
 METRIC_NAMES = ("ssim", "edgeF1", "psnr")
 DEFAULT_METRIC_WEIGHTS: dict[str, dict[str, float]] = {
     "geometry": {"ssim": 0.4, "edgeF1": 0.4, "psnr": 0.2},
@@ -207,8 +210,12 @@ def load_model_tournament_manifest(corpus_dir: Path) -> dict[str, object]:
         profile_id = benchmark_profile.get("id")
         target_area = benchmark_profile.get("targetAreaPixels")
         ms_weights = benchmark_profile.get("msSsimWeights")
-        if profile_id not in {"docunet-corrected", "dir300"}:
-            raise ValueError("benchmarkProfile.id must be docunet-corrected or dir300.")
+        if profile_id not in SUPPORTED_BENCHMARK_PROFILES:
+            raise ValueError(
+                "benchmarkProfile.id must be one of: "
+                + ", ".join(sorted(SUPPORTED_BENCHMARK_PROFILES))
+                + "."
+            )
         if benchmark_profile.get("protocolVersion") != 1:
             raise ValueError("benchmarkProfile.protocolVersion must be 1.")
         if target_area != 598400:

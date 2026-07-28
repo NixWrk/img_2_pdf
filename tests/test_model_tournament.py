@@ -184,6 +184,23 @@ def test_candidate_registry_includes_restricted_models_in_quality_pool() -> None
     assert candidates["mmdir"]["license"] == "CC-BY-NC-ND-4.0"
 
 
+def test_manifest_accepts_explicit_dvd_common_docunet_profile(tmp_path: Path) -> None:
+    corpus, _reference = _paired_corpus(tmp_path)
+    manifest_path = corpus / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["benchmarkProfile"] = {
+        "id": "docunet-corrected-common-128",
+        "protocolVersion": 1,
+        "targetAreaPixels": 598400,
+        "msSsimWeights": [0.0448, 0.2856, 0.3001, 0.2363, 0.1333],
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    loaded = load_model_tournament_manifest(corpus)
+
+    assert loaded["benchmarkProfile"]["id"] == "docunet-corrected-common-128"
+
+
 def test_standard_profile_adds_geometry_metrics_and_hash_bound_official_sidecar(
     tmp_path: Path,
 ) -> None:

@@ -62,6 +62,10 @@ Get-FileHash .\downloads\scan.zip -Algorithm SHA256
 subsets: `docunet-ocr-setting-1` (60 images) and `docunet-ocr-setting-2` (50 images). `dir300`
 requires all 300 pairs and exposes `dir300-ocr-90`.
 
+The separate `docunet-corrected-common-128` profile covers documents 1--64. This is the complete
+intersection with the official DvD output archive, which does not contain `65_1` or `65_2`. Use the
+130-case profile for models with full coverage and the 128-case profile only when DvD is included.
+
 If the upstream host does not publish a digest, compute the archive SHA-256 once in a controlled
 download, store it in the experiment inventory, and require that exact value on every subsequent
 download. The importer additionally records the extracted tree SHA-256. A run with no expected tree
@@ -85,6 +89,16 @@ comparison:
 The built-in templates cover the upstream DocScanner, UVDoc-style and common `_rec`/`_unwarp`
 names. Use repeatable `--template`, with `{case}` and `{document}`, when an upstream archive differs.
 Import fails on a missing or ambiguous case rather than benchmarking a partial result.
+
+Generate the pinned CPU baseline on those exact corrected inputs:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_bundled_uvdoc_candidate.py `
+  --corpus benchmarks\docunet-corrected-v1 `
+  --output out\uvdoc-onnx
+```
+
+Its `candidate.json` records the verified graph/data identity, manifest SHA-256 and per-case latency.
 
 ### Geometry metric identities
 

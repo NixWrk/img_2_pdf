@@ -41,6 +41,16 @@ def _small_docunet_profile(monkeypatch: pytest.MonkeyPatch) -> StandardGeometryP
     return profile
 
 
+def test_published_dvd_common_profile_is_explicitly_limited_to_128_cases() -> None:
+    profile = STANDARD_GEOMETRY_PROFILES["docunet-corrected-common-128"]
+
+    assert len(profile.case_ids) == 128
+    assert profile.case_ids[-1] == "64_2"
+    assert "65_1" not in profile.case_ids
+    assert profile.document_id("64_2") == "64"
+    assert profile.corrections == {"64_1": "rotate180", "64_2": "rotate180"}
+
+
 def test_standard_corpus_import_hashes_sources_and_applies_known_rotation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

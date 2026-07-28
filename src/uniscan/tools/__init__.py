@@ -34,6 +34,7 @@ from .geometry_benchmark import (
     summarize_geometry_report,
     validate_geometry_baseline,
 )
+from .geometry_candidate import run_bundled_uvdoc_candidate
 from .model_tournament import (
     CandidateTournamentResult,
     ModelTournamentReport,
@@ -77,6 +78,7 @@ __all__ = [
     "run_geometry_benchmark",
     "summarize_geometry_report",
     "validate_geometry_baseline",
+    "run_bundled_uvdoc_candidate",
     "TournamentCaseScore",
     "CandidateTournamentResult",
     "ModelTournamentReport",
