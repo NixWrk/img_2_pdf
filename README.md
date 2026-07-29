@@ -271,10 +271,14 @@ must cover at least 60% of the half, span at least 80% of its width, reach safe 
 and have page-like proportions, so table columns and partial crops are rejected.
 
 `--dewarp textline` uses the built-in text-line geometry estimator and needs no optional model
-runtime. `--dewarp auto` is a conservative policy when explicitly selected: it tries text-line
-dewarp, measures whether geometry improved, and rejects harmful candidates. UVDoc is not considered
-unless `--auto-dewarp-uvdoc` is also present. Lighting diagnostics measure shadows, possible glare,
-clipping, and unevenness without claiming to reconstruct missing detail.
+runtime. `--dewarp docscanner_l` runs the exact SHA-pinned external DocScanner-L ONNX graph when
+`UNISCAN_DOCSCANNER_MODEL` points to it. `--dewarp auto` is a conservative policy when explicitly
+selected: it tries text-line dewarp, measures whether geometry improved, and rejects harmful
+candidates. UVDoc is not considered unless `--auto-dewarp-uvdoc` is also present, and DocScanner-L
+remains explicit until real-camera evaluation is complete. On the full DIR300 benchmark, DvD led
+quality while DocScanner-L was the strongest exact ONNX production candidate. Lighting diagnostics
+measure shadows, possible glare, clipping, and unevenness without claiming to reconstruct missing
+detail.
 
 See [the geometry guide](docs/document_geometry.md) for algorithms and diagnostics.
 
@@ -326,8 +330,8 @@ The CLI cache is opt-in:
   --stage-cache-dir out\stage-cache --stage-cache-max-mb 512
 ```
 
-UVDoc-backed and downstream results are not reused persistently when UniScan cannot prove a stable
-model identity.
+UVDoc- or DocScanner-backed and downstream results are not reused persistently when UniScan cannot
+prove a stable model identity.
 
 ## Optional Office Lens ONNX backend
 

@@ -21,13 +21,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--asset", action="append")
     parser.add_argument("--target", type=Path, default=MODEL_DIR)
+    parser.add_argument(
+        "--url",
+        help="Release-asset URL override for one SHA-pinned manifest entry.",
+    )
     parser.add_argument("--check", action="store_true", help="Verify without downloading.")
     args = parser.parse_args()
-    for name in dict.fromkeys(args.asset or ["docshadow_sd7k"]):
+    names = list(dict.fromkeys(args.asset or ["docshadow_sd7k"]))
+    if args.url and len(names) != 1:
+        parser.error("--url requires exactly one --asset")
+    for name in names:
         path = (
             verify_model_asset(name, args.target / model_asset(name).filename)
             if args.check
-            else download_model_asset(name, args.target)
+            else download_model_asset(name, args.target, url=args.url)
         )
         print(f"verified {name}: {path}")
     return 0

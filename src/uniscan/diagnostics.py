@@ -157,9 +157,9 @@ def _optional_office_lens_check() -> DiagnosticCheck:
     return _optional_office_lens_checks()[0]
 
 
-def _bundled_model_checks() -> tuple[DiagnosticCheck, DiagnosticCheck]:
+def _bundled_model_checks() -> tuple[DiagnosticCheck, ...]:
     """Verify the exact on-disk identities used by the built-in model stages."""
-    from uniscan.core import docshadow, uvdoc
+    from uniscan.core import docscanner, docshadow, uvdoc
 
     uvdoc_path = uvdoc.model_path()
     try:
@@ -195,7 +195,29 @@ def _bundled_model_checks() -> tuple[DiagnosticCheck, DiagnosticCheck]:
             docshadow_check = DiagnosticCheck("model:docshadow", True, docshadow_detail)
         except Exception as exc:
             docshadow_check = DiagnosticCheck("model:docshadow", False, str(exc), blocking=False)
-    return uvdoc_check, docshadow_check
+    docscanner_path = docscanner.model_path()
+    if not docscanner_path.is_file():
+        docscanner_check = DiagnosticCheck(
+            "model:docscanner-l",
+            True,
+            "disabled; set UNISCAN_DOCSCANNER_MODEL to the pinned external ONNX asset",
+            blocking=False,
+        )
+    else:
+        try:
+            docscanner.verify_model(docscanner_path)
+            _open_onnx_session(docscanner_path)
+            docscanner_check = DiagnosticCheck(
+                "model:docscanner-l",
+                True,
+                f"pinned SHA-256 verified: {docscanner.MODEL_SHA256}",
+                blocking=False,
+            )
+        except Exception as exc:
+            docscanner_check = DiagnosticCheck(
+                "model:docscanner-l", False, str(exc), blocking=False
+            )
+    return uvdoc_check, docshadow_check, docscanner_check
 
 
 def _gui_runtime_check() -> DiagnosticCheck:

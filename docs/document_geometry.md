@@ -164,8 +164,12 @@ populate on first use. The PaddleOCR package and downloaded model artifacts must
 their own applicable terms; UniScan neither distributes those weights nor records a stable model
 binary identity in a processing recipe.
 
-The GUI offers **None**, **Automatic (validated)**, **Page model (UVDoc)**, and the explicit offline
-text-line method. Workspace Processing exposes
+The GUI offers **None**, **Automatic (validated)**, **Page model (UVDoc)**,
+**Page model (DocScanner-L)**, and the explicit offline text-line method. DocScanner-L uses an
+external opset-17 graph whose byte length and SHA-256 must match UniScan's manifest; set
+`UNISCAN_DOCSCANNER_MODEL` to its location. It is the strongest exact ONNX candidate in the full
+DIR300 run and remains an explicit choice until the real-camera gate is complete. Workspace
+Processing exposes
 **Page perspective** and **Edit page waves** directly. The inline perspective editor shows
 draggable corner handles beside a live rectified result. Changed corners are saved when navigating
 with Prev/Next or leaving with Done; Reset and Auto Detect remain explicit replacement actions.
@@ -201,10 +205,10 @@ automatic backend is accepted only when:
 - it can fail without damaging the page and fall back to another backend;
 - it can be compared on the same paired geometry corpus and quality report.
 
-[PaddleOCR UVDoc](https://github.com/PaddlePaddle/PaddleOCR) is the currently integrated optional
-model candidate and provides document unwarping in its upstream project. This does not make it the
-default. DocScanner-L, DvD, DocTr++, DocGeoNet and DocRes are eligible regardless of their licence
-family and run as external candidates until a winning implementation has a production adapter.
+[PaddleOCR UVDoc](https://github.com/PaddlePaddle/PaddleOCR) is an integrated optional model
+candidate and provides document unwarping in its upstream project. This does not make it the
+default. DocScanner-L now has a production ONNX adapter; DvD, DocTr++, DocGeoNet and DocRes remain
+external candidates until a winning implementation has a production adapter.
 Licence affects only the permitted use and delivery mechanism, never its benchmark score. See the
 [quality-first candidate review](model_evaluation.md) and [tournament contract](model_tournament.md).
 

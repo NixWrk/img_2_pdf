@@ -50,6 +50,30 @@ and using its output directly would resample every glyph.
 
 Set `UNISCAN_DOCSHADOW_MODEL` to use a different DocShadow ONNX file.
 
+## DocScanner-L grid rectifier
+
+- File: `DocScanner-L-grid-opset17.onnx` (34,100,351 bytes), kept as an external release asset.
+- Source: official DocScanner commit `54f6063a61a52e4ce4012832e943d1871a9c3c66` and its
+  `DocScanner-L.pth` / `seg.pth` checkpoints. Upstream permits non-commercial use with attribution
+  and share-alike conditions; commercial use requires the author's permission.
+- Pinned identity: SHA-256
+  `9fdebcb4067afb09d66b6637f3fd1036ba7952bbf0656778d44c2bd1c2c067f4`.
+- Interface: input `image` `(1, 3, 288, 288)` float32 RGB in `[0, 1]`; output `grid`
+  `(1, 2, 288, 288)` float32 in normalized backward-sampling coordinates.
+
+The opset-17 graph includes the official U²-Net page mask and all 12 DocScanner-L recurrent
+iterations. Against PyTorch 2.1.1/cu118 on a real DocUNet input, ONNX Runtime differed by at most
+`2.98e-7` in the grid. UniScan then applies that grid to the original page pixels. Set
+`UNISCAN_DOCSCANNER_MODEL` to the verified external graph; environment overrides are still required
+to match the pinned size and SHA-256.
+
+Until the graph is attached to a UniScan release, a staged release URL can be verified and installed
+without changing the manifest:
+
+```text
+python scripts/download_model_assets.py --asset docscanner_l_grid --url RELEASE_ASSET_URL
+```
+
 Machine-readable provenance and exact identities are in `manifest.json`. Bundled default assets
 are verified again before the first ONNX Runtime session is created. Environment overrides are
 allowed for development and their content SHA-256 becomes part of processing-cache keys.

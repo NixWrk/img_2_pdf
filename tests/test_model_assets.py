@@ -61,6 +61,36 @@ def test_download_model_asset_keeps_existing_file_on_hash_failure(tmp_path, monk
     assert not list(tmp_path.glob("*.part"))
 
 
+def test_download_model_asset_accepts_a_url_override_for_a_pinned_asset(
+    tmp_path, monkeypatch
+) -> None:
+    payload = b"release-asset"
+    asset = ModelAsset(
+        name="test",
+        filename="test.onnx",
+        size=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        license="restricted",
+        source="https://example.invalid/source",
+    )
+    opened: list[str] = []
+    monkeypatch.setattr(model_assets, "model_asset", lambda _name: asset)
+
+    def open_url(request, **_kwargs):
+        opened.append(request.full_url)
+        return _Response(payload)
+
+    monkeypatch.setattr(model_assets, "urlopen", open_url)
+    path = model_assets.download_model_asset(
+        "test",
+        tmp_path,
+        url="https://releases.example.invalid/test.onnx",
+    )
+
+    assert path.read_bytes() == payload
+    assert opened == ["https://releases.example.invalid/test.onnx"]
+
+
 def test_bundled_uvdoc_assets_match_the_manifest() -> None:
     assert model_assets.verify_model_asset("uvdoc_graph").name == "UVDoc_grid.onnx"
     assert model_assets.verify_model_asset("uvdoc_data").name == "UVDoc_grid.onnx.data"

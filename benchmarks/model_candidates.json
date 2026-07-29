@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "reviewedAt": "2026-07-28",
+  "reviewedAt": "2026-07-29",
   "selectionPolicy": "quality-first-license-agnostic",
   "candidates": [
     {
@@ -27,25 +27,25 @@
       "id": "docscanner-l",
       "tasks": ["geometry"],
       "source": "https://github.com/fh2019ustc/DocScanner",
-      "status": "runnable-external",
+      "status": "integrated-explicit",
       "priority": 1,
       "license": "LicenseRef-DocScanner-NonCommercial-ShareAlike",
-      "delivery": "external",
-      "runtime": "pytorch-gpu-reference",
-      "benchmarkDecision": "docunet-ocr-leader-next-production-spike",
-      "evidence": "docs/geometry_benchmark_2026-07-28.md"
+      "delivery": "verified-external-release-asset",
+      "runtime": "onnxruntime-cpu",
+      "benchmarkDecision": "dir300-runner-up-strongest-exact-onnx-awaiting-real-camera-gate",
+      "evidence": "docs/geometry_runtime_spike_2026-07-29.md"
     },
     {
       "id": "dvd",
       "tasks": ["geometry"],
       "source": "https://github.com/hanquansanren/DvD",
-      "status": "runnable-external",
+      "status": "isolated-gpu-spike",
       "priority": 1,
       "license": "AGPL-3.0-only",
       "delivery": "external",
-      "runtime": "pytorch-diffusion",
-      "benchmarkDecision": "docunet-geometry-leader-gpu-spike",
-      "evidence": "docs/geometry_benchmark_2026-07-28.md"
+      "runtime": "pytorch-cuda-diffusion",
+      "benchmarkDecision": "dir300-quality-leader-official-metrics-accepted-exact-onnx-blocked",
+      "evidence": "docs/geometry_runtime_spike_2026-07-29.md"
     },
     {
       "id": "doctr-plus",

@@ -441,12 +441,17 @@ def process_document_page(
             )
     else:
         uvdoc_identity = None
+        docscanner_identity = None
         if request.dewarp_method == "uvdoc" or (
             request.dewarp_method == "auto" and request.auto_dewarp_uvdoc_grid
         ):
             from .uvdoc import model_identity as uvdoc_model_identity
 
             uvdoc_identity = uvdoc_model_identity()
+        if request.dewarp_method == "docscanner_l":
+            from .docscanner import model_identity as docscanner_model_identity
+
+            docscanner_identity = docscanner_model_identity()
         dewarped, dewarp, upstream_key = _run_stage(
             stage="dewarp",
             image=deskewed,
@@ -457,6 +462,7 @@ def process_document_page(
                 "auto_uvdoc": request.auto_dewarp_uvdoc,
                 "auto_uvdoc_grid": request.auto_dewarp_uvdoc_grid,
                 "uvdoc_model_identity": uvdoc_identity,
+                "docscanner_model_identity": docscanner_identity,
                 "uvdoc_cache": (
                     str(request.uvdoc_cache_home) if request.uvdoc_cache_home is not None else None
                 ),

@@ -25,8 +25,8 @@ The same shortlist is stored machine-readably in `benchmarks/model_candidates.js
 | --- | --- | --- |
 | **UVDoc ONNX** | Integrated CPU baseline; graph/data hashes pinned | Run on every geometry corpus |
 | **PaddleOCR UVDoc** | Optional upstream runtime/cache | Run as an independent candidate, not alias it to bundled UVDoc |
-| **DocScanner-L** | [Official code and pretrained model](https://github.com/fh2019ustc/DocScanner); 8.5 M parameters; DocUNet evaluation published | **Priority 1 production spike**; best OCR in the local DocUNet run |
-| **DvD** | [Official AGPL code and four pretrained files](https://github.com/hanquansanren/DvD); DocUNet/DIR300 outputs published | **Geometry-quality leader / GPU spike**; runtime and exportability still unproved |
+| **DocScanner-L** | [Official code and pretrained model](https://github.com/fh2019ustc/DocScanner); exact ONNX adapter integrated | **Explicit production backend**; DIR300 runner-up and strongest exact ONNX candidate; awaiting real-camera gate |
+| **DvD** | [Official AGPL code and four pretrained files](https://github.com/hanquansanren/DvD); official GPU runner and DIR300 outputs reproduced | **DIR300 quality leader**; 2.61 s/sample and 1.27 GB peak CUDA allocated; exact ONNX blocked |
 | **DocTr++** | [Official code and pretrained model](https://github.com/fh2019ustc/DocTr-Plus); designed for incomplete/in-the-wild boundaries | **Priority 2 external candidate** |
 | **DocGeoNet** | [Official code, weights and DIR300 protocol](https://github.com/fh2019ustc/DocGeoNet) | Priority 2 reference baseline |
 | **DocRes** | [Official MIT code and weights](https://github.com/ZZZHANG-jx/DocRes); supports dewarping plus restoration tasks | Priority 2 joint-model candidate |
@@ -89,8 +89,10 @@ run should contain:
 
 The first three-way corrected DocUNet run is now recorded in
 [the 2026-07-28 geometry evidence](geometry_benchmark_2026-07-28.md): DvD wins geometric fidelity,
-while DocScanner-L wins OCR and is the next production integration target. That result is a
-DocUNet checkpoint, not a universal winner; DIR300 and real-camera cases are still required.
+while DocScanner-L wins OCR. The [full DIR300 run](geometry_runtime_spike_2026-07-29.md) also ranks
+DvD first on local composite, MS-SSIM, AAD proxy and OCR CER, and accepts its hash-bound official
+MATLAB metrics. DocScanner-L is second and remains the practical exact ONNX production candidate.
+Real UniScan camera cases are still required before changing the automatic default.
 Lighting remains open until classical, DocShadow, DocRes and ShaDocNet have outputs for identical
 paired cases. MMDIR joins as soon as its authors publish runnable inference or outputs for those
 cases.

@@ -14,12 +14,14 @@ DEWARP_METHOD_NONE = "none"
 DEWARP_METHOD_AUTO = "auto"
 DEWARP_METHOD_TEXTLINE = "textline"
 DEWARP_METHOD_UVDOC = "uvdoc"
+DEWARP_METHOD_DOCSCANNER = "docscanner_l"
 DEWARP_METHOD_PADDLEOCR_UVDOC = "paddleocr_uvdoc"
 DEWARP_METHOD_CHOICES = (
     DEWARP_METHOD_NONE,
     DEWARP_METHOD_AUTO,
     DEWARP_METHOD_TEXTLINE,
     DEWARP_METHOD_UVDOC,
+    DEWARP_METHOD_DOCSCANNER,
     DEWARP_METHOD_PADDLEOCR_UVDOC,
 )
 
@@ -677,6 +679,26 @@ def _uvdoc_grid_dewarp(image: np.ndarray) -> tuple[np.ndarray, DewarpDiagnostics
     return corrected, DewarpDiagnostics(method=DEWARP_METHOD_UVDOC, applied=True)
 
 
+def _docscanner_dewarp(image: np.ndarray) -> tuple[np.ndarray, DewarpDiagnostics]:
+    """Rectify the whole page with the external DocScanner-L ONNX graph."""
+    from uniscan.core import docscanner
+
+    if not docscanner.is_available():
+        return image.copy(), DewarpDiagnostics(
+            method=DEWARP_METHOD_DOCSCANNER,
+            applied=False,
+            reason="docscanner_model_unavailable",
+        )
+    corrected = docscanner.dewarp(image)
+    if corrected is None or corrected.size == 0:
+        return image.copy(), DewarpDiagnostics(
+            method=DEWARP_METHOD_DOCSCANNER,
+            applied=False,
+            reason="docscanner_no_result",
+        )
+    return corrected, DewarpDiagnostics(method=DEWARP_METHOD_DOCSCANNER, applied=True)
+
+
 def _try_uvdoc_grid_candidate(
     image: np.ndarray,
     *,
@@ -898,6 +920,23 @@ def dewarp_document(
         diagnostics = replace(
             diagnostics,
             selected_method=DEWARP_METHOD_UVDOC if diagnostics.applied else DEWARP_METHOD_NONE,
+        )
+        return corrected, _quality_diagnostics(
+            diagnostics,
+            before=before,
+            after=measure_dewarp_quality(corrected),
+            started=started,
+        )
+    if normalized == DEWARP_METHOD_DOCSCANNER:
+        corrected, diagnostics = _docscanner_dewarp(image)
+        if model is not None and diagnostics.applied:
+            corrected = apply_dewarp_model(corrected, model)
+            diagnostics = replace(diagnostics, reason="docscanner_with_user_adjustment")
+        diagnostics = replace(
+            diagnostics,
+            selected_method=(
+                DEWARP_METHOD_DOCSCANNER if diagnostics.applied else DEWARP_METHOD_NONE
+            ),
         )
         return corrected, _quality_diagnostics(
             diagnostics,

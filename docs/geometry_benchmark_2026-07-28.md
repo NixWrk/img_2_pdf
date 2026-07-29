@@ -5,6 +5,9 @@ published DvD and corrected DocScanner-L outputs with UniScan's bundled UVDoc ON
 same corrected DocUNet cases. Raw images and multi-gigabyte candidate outputs are intentionally
 kept outside Git; the hashes below bind the result to their exact contents.
 
+The runtime/export gate proposed at the end of this record was completed on 2026-07-29; see the
+[DocScanner-L and DvD runtime spike](geometry_runtime_spike_2026-07-29.md).
+
 ## Source provenance
 
 | Asset | Cases/files | Bytes | SHA-256 |

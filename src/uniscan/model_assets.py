@@ -103,10 +103,16 @@ def model_file_identity(path: Path) -> str:
     return f"sha256:{file_sha256(candidate)}:{candidate.stat().st_size}"
 
 
-def download_model_asset(name: str, target_dir: Path = MODEL_DIR) -> Path:
+def download_model_asset(
+    name: str,
+    target_dir: Path = MODEL_DIR,
+    *,
+    url: str | None = None,
+) -> Path:
     """Download a pinned release asset and publish it only after verification."""
     asset = model_asset(name)
-    if asset.url is None:
+    source_url = url or asset.url
+    if source_url is None:
         raise ValueError(f"Model asset has no downloadable release URL: {name}")
     target_dir = Path(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -127,7 +133,7 @@ def download_model_asset(name: str, target_dir: Path = MODEL_DIR) -> Path:
             delete=False,
         ) as temporary:
             temporary_path = Path(temporary.name)
-            request = Request(asset.url, headers={"User-Agent": "UniScan-model-assets/1"})
+            request = Request(source_url, headers={"User-Agent": "UniScan-model-assets/1"})
             digest = hashlib.sha256()
             downloaded = 0
             with urlopen(request, timeout=60) as response:  # noqa: S310 - pinned HTTPS URL

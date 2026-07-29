@@ -178,7 +178,7 @@ def test_candidate_registry_includes_restricted_models_in_quality_pool() -> None
 
     assert registry["selectionPolicy"] == "quality-first-license-agnostic"
     assert candidates["dvd"]["license"] == "AGPL-3.0-only"
-    assert candidates["dvd"]["status"] == "runnable-external"
+    assert candidates["dvd"]["status"] == "isolated-gpu-spike"
     assert candidates["docscanner-l"]["priority"] == 1
     assert candidates["shadocnet"]["status"] == "runnable-external-release-assets"
     assert candidates["mmdir"]["license"] == "CC-BY-NC-ND-4.0"
