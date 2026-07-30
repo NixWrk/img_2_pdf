@@ -11,6 +11,7 @@ from uniscan.core.dewarp import (
     DEWARP_METHOD_TEXTLINE,
     DewarpDiagnostics,
     DewarpModel,
+    DewarpQualityMetrics,
     _candidate_rejection_reason,
     apply_dewarp_model,
     dewarp_document,
@@ -315,6 +316,66 @@ def test_quality_gate_accepts_measurably_reduced_perspective() -> None:
             allow_reframing=True,
         )
         is None
+    )
+
+
+def test_quality_gate_rejects_lost_textline_evidence_even_when_reframing() -> None:
+    before = DewarpQualityMetrics(1.2, 10, 0.12, 0.0, 0.08, 0.76)
+    after = DewarpQualityMetrics(0.4, 4, 0.04, 0.0, 0.06, 0.78)
+
+    assert (
+        _candidate_rejection_reason(
+            before,
+            after,
+            require_curvature_improvement=True,
+            allow_reframing=True,
+        )
+        == "textline_evidence_reduced"
+    )
+
+
+def test_quality_gate_rejects_curvature_regression_without_perspective_rescue() -> None:
+    before = DewarpQualityMetrics(0.5, 8, 0.06, 0.0, 0.08, 0.76)
+    after = DewarpQualityMetrics(0.9, 8, 0.04, 0.0, 0.06, 0.78)
+
+    assert (
+        _candidate_rejection_reason(
+            before,
+            after,
+            require_curvature_improvement=True,
+            allow_reframing=True,
+        )
+        == "curvature_worsened"
+    )
+
+
+def test_quality_gate_allows_small_curvature_tradeoff_for_large_perspective_gain() -> None:
+    before = DewarpQualityMetrics(0.5, 8, 0.20, 0.0, 0.08, 0.76)
+    after = DewarpQualityMetrics(0.6, 8, 0.08, 0.0, 0.06, 0.78)
+
+    assert (
+        _candidate_rejection_reason(
+            before,
+            after,
+            require_curvature_improvement=True,
+            allow_reframing=True,
+        )
+        is None
+    )
+
+
+def test_quality_gate_rejects_large_edge_content_loss_for_page_model() -> None:
+    before = DewarpQualityMetrics(1.2, 8, 0.1, 0.0, 0.10, 0.76)
+    after = DewarpQualityMetrics(0.5, 8, 0.04, 0.0, 0.02, 0.78)
+
+    assert (
+        _candidate_rejection_reason(
+            before,
+            after,
+            require_curvature_improvement=True,
+            allow_reframing=True,
+        )
+        == "edge_content_lost"
     )
 
 

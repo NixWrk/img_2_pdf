@@ -17,11 +17,13 @@ from .cleanup import (
 )
 
 DESKEW_METHOD_NONE = "none"
+DESKEW_METHOD_MANUAL = "manual"
 DESKEW_METHOD_HYBRID = "hybrid"
 DESKEW_METHOD_HOUGH = "hough"
 DESKEW_METHOD_MIN_AREA = "min_area"
 DESKEW_METHOD_CHOICES = (
     DESKEW_METHOD_NONE,
+    DESKEW_METHOD_MANUAL,
     DESKEW_METHOD_HYBRID,
     DESKEW_METHOD_HOUGH,
     DESKEW_METHOD_MIN_AREA,
@@ -318,11 +320,25 @@ def estimate_document_skew(
     *,
     method: str = DESKEW_METHOD_HYBRID,
     max_angle: float = 20.0,
+    manual_angle_degrees: float | None = None,
 ) -> SkewEstimate:
     """Estimate small document rotation using selectable, comparable algorithms."""
     normalized = method.strip().lower()
     if normalized not in DESKEW_METHOD_CHOICES:
         raise ValueError(f"Unsupported deskew method: {method}")
+    if normalized == DESKEW_METHOD_MANUAL:
+        if manual_angle_degrees is None or not np.isfinite(manual_angle_degrees):
+            raise ValueError("Manual deskew requires a finite angle.")
+        angle = float(manual_angle_degrees)
+        if abs(angle) > max_angle:
+            raise ValueError(f"Manual deskew angle must be within +/-{max_angle:g} degrees.")
+        return SkewEstimate(
+            angle,
+            normalized,
+            1.0,
+            selected_method=DESKEW_METHOD_MANUAL,
+            reason="user_override",
+        )
     if normalized == DESKEW_METHOD_NONE:
         return SkewEstimate(
             0.0,
@@ -371,9 +387,15 @@ def deskew_document_with_diagnostics(
     *,
     method: str = DESKEW_METHOD_HYBRID,
     max_angle: float = 20.0,
+    manual_angle_degrees: float | None = None,
 ) -> tuple[np.ndarray, SkewEstimate]:
     """Deskew without clipping content and return the full estimate evidence."""
-    estimate = estimate_document_skew(image, method=method, max_angle=max_angle)
+    estimate = estimate_document_skew(
+        image,
+        method=method,
+        max_angle=max_angle,
+        manual_angle_degrees=manual_angle_degrees,
+    )
     angle = estimate.angle_degrees
     if abs(angle) < 0.05:
         reason = estimate.reason if angle == 0.0 else "angle_below_threshold"
@@ -403,6 +425,7 @@ def deskew_document(
     *,
     method: str = DESKEW_METHOD_HYBRID,
     max_angle: float = 20.0,
+    manual_angle_degrees: float | None = None,
 ) -> tuple[np.ndarray, float]:
     """
     Try to estimate and correct document skew.
@@ -413,5 +436,6 @@ def deskew_document(
         image,
         method=method,
         max_angle=max_angle,
+        manual_angle_degrees=manual_angle_degrees,
     )
     return rotated, float(estimate.angle_degrees)

@@ -38,6 +38,7 @@ from uniscan.core.dewarp import (
 )
 from uniscan.core.preprocess import (
     DESKEW_METHOD_CHOICES,
+    DESKEW_METHOD_MANUAL,
     PREPROCESS_PRESETS,
     PreprocessSettings,
     resolve_lens_mode_profile,
@@ -881,6 +882,7 @@ def _report_payload(
     legacy_illumination_correction: bool,
     orientation_method: str,
     deskew_method: str,
+    deskew_angle_degrees: float | None,
     dewarp_method: str,
     auto_dewarp_uvdoc: bool,
     auto_dewarp_uvdoc_grid: bool,
@@ -935,6 +937,7 @@ def _report_payload(
         "legacyIlluminationCorrectionRequested": legacy_illumination_correction,
         "orientationMethod": orientation_method,
         "deskewMethod": deskew_method,
+        "deskewRequestedAngleDegrees": deskew_angle_degrees,
         "dewarpMethod": dewarp_method,
         "autoDewarpUvdoc": auto_dewarp_uvdoc,
         "autoDewarpPageModel": auto_dewarp_uvdoc_grid,
@@ -1120,6 +1123,7 @@ def run_batch_pipeline(
     illumination_correction: bool = False,
     orientation_method: str = "none",
     deskew_method: str = "none",
+    deskew_angle_degrees: float | None = None,
     dewarp_method: str = "none",
     auto_dewarp_uvdoc: bool = False,
     auto_dewarp_uvdoc_grid: bool = True,
@@ -1188,6 +1192,14 @@ def run_batch_pipeline(
         raise ValueError(f"Unsupported orientation method: {orientation_method}")
     if deskew_method not in DESKEW_METHOD_CHOICES:
         raise ValueError(f"Unsupported deskew method: {deskew_method}")
+    if deskew_method == DESKEW_METHOD_MANUAL:
+        if deskew_angle_degrees is None:
+            raise ValueError("Manual deskew requires deskew_angle_degrees.")
+        deskew_angle_degrees = float(deskew_angle_degrees)
+        if not -20.0 <= deskew_angle_degrees <= 20.0:
+            raise ValueError("Manual deskew angle must be within +/-20 degrees.")
+    elif deskew_angle_degrees is not None:
+        raise ValueError("deskew_angle_degrees requires deskew_method='manual'.")
     if dewarp_method not in DEWARP_METHOD_CHOICES:
         raise ValueError(f"Unsupported dewarp method: {dewarp_method}")
     if shadow_method not in SHADOW_METHOD_CHOICES:
@@ -1340,6 +1352,7 @@ def run_batch_pipeline(
                     PageProcessingRequest(
                         orientation_method=processing_orientation_method,
                         deskew_method=deskew_method,
+                        deskew_angle_degrees=deskew_angle_degrees,
                         dewarp_method=dewarp_method,
                         uvdoc_cache_home=uvdoc_cache_home,
                         auto_dewarp_uvdoc=auto_dewarp_uvdoc,
@@ -1489,6 +1502,7 @@ def run_batch_pipeline(
             legacy_illumination_correction=legacy_illumination_correction,
             orientation_method=orientation_method,
             deskew_method=deskew_method,
+            deskew_angle_degrees=deskew_angle_degrees,
             dewarp_method=dewarp_method,
             auto_dewarp_uvdoc=bool(auto_dewarp_uvdoc),
             auto_dewarp_uvdoc_grid=bool(auto_dewarp_uvdoc_grid),

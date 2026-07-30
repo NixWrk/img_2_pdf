@@ -36,11 +36,14 @@ _MIN_SHADOW_FRACTION = 0.02
 # A candidate must leave the page measurably more even than it found it.
 _REQUIRED_IMPROVEMENT = 0.9
 # Correction must not wash the page out: ink has to stay dark and the ink to
-# paper separation has to survive. Glare and clipped-pixel counts are
-# deliberately not used here — pushing a shadowed background up towards white
-# is the goal of this stage, and those metrics read that as damage.
+# paper separation has to survive. Some clipping is expected while lifting a
+# page background, but a large *new* clipped or glare region is destructive.
 _MIN_CONTRAST_RATIO = 0.85
 _MAX_INK_RISE = 60.0
+_MAX_GLARE_FRACTION = 0.08
+_MAX_GLARE_RISE = 0.05
+_MAX_CLIPPED_FRACTION = 0.20
+_MAX_CLIPPED_RISE = 0.10
 
 
 @dataclass(slots=True, frozen=True)
@@ -75,6 +78,16 @@ def _rejection_reason(
 ) -> str | None:
     if after.unevenness > before.unevenness * _REQUIRED_IMPROVEMENT:
         return "lighting_not_improved"
+    if (
+        after.glare_fraction > _MAX_GLARE_FRACTION
+        and after.glare_fraction > before.glare_fraction + _MAX_GLARE_RISE
+    ):
+        return "excessive_glare"
+    if (
+        after.clipped_pixel_fraction > _MAX_CLIPPED_FRACTION
+        and after.clipped_pixel_fraction > before.clipped_pixel_fraction + _MAX_CLIPPED_RISE
+    ):
+        return "excessive_clipping"
     ink_before, contrast_before = _ink_and_contrast(source)
     ink_after, contrast_after = _ink_and_contrast(candidate)
     if contrast_after < contrast_before * _MIN_CONTRAST_RATIO:

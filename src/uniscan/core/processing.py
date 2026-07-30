@@ -65,6 +65,7 @@ class PageProcessingRequest:
 
     orientation_method: str = ORIENTATION_METHOD_NONE
     deskew_method: str = DESKEW_METHOD_NONE
+    deskew_angle_degrees: float | None = None
     dewarp_method: str = DEWARP_METHOD_NONE
     dewarp_model: DewarpModel | None = None
     dewarp_already_applied: bool = False
@@ -406,6 +407,7 @@ def process_document_page(
         output, estimate = deskew_document_with_diagnostics(
             oriented,
             method=request.deskew_method,
+            manual_angle_degrees=request.deskew_angle_degrees,
         )
         return output, asdict(estimate)
 
@@ -413,7 +415,11 @@ def process_document_page(
         stage="deskew",
         image=oriented,
         upstream_key=upstream_key,
-        options={"method": request.deskew_method, "diagnostics_version": 2},
+        options={
+            "method": request.deskew_method,
+            "manual_angle_degrees": request.deskew_angle_degrees,
+            "diagnostics_version": 3,
+        },
         operation=deskew_stage,
         encode_diagnostics=lambda payload: payload,
         decode_diagnostics=_deskew_from_dict,
@@ -488,7 +494,12 @@ def process_document_page(
     if request.shadow_method in ("auto", "docshadow"):
         from .docshadow import model_identity as docshadow_model_identity
 
-        shadow_model_identity = docshadow_model_identity()
+        try:
+            shadow_model_identity = docshadow_model_identity()
+        except OSError:
+            # Automatic lighting remains a validated classical fallback when
+            # the optional model asset has not been installed yet.
+            shadow_model_identity = "docshadow:unavailable"
     lit, shadow, upstream_key = _run_stage(
         stage="lighting",
         image=dewarped,

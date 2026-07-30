@@ -48,6 +48,7 @@ from uniscan.core.lighting import (
 )
 from uniscan.core.orientation import ORIENTATION_METHOD_AUTO, ORIENTATION_METHOD_NONE
 from uniscan.core.preprocess import (
+    DESKEW_METHOD_MANUAL,
     DESKEW_METHOD_NONE,
     DESKEW_METHOD_HOUGH,
     DESKEW_METHOD_HYBRID,
@@ -134,10 +135,19 @@ DEWARP_UI_METHODS = {
     "Page model (DocScanner-L)": DEWARP_METHOD_DOCSCANNER,
     "Text lines (offline)": DEWARP_METHOD_TEXTLINE,
 }
+ORIENTATION_UI_METHODS = {
+    "Off": ORIENTATION_METHOD_NONE,
+    "Automatic (conservative)": ORIENTATION_METHOD_AUTO,
+    "Rotate 90 degrees": "90",
+    "Rotate 180 degrees": "180",
+    "Rotate 270 degrees": "270",
+}
 DESKEW_UI_METHODS = {
+    "Off": DESKEW_METHOD_NONE,
     "Hybrid (recommended)": DESKEW_METHOD_HYBRID,
     "Text lines / Hough": DESKEW_METHOD_HOUGH,
     "Foreground box": DESKEW_METHOD_MIN_AREA,
+    "Manual angle": DESKEW_METHOD_MANUAL,
 }
 BINARIZATION_UI_METHODS = {
     "None": "none",
@@ -640,7 +650,7 @@ class UnifiedScanApp(ctk.CTk):
         self.preprocess_brightness_var = tk.IntVar(value=10)
         self.preprocess_denoise_var = tk.IntVar(value=4)
         self.preprocess_threshold_var = tk.IntVar(value=170)
-        self.shadow_method_var = tk.StringVar(value="None")
+        self.shadow_method_var = tk.StringVar(value="Automatic (validated)")
         self.binarization_method_var = tk.StringVar(value="None")
         self.binarization_window_var = tk.IntVar(value=31)
         self.binarization_k_var = tk.DoubleVar(value=0.2)
@@ -651,10 +661,15 @@ class UnifiedScanApp(ctk.CTk):
         self.page_align_x_var = tk.StringVar(value="center")
         self.page_align_y_var = tk.StringVar(value="center")
         self.lighting_summary_var = tk.StringVar(value="Lighting: not analyzed")
+        self.stage_settings_var = tk.StringVar(value="Stage settings: document defaults")
+        self.orientation_method_var = tk.StringVar(value="Automatic (conservative)")
         self.dewarp_method_var = tk.StringVar(value="Automatic (validated)")
         self.geometry_summary_var = tk.StringVar(value="Wave preview: pending")
         self.split_preview_var = tk.StringVar(value="Split: not previewed")
         self.deskew_method_var = tk.StringVar(value="Hybrid (recommended)")
+        self.manual_deskew_angle_var = tk.DoubleVar(value=0.0)
+        self.manual_deskew_summary_var = tk.StringVar(value="Manual deskew: 0.0 degrees")
+        self._loading_page_recipe = False
         import_pdf_dpi, import_split_spreads = _load_import_preferences(
             self.import_preferences_path
         )
@@ -1330,6 +1345,46 @@ class UnifiedScanApp(ctk.CTk):
             variable=self.lightweight_preview_var,
             command=self.update_page_preview,
         ).pack(anchor="w", padx=6, pady=(0, 6))
+        ctk.CTkLabel(
+            processing,
+            textvariable=self.stage_settings_var,
+            anchor="w",
+            justify="left",
+            wraplength=230,
+            text_color=("#60646c", "#a0a4ab"),
+        ).pack(fill=ctk.X, padx=6, pady=(0, 8))
+        ctk.CTkLabel(processing, text="Page orientation", anchor="w").pack(
+            fill=ctk.X, padx=6, pady=(0, 2)
+        )
+        ctk.CTkOptionMenu(
+            processing,
+            values=list(ORIENTATION_UI_METHODS),
+            variable=self.orientation_method_var,
+            command=lambda _value: self.update_page_preview(),
+        ).pack(fill=ctk.X, padx=6, pady=(0, 8))
+        ctk.CTkLabel(processing, text="Small-angle deskew", anchor="w").pack(
+            fill=ctk.X, padx=6, pady=(0, 2)
+        )
+        ctk.CTkOptionMenu(
+            processing,
+            values=list(DESKEW_UI_METHODS),
+            variable=self.deskew_method_var,
+            command=lambda _value: self.update_page_preview(),
+        ).pack(fill=ctk.X, padx=6, pady=(0, 4))
+        ctk.CTkSlider(
+            processing,
+            from_=-10.0,
+            to=10.0,
+            number_of_steps=200,
+            variable=self.manual_deskew_angle_var,
+            command=self._on_manual_deskew_angle_change,
+        ).pack(fill=ctk.X, padx=6, pady=(0, 2))
+        ctk.CTkLabel(
+            processing,
+            textvariable=self.manual_deskew_summary_var,
+            anchor="w",
+            text_color=("#60646c", "#a0a4ab"),
+        ).pack(fill=ctk.X, padx=6, pady=(0, 8))
         ctk.CTkLabel(processing, text="Remove page waves", anchor="w").pack(
             fill=ctk.X, padx=6, pady=(0, 2)
         )
@@ -2379,6 +2434,111 @@ class UnifiedScanApp(ctk.CTk):
         self._binarization_k_custom = True
         self.update_page_preview()
 
+    def _on_manual_deskew_angle_change(self, value: float) -> None:
+        angle = float(value)
+        self.manual_deskew_summary_var.set(f"Manual deskew: {angle:+.1f} degrees")
+        if self._loading_page_recipe:
+            return
+        self.deskew_method_var.set("Manual angle")
+        self.update_page_preview()
+
+    @staticmethod
+    def _ui_name_for_method(mapping: dict[str, str], method: str, fallback: str) -> str:
+        return next((name for name, value in mapping.items() if value == method), fallback)
+
+    def _sync_controls_from_single_committed_page(self) -> None:
+        """Load one page's durable recipe so editing one stage preserves all others."""
+        selected = self.page_listbox.curselection()
+        if len(selected) != 1 or not 0 <= selected[0] < len(self.session.entries):
+            self.stage_settings_var.set("Stage settings: document defaults / mixed selection")
+            return
+        entry = self.session.entries[selected[0]]
+        committed = entry.committed_processing
+        if committed is None:
+            self.stage_settings_var.set("Stage settings: document defaults")
+            return
+        request = committed.recipe.to_request()
+        self._loading_page_recipe = True
+        try:
+            self.orientation_method_var.set(
+                self._ui_name_for_method(
+                    ORIENTATION_UI_METHODS,
+                    request.orientation_method,
+                    "Off",
+                )
+            )
+            self.deskew_method_var.set(
+                self._ui_name_for_method(
+                    DESKEW_UI_METHODS,
+                    request.deskew_method,
+                    "Off",
+                )
+            )
+            angle = float(request.deskew_angle_degrees or 0.0)
+            self.manual_deskew_angle_var.set(angle)
+            self.manual_deskew_summary_var.set(f"Manual deskew: {angle:+.1f} degrees")
+            self.dewarp_method_var.set(
+                self._ui_name_for_method(DEWARP_UI_METHODS, request.dewarp_method, "None")
+            )
+            self.shadow_method_var.set(
+                self._ui_name_for_method(SHADOW_UI_METHODS, request.shadow_method, "None")
+            )
+            self.postprocess_var.set(request.postprocess_name)
+            settings = request.preprocess_settings
+            if settings is not None:
+                self.preprocess_preset_var.set("Custom")
+                self.preprocess_contrast_var.set(float(settings.contrast))
+                self.preprocess_brightness_var.set(int(settings.brightness))
+                self.preprocess_denoise_var.set(int(settings.denoise))
+                self.preprocess_threshold_var.set(int(settings.threshold))
+                self.binarization_method_var.set(
+                    self._ui_name_for_method(
+                        BINARIZATION_UI_METHODS,
+                        settings.binarization_method,
+                        "None",
+                    )
+                )
+                self.binarization_window_var.set(int(settings.binarization_window))
+                if settings.binarization_k is not None:
+                    self.binarization_k_var.set(float(settings.binarization_k))
+                self._binarization_k_custom = settings.binarization_k is not None
+                self.despeckle_strength_var.set(
+                    self._ui_name_for_method(
+                        DESPECKLE_UI_STRENGTHS,
+                        settings.despeckle_strength,
+                        "None",
+                    )
+                )
+            else:
+                # Do not leak cleanup controls from the previously selected
+                # page into a recipe whose cleanup stage was explicitly off.
+                self.preprocess_preset_var.set("Custom")
+                self.preprocess_contrast_var.set(1.0)
+                self.preprocess_brightness_var.set(0)
+                self.preprocess_denoise_var.set(0)
+                self.preprocess_threshold_var.set(170)
+                self.binarization_method_var.set("None")
+                self.binarization_window_var.set(31)
+                self.binarization_k_var.set(0.2)
+                self._binarization_k_custom = False
+                self.despeckle_strength_var.set("None")
+            self.page_layout_var.set(
+                self._ui_name_for_method(
+                    PAGE_LAYOUT_UI_METHODS, request.page_layout, "Keep source page"
+                )
+            )
+            self.page_margin_mm_var.set(float(request.page_margin_mm))
+            self.page_align_x_var.set(request.horizontal_alignment)
+            self.page_align_y_var.set(request.vertical_alignment)
+            if request.page_layout != "none":
+                self.export_pdf_dpi_var.set(int(request.page_dpi))
+            self.lens_mode_var.set(
+                infer_lens_mode(self.preprocess_preset_var.get(), self.postprocess_var.get())
+            )
+        finally:
+            self._loading_page_recipe = False
+        self.stage_settings_var.set(f"Stage settings: loaded from {entry.name}")
+
     def _apply_postprocess(self, image: np.ndarray) -> np.ndarray:
         """Compatibility helper routed through the canonical controller."""
         return process_document_page(
@@ -2441,6 +2601,15 @@ class UnifiedScanApp(ctk.CTk):
             DEWARP_METHOD_NONE,
         )
         return PageProcessingRequest(
+            orientation_method=ORIENTATION_UI_METHODS.get(
+                self.orientation_method_var.get(), ORIENTATION_METHOD_NONE
+            ),
+            deskew_method=DESKEW_UI_METHODS.get(self.deskew_method_var.get(), DESKEW_METHOD_NONE),
+            deskew_angle_degrees=(
+                float(self.manual_deskew_angle_var.get())
+                if DESKEW_UI_METHODS.get(self.deskew_method_var.get()) == DESKEW_METHOD_MANUAL
+                else None
+            ),
             dewarp_method=dewarp_method,
             dewarp_model=self._entry_dewarp_model(entry),
             dewarp_already_applied=self._entry_was_dewarped(entry, dewarp_method),
@@ -3391,6 +3560,7 @@ class UnifiedScanApp(ctk.CTk):
             self.page_listbox.selection_set(keep_index)
         self._sync_page_selection_to_session()
         self._update_page_action_states()
+        self._sync_controls_from_single_committed_page()
         self.update_page_preview()
 
     def _sync_page_selection_to_session(self) -> None:
@@ -3401,6 +3571,7 @@ class UnifiedScanApp(ctk.CTk):
     def on_page_select(self, _event=None) -> None:
         self._sync_page_selection_to_session()
         self._update_page_action_states()
+        self._sync_controls_from_single_committed_page()
         self.update_page_preview()
 
     def _update_page_action_states(self) -> None:
@@ -4027,10 +4198,6 @@ class UnifiedScanApp(ctk.CTk):
         previous_request = previous_committed.recipe.to_request()
         request = replace(
             previous_request,
-            orientation_method=ORIENTATION_METHOD_NONE,
-            deskew_method=DESKEW_METHOD_NONE,
-            dewarp_method=DEWARP_METHOD_NONE,
-            dewarp_model=None,
             dewarp_already_applied=False,
             stage_cache=self.processing_cache,
             source_fingerprint=None,
@@ -4752,17 +4919,34 @@ class UnifiedScanApp(ctk.CTk):
         self._last_processing_cache_hits = result.diagnostics.cache_hits
         return result.diagnostics.dewarp
 
-    def _reprocess_after_geometry_change(self, entry, previous_committed) -> None:
-        """Replay durable appearance settings without adopting pending GUI controls."""
+    def _reprocess_after_geometry_change(
+        self,
+        entry,
+        previous_committed,
+        *,
+        baked_stages: frozenset[str] = frozenset(),
+    ) -> None:
+        """Replay the durable recipe after an upstream edit.
+
+        Only stages explicitly baked into ``original_image`` are disabled.
+        Every downstream automatic or manual policy is otherwise preserved.
+        """
         if previous_committed is None:
             return
         previous_request = previous_committed.recipe.to_request()
         request = replace(
             previous_request,
-            orientation_method=ORIENTATION_METHOD_NONE,
-            deskew_method=DESKEW_METHOD_NONE,
-            dewarp_method=DEWARP_METHOD_NONE,
-            dewarp_model=None,
+            orientation_method=(
+                ORIENTATION_METHOD_NONE
+                if "orientation" in baked_stages
+                else previous_request.orientation_method
+            ),
+            deskew_method=(
+                DESKEW_METHOD_NONE if "deskew" in baked_stages else previous_request.deskew_method
+            ),
+            deskew_angle_degrees=(
+                None if "deskew" in baked_stages else previous_request.deskew_angle_degrees
+            ),
             dewarp_already_applied=False,
             stage_cache=self.processing_cache,
             source_fingerprint=None,
@@ -4825,7 +5009,11 @@ class UnifiedScanApp(ctk.CTk):
             rotated = cv2.rotate(entry.original_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
             previous_committed = entry.committed_processing
             entry.original_image = rotated
-            self._reprocess_after_geometry_change(entry, previous_committed)
+            self._reprocess_after_geometry_change(
+                entry,
+                previous_committed,
+                baked_stages=frozenset({"orientation"}),
+            )
         entry_ids = tuple(self.session.entries[idx].entry_id for idx in indices)
         self.refresh_page_list(keep_entry_ids=entry_ids)
         self._set_status(f"Rotated {len(indices)} page(s) left.")
@@ -4840,7 +5028,11 @@ class UnifiedScanApp(ctk.CTk):
             rotated = cv2.rotate(entry.original_image, cv2.ROTATE_90_CLOCKWISE)
             previous_committed = entry.committed_processing
             entry.original_image = rotated
-            self._reprocess_after_geometry_change(entry, previous_committed)
+            self._reprocess_after_geometry_change(
+                entry,
+                previous_committed,
+                baked_stages=frozenset({"orientation"}),
+            )
         entry_ids = tuple(self.session.entries[idx].entry_id for idx in indices)
         self.refresh_page_list(keep_entry_ids=entry_ids)
         self._set_status(f"Rotated {len(indices)} page(s) right.")
@@ -5219,16 +5411,27 @@ class UnifiedScanApp(ctk.CTk):
             self.deskew_method_var.get(),
             DESKEW_METHOD_HYBRID,
         )
+        if method in {DESKEW_METHOD_NONE, DESKEW_METHOD_MANUAL}:
+            method = DESKEW_METHOD_HYBRID
         for idx in indices:
             entry = self.session.entries[idx]
             previous_committed = entry.committed_processing
-            stage_result = process_document_page(
-                entry.original_image,
-                PageProcessingRequest(deskew_method=method),
+            request = (
+                previous_committed.recipe.to_request()
+                if previous_committed is not None
+                else self._processing_request(entry=entry, preview=False)
             )
-            entry.original_image = stage_result.image
-            self._reprocess_after_geometry_change(entry, previous_committed)
-            angles.append(stage_result.diagnostics.deskew_angle_degrees)
+            request = replace(
+                request,
+                deskew_method=method,
+                deskew_angle_degrees=None,
+                stage_cache=self.processing_cache,
+                source_fingerprint=None,
+                cancel_cb=None,
+            )
+            self._commit_processing_request(entry, request)
+            assert entry.committed_processing is not None
+            angles.append(float(entry.committed_processing.diagnostics["deskew_angle_degrees"]))
 
         self.refresh_page_list(keep_entry_ids=entry_ids)
         mean_angle = sum(angles) / max(1, len(angles))
@@ -5245,15 +5448,27 @@ class UnifiedScanApp(ctk.CTk):
         for idx in indices:
             entry = self.session.entries[idx]
             previous_committed = entry.committed_processing
-            stage_result = process_document_page(
-                entry.original_image,
-                PageProcessingRequest(orientation_method=ORIENTATION_METHOD_AUTO),
+            request = (
+                previous_committed.recipe.to_request()
+                if previous_committed is not None
+                else self._processing_request(entry=entry, preview=False)
             )
-            oriented = stage_result.image
-            item = stage_result.diagnostics.orientation
-            if item.applied:
-                entry.original_image = oriented
-                self._reprocess_after_geometry_change(entry, previous_committed)
+            request = replace(
+                request,
+                orientation_method=ORIENTATION_METHOD_AUTO,
+                stage_cache=self.processing_cache,
+                source_fingerprint=None,
+                cancel_cb=None,
+            )
+            result = process_document_page(entry.original_image, request)
+            item = result.diagnostics.orientation
+            committed = CommittedPageProcessing.from_result(
+                request,
+                result.diagnostics,
+                result.image,
+            )
+            entry.current_image = result.image
+            entry.committed_processing = committed
             diagnostics.append(item)
 
         self.refresh_page_list(keep_entry_ids=entry_ids)

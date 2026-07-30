@@ -701,6 +701,24 @@ def test_run_batch_pipeline_reports_hybrid_deskew_fallback_evidence(tmp_path) ->
     assert report_page["deskewReason"] == "hough_no_lines;min_area_selected"
 
 
+def test_run_batch_pipeline_applies_and_reports_manual_deskew_angle(tmp_path) -> None:
+    source = tmp_path / "manual-deskew.png"
+    _write_image(source, 180)
+
+    result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "manual-deskew.pdf",
+        deskew_method="manual",
+        deskew_angle_degrees=-1.5,
+    )
+
+    assert result.pages[0].deskew_method == "manual"
+    assert result.pages[0].deskew_angle_degrees == pytest.approx(-1.5)
+    report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    assert report["deskewRequestedAngleDegrees"] == pytest.approx(-1.5)
+    assert report["pages"][0]["deskewSelectedMethod"] == "manual"
+
+
 def test_run_batch_pipeline_rejects_unknown_geometry_methods(tmp_path) -> None:
     source = tmp_path / "source.png"
     _write_image(source, 90)
@@ -717,6 +735,18 @@ def test_run_batch_pipeline_rejects_unknown_geometry_methods(tmp_path) -> None:
             inputs=[source],
             output_pdf=tmp_path / "deskew.pdf",
             deskew_method="missing",
+        )
+    with pytest.raises(ValueError, match="requires deskew_angle_degrees"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=tmp_path / "manual-angle-missing.pdf",
+            deskew_method="manual",
+        )
+    with pytest.raises(ValueError, match="requires deskew_method='manual'"):
+        run_batch_pipeline(
+            inputs=[source],
+            output_pdf=tmp_path / "manual-method-missing.pdf",
+            deskew_angle_degrees=1.0,
         )
     with pytest.raises(ValueError, match="Unsupported dewarp method"):
         run_batch_pipeline(

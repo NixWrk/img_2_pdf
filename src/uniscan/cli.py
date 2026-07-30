@@ -177,6 +177,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Correct small page rotation after boundary detection.",
     )
     convert_parser.add_argument(
+        "--deskew-angle",
+        type=float,
+        default=None,
+        help="Exact angle in degrees for --deskew manual (within +/-20).",
+    )
+    convert_parser.add_argument(
         "--dewarp",
         choices=DEWARP_METHOD_CHOICES,
         default="none",
@@ -409,6 +415,7 @@ def main(argv: list[str] | None = None) -> int:
                 illumination_correction=args.illumination_correction,
                 orientation_method=args.orientation,
                 deskew_method=args.deskew,
+                deskew_angle_degrees=args.deskew_angle,
                 dewarp_method=args.dewarp,
                 auto_dewarp_uvdoc=args.auto_dewarp_uvdoc,
                 auto_dewarp_uvdoc_grid=args.auto_dewarp_uvdoc_grid,

@@ -448,11 +448,10 @@ def _candidate_rejection_reason(
 ) -> str | None:
     """Reject a candidate whose measurable geometry did not actually improve.
 
-    ``allow_reframing`` loosens the framing limits for whole-page rectifiers
-    that legitimately drop the photographed background: their output is the
-    page alone, so content sits closer to the edge and the aspect ratio
-    changes by design. Either curvature or projective convergence can provide
-    the deciding geometry evidence.
+    ``allow_reframing`` loosens aspect and blank-border limits for whole-page
+    rectifiers that legitimately change the photographed frame. Edge-content
+    and text-line evidence remain protected. Either curvature or projective
+    convergence can provide the deciding geometry evidence.
     """
     if after.aspect_ratio <= 0.0:
         return "invalid_output_size"
@@ -461,8 +460,21 @@ def _candidate_rejection_reason(
         return "excessive_aspect_change"
     if not allow_reframing and after.blank_border_ratio > before.blank_border_ratio + 0.15:
         return "new_blank_borders"
-    if not allow_reframing and after.edge_ink_ratio > before.edge_ink_ratio + 0.04:
+    if after.edge_ink_ratio > before.edge_ink_ratio + 0.04:
         return "content_moved_to_edge"
+    if before.edge_ink_ratio >= 0.03 and after.edge_ink_ratio < before.edge_ink_ratio * 0.65:
+        return "edge_content_lost"
+    if before.line_count >= 6:
+        minimum_retained_lines = max(3, int(np.ceil(before.line_count * 0.6)))
+        if after.line_count < minimum_retained_lines:
+            return "textline_evidence_reduced"
+    if before.line_count >= 3 and after.line_count >= 3:
+        allowed_curvature_rise = max(0.15, before.curvature_rms_px * 0.15)
+        curvature_worsened = (
+            after.curvature_rms_px > before.curvature_rms_px + allowed_curvature_rise
+        )
+        if curvature_worsened:
+            return "curvature_worsened"
     if require_curvature_improvement and before.line_count >= 3:
         if after.line_count < 3:
             return "textline_evidence_lost"
@@ -717,7 +729,7 @@ def _try_uvdoc_grid_candidate(
         before,
         after,
         require_curvature_improvement=True,
-        # UVDoc returns the page alone, so background loss is expected.
+        # UVDoc can reframe the page, but still has to retain edge evidence.
         allow_reframing=True,
     )
     if rejection is None and before.line_count < 3 and after.line_count < 3:

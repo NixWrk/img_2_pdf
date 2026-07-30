@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from uniscan.core import lighting
+from uniscan.core.cleanup import LightingDiagnostics
 from uniscan.core.lighting import (
     SHADOW_METHOD_AUTO,
     SHADOW_METHOD_CLASSICAL,
@@ -90,6 +91,7 @@ def test_auto_falls_back_to_the_classical_path_when_the_model_is_missing(monkeyp
     monkeypatch.setattr(
         lighting, "_docshadow_candidate", lambda _image: (None, "docshadow_model_unavailable")
     )
+    monkeypatch.setattr(lighting, "correct_illumination", lambda _image: _page())
 
     _result, diagnostics = remove_document_shadows(page, method=SHADOW_METHOD_AUTO)
 
@@ -124,6 +126,22 @@ def test_auto_rejects_a_candidate_that_does_not_even_the_page(monkeypatch) -> No
     assert "classical_rejected:lighting_not_improved" in diagnostics.reason
 
 
+def test_quality_gate_rejects_new_large_glare_region() -> None:
+    page = _shadowed_page()
+    before = LightingDiagnostics(0.2, 0.01, 0.01, 80.0, 0.4)
+    after = LightingDiagnostics(0.05, 0.25, 0.05, 20.0, 0.1)
+
+    assert lighting._rejection_reason(page, page, before, after) == "excessive_glare"
+
+
+def test_quality_gate_rejects_new_large_clipped_region() -> None:
+    page = _shadowed_page()
+    before = LightingDiagnostics(0.2, 0.01, 0.01, 80.0, 0.4)
+    after = LightingDiagnostics(0.05, 0.02, 0.35, 20.0, 0.1)
+
+    assert lighting._rejection_reason(page, page, before, after) == "excessive_clipping"
+
+
 def test_explicit_docshadow_reports_a_missing_model_without_raising(monkeypatch) -> None:
     page = _shadowed_page()
     monkeypatch.setattr(
@@ -145,6 +163,7 @@ def test_model_failure_is_contained(monkeypatch) -> None:
 
     monkeypatch.setattr("uniscan.core.docshadow.is_available", lambda: True)
     monkeypatch.setattr("uniscan.core.docshadow.remove_shadows", explode)
+    monkeypatch.setattr(lighting, "correct_illumination", lambda _image: _page())
 
     _result, diagnostics = remove_document_shadows(page, method=SHADOW_METHOD_AUTO)
 

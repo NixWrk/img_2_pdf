@@ -92,10 +92,11 @@ The first three-way corrected DocUNet run is now recorded in
 while DocScanner-L wins OCR. The [full DIR300 run](geometry_runtime_spike_2026-07-29.md) also ranks
 DvD first on local composite, MS-SSIM, AAD proxy and OCR CER, and accepts its hash-bound official
 MATLAB metrics. DocScanner-L is second and remains the practical exact ONNX production candidate.
-The first [real-book pilot](geometry_real_example_2026-07-30.md) instead favours validated auto and
-UVDoc: DocScanner-L over-corrects several spine/table pages, while DvD does not justify its cost on
-the tested subset. More diverse UniScan camera cases are still required before changing the
-automatic default.
+The first [real-book pilot and methodology audit](geometry_real_example_2026-07-30.md) gives UVDoc
+the best OCR result on its small dewarp subset, while DocScanner-L over-corrects several
+spine/table pages and DvD does not justify its cost there. The full-pipeline audit also proves that
+validated auto is a conservative candidate selector, not a quality certificate. More diverse
+paired and UniScan camera cases are required before changing the automatic default.
 Lighting remains open until classical, DocShadow, DocRes and ShaDocNet have outputs for identical
 paired cases. MMDIR joins as soon as its authors publish runnable inference or outputs for those
 cases.

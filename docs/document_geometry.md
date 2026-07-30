@@ -59,10 +59,24 @@ corrects planar camera perspective, not cylindrical paper curl.
   foreground `minAreaRect` baseline;
 - `hough`: line-only estimate, useful for text-heavy pages;
 - `min_area`: previous whole-foreground implementation;
+- `manual`: an exact operator angle supplied by GUI or by `--deskew-angle` (bounded to +/-20°);
 - `none`: no rotation.
 
-The GUI exposes the same estimators in Page tools. Right-angle orientation remains an independent
-action because it uses layout evidence rather than a small-angle line estimate.
+The GUI exposes the same estimators plus a manual-angle slider. Right-angle orientation remains an
+independent policy because it uses layout evidence rather than a small-angle line estimate.
+
+## Per-page stage overrides in the GUI
+
+Selecting exactly one page with committed processing loads its durable recipe into Processing.
+Changing orientation, deskew, dewarp, lighting, cleanup or layout therefore replaces only that
+choice; all other automatic/manual/off policies remain as committed. Applying a geometry editor
+replays the same downstream recipe. A stage already baked into the stored source, such as a manual
+90-degree rotation, is the only stage disabled during that replay.
+
+This makes the intended recovery path for a difficult page explicit: adjust four boundary corners,
+the split line, an exact deskew angle, or the three wave curves, preview, and apply while leaving
+satisfactory automatic stages alone. Multi-page selection still uses the visible document controls
+as one batch recipe and is labelled as mixed/default state.
 
 ## Removing page waves
 
@@ -71,7 +85,8 @@ Page dewarping is disabled by default in the CLI (`--dewarp none`). The GUI star
 the preview must still be applied before export. `--dewarp auto` measures curvature, blank
 borders, edge ink, aspect ratio, text-line curvature, and projective convergence before and after
 correction, and rejects a candidate that does not improve measurable geometry or introduces
-artifacts.
+artifacts. Automatic page-model candidates must also retain enough text-line evidence and bounded
+edge content; a perspective gain cannot excuse a meaningful curvature regression.
 
 Automatic mode builds two candidates and keeps the flatter one. The built-in text-line method
 models vertical displacement only, so it wins on pure page waves. The bundled UVDoc page model
@@ -204,6 +219,11 @@ automatic backend is accepted only when:
   explicitly configured service;
 - it can fail without damaging the page and fall back to another backend;
 - it can be compared on the same paired geometry corpus and quality report.
+
+The same fail-safe rule applies to lighting. Auto shadow correction must improve unevenness while
+retaining ink/contrast, and it is rejected if it introduces a large new glare or clipped-pixel
+region. Explicit model/classical modes remain available when an operator intentionally wants a
+different trade-off.
 
 [PaddleOCR UVDoc](https://github.com/PaddlePaddle/PaddleOCR) is an integrated optional model
 candidate and provides document unwarping in its upstream project. This does not make it the

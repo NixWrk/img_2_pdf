@@ -66,6 +66,7 @@ def _app_for_processing() -> UnifiedScanApp:
         "preprocess_denoise_var": 0,
         "preprocess_threshold_var": 170,
         "shadow_method_var": "None",
+        "orientation_method_var": "Off",
         "binarization_method_var": "None",
         "binarization_window_var": 31,
         "binarization_k_var": 0.2,
@@ -73,6 +74,10 @@ def _app_for_processing() -> UnifiedScanApp:
         "postprocess_var": "Grayscale",
         "lens_mode_var": "Custom",
         "dewarp_method_var": "None",
+        "deskew_method_var": "Hybrid (recommended)",
+        "manual_deskew_angle_var": 0.0,
+        "manual_deskew_summary_var": "Manual deskew: 0.0 degrees",
+        "stage_settings_var": "Stage settings: document defaults",
         "page_layout_var": "Keep source page",
         "export_pdf_dpi_var": 300,
         "page_margin_mm_var": 10.0,
@@ -82,7 +87,9 @@ def _app_for_processing() -> UnifiedScanApp:
     for name, value in values.items():
         setattr(app, name, _Var(value))
     app._binarization_k_custom = False
+    app._loading_page_recipe = False
     app.processing_cache = None
+    app.camera = None
     app._last_processing_cache_hits = ()
     return app
 
@@ -318,7 +325,7 @@ def test_grayscale_lens_mode_is_not_reset_to_document_colour() -> None:
     assert statuses == ["Lens mode set to Grayscale."]
 
 
-def test_geometry_change_replays_committed_appearance_not_pending_controls(tmp_path) -> None:
+def test_geometry_change_replays_committed_stage_recipe_not_pending_controls(tmp_path) -> None:
     app = _app_for_processing()
     session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
     image = np.zeros((30, 50, 3), dtype=np.uint8)
@@ -343,7 +350,7 @@ def test_geometry_change_replays_committed_appearance_not_pending_controls(tmp_p
     assert recipe.postprocess_name == "Grayscale"
     assert recipe.page_layout == "none"
     assert recipe.orientation_method == "none"
-    assert recipe.deskew_method == "none"
+    assert recipe.deskew_method == "hybrid"
     assert recipe.dewarp_method == "none"
 
 
@@ -366,6 +373,61 @@ def test_fast_preview_request_is_lightweight_but_export_stays_full_dpi() -> None
 
     assert app._processing_request(preview=True).page_dpi == 100
     assert app._processing_request(preview=False).page_dpi == 360
+
+
+def test_processing_request_keeps_automatic_stages_and_one_manual_override() -> None:
+    app = _app_for_processing()
+    app.orientation_method_var.set("Automatic (conservative)")
+    app.deskew_method_var.set("Manual angle")
+    app.manual_deskew_angle_var.set(-1.3)
+    app.dewarp_method_var.set("Automatic (validated)")
+    app.shadow_method_var.set("Automatic (validated)")
+
+    request = app._processing_request(preview=False)
+
+    assert request.orientation_method == "auto"
+    assert request.deskew_method == "manual"
+    assert request.deskew_angle_degrees == pytest.approx(-1.3)
+    assert request.dewarp_method == "auto"
+    assert request.shadow_method == "auto"
+
+
+def test_selecting_processed_page_loads_its_recipe_before_stage_edit(tmp_path) -> None:
+    app = _app_for_processing()
+    session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
+    entry = session.add_image(name="page", image=np.full((30, 40, 3), 180, np.uint8))
+    request = PageProcessingRequest(
+        orientation_method="auto",
+        deskew_method="manual",
+        deskew_angle_degrees=1.7,
+        dewarp_method="none",
+        shadow_method="auto",
+        postprocess_name="Grayscale",
+    )
+    result = process_document_page(entry.original_image, request)
+    entry.current_image = result.image
+    entry.committed_processing = CommittedPageProcessing.from_result(
+        request,
+        result.diagnostics,
+        result.image,
+    )
+    app.session = session
+    app.page_listbox = SimpleNamespace(curselection=lambda: (0,))
+    app.preprocess_contrast_var.set(1.8)
+    app.preprocess_brightness_var.set(40)
+    app.preprocess_denoise_var.set(7)
+
+    app._sync_controls_from_single_committed_page()
+
+    assert app.orientation_method_var.get() == "Automatic (conservative)"
+    assert app.deskew_method_var.get() == "Manual angle"
+    assert app.manual_deskew_angle_var.get() == pytest.approx(1.7)
+    assert app.shadow_method_var.get() == "Automatic (validated)"
+    assert app.postprocess_var.get() == "Grayscale"
+    assert app.preprocess_contrast_var.get() == pytest.approx(1.0)
+    assert app.preprocess_brightness_var.get() == 0
+    assert app.preprocess_denoise_var.get() == 0
+    assert "loaded from page" in app.stage_settings_var.get()
 
 
 def test_restored_uvdoc_page_with_dewarp_none_is_identity(tmp_path) -> None:

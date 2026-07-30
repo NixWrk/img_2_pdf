@@ -99,6 +99,13 @@ Processing controls cover document type,
 grayscale/B&W output, contrast, brightness, denoise, thresholding, illumination correction,
 binarization, despeckle, A4/Letter layout, margins, alignment, and lighting analysis.
 
+When exactly one processed page is selected, Processing loads that page's committed stage recipe.
+Orientation, deskew, dewarp, lighting, cleanup and layout can then be changed independently: the
+edited stage is overridden while the other accepted automatic or manual settings are preserved.
+Orientation supports conservative auto, off and explicit 90/180/270-degree choices. Deskew supports
+auto estimators, off and an exact manual angle. Four-corner perspective, split and three-curve wave
+geometry continue to use their visual editors.
+
 ### Preview, Apply, and export
 
 These controls intentionally have different meanings:
@@ -108,7 +115,9 @@ These controls intentionally have different meanings:
    always calculate perspective and wave results from the full-resolution source and resize only
    the finished image for display.
 3. **Apply preview to pages** runs the canonical pipeline on the full-resolution stored page and
-   commits that result. The wave diagnostic is explicitly labelled as a preview until then.
+   commits that result. On a single committed page it starts from that page's recipe, so changing
+   one stage does not silently reset the rest. The wave diagnostic is explicitly labelled as a
+   preview until then.
 4. **Export** reads each page's latest committed pixels. It never silently replays whatever global
    controls happen to be visible later.
 

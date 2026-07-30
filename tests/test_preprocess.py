@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 
 from uniscan.core.preprocess import (
+    DESKEW_METHOD_MANUAL,
     DESKEW_METHOD_HOUGH,
     DESKEW_METHOD_MIN_AREA,
     LENS_MODE_CUSTOM,
@@ -140,6 +141,25 @@ def test_deskew_document_returns_angle_for_rotated_content() -> None:
     assert fixed.shape[0] >= rotated.shape[0]
     assert fixed.shape[1] >= rotated.shape[1]
     assert abs(angle) > 1.0
+
+
+def test_manual_deskew_uses_exact_bounded_user_angle() -> None:
+    image = np.full((80, 120, 3), 220, dtype=np.uint8)
+    rotated, angle = deskew_document(
+        image,
+        method=DESKEW_METHOD_MANUAL,
+        manual_angle_degrees=-1.75,
+    )
+
+    assert angle == pytest.approx(-1.75)
+    assert rotated.shape[0] > image.shape[0]
+    assert rotated.shape[1] > image.shape[1]
+    with pytest.raises(ValueError, match="within"):
+        deskew_document(
+            image,
+            method=DESKEW_METHOD_MANUAL,
+            manual_angle_degrees=25.0,
+        )
 
 
 def test_deskew_expands_canvas_to_preserve_tight_corner_content(monkeypatch) -> None:

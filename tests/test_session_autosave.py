@@ -346,6 +346,8 @@ def test_manifest_v2_round_trips_committed_recipe_and_v1_migrates(tmp_path) -> N
     session = create_persistent_session(tmp_path)
     entry = session.add_image(name="processed", image=_image(40))
     request = PageProcessingRequest(
+        deskew_method="manual",
+        deskew_angle_degrees=-1.25,
         postprocess_name="Grayscale",
         page_dpi=240,
         auto_dewarp_uvdoc_grid=False,
@@ -367,6 +369,9 @@ def test_manifest_v2_round_trips_committed_recipe_and_v1_migrates(tmp_path) -> N
     committed = restored.entries[0].committed_processing
     assert committed is not None
     assert committed.recipe.page_dpi == 240
+    assert committed.recipe.schema_version == 3
+    assert committed.recipe.deskew_method == "manual"
+    assert committed.recipe.deskew_angle_degrees == pytest.approx(-1.25)
     assert committed.recipe.postprocess_name == "Grayscale"
     assert committed.recipe.auto_dewarp_uvdoc_grid is False
     assert committed.recipe.shadow_method == "auto"
@@ -384,11 +389,13 @@ def test_processing_recipe_v1_defaults_new_model_stages_safely() -> None:
     payload["schema_version"] = 1
     payload.pop("auto_dewarp_uvdoc_grid")
     payload.pop("shadow_method")
+    payload.pop("deskew_angle_degrees")
 
     restored = ProcessingRecipe.from_payload(payload).to_request()
 
     assert restored.auto_dewarp_uvdoc_grid is True
     assert restored.shadow_method == "none"
+    assert restored.deskew_angle_degrees is None
 
 
 def test_invalid_optional_recipe_is_dropped_without_quarantining_page(tmp_path) -> None:

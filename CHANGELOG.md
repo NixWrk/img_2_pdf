@@ -38,6 +38,11 @@ All notable changes to UniScan are documented here. The project follows Semantic
 - Quality-first, licence-agnostic model tournament for paired geometry/lighting/restoration outputs,
   including explicit metric/case weights, category scores, model/output identities and a shared
   research-candidate registry.
+- Per-page Processing controls load the committed recipe before edits, preserving satisfactory
+  orientation, deskew, dewarp, lighting, cleanup and layout stages when one stage is overridden;
+  orientation and exact manual-angle deskew are now first-class policies.
+- Manual deskew is serialized in autosave recipes and available to batch/CLI through
+  `--deskew manual --deskew-angle N`.
 
 - Independent boundary, deskew, and local-dewarp stages with per-page JSON diagnostics.
 - Offline text-line dewarp for curved or wavy pages, with confidence-based no-op fallback.
@@ -71,6 +76,8 @@ All notable changes to UniScan are documented here. The project follows Semantic
   verified before session creation, and GUI/batch reports retain shadow-stage diagnostics.
 - UVDoc automatic acceptance now measures projective line convergence as well as curvature, and
   the legacy illumination option is a single-stage alias instead of a second correction pass.
+- Automatic dewarp now rejects lost text-line/edge evidence and meaningful curvature regressions;
+  automatic lighting rejects large new glare or clipped regions even when unevenness improves.
 
 - Camera frame acquisition now runs on a background stream: the preview never blocks the UI on
   device reads, every shutter press waits for a guaranteed-fresh frame instead of stale

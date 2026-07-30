@@ -51,6 +51,7 @@ class ProcessingRecipe:
     schema_version: int
     orientation_method: str
     deskew_method: str
+    deskew_angle_degrees: float | None
     dewarp_method: str
     dewarp_model: dict[str, object] | None
     dewarp_already_applied: bool
@@ -71,9 +72,10 @@ class ProcessingRecipe:
     @classmethod
     def from_request(cls, request: PageProcessingRequest) -> "ProcessingRecipe":
         return cls(
-            schema_version=2,
+            schema_version=3,
             orientation_method=request.orientation_method,
             deskew_method=request.deskew_method,
+            deskew_angle_degrees=request.deskew_angle_degrees,
             dewarp_method=request.dewarp_method,
             dewarp_model=asdict(request.dewarp_model) if request.dewarp_model else None,
             dewarp_already_applied=request.dewarp_already_applied,
@@ -95,7 +97,7 @@ class ProcessingRecipe:
         )
 
     def to_request(self) -> PageProcessingRequest:
-        if type(self.schema_version) is not int or self.schema_version not in (1, 2):
+        if type(self.schema_version) is not int or self.schema_version not in (1, 2, 3):
             raise ValueError(f"Unsupported processing recipe: {self.schema_version}")
         model = DewarpModel(**self.dewarp_model) if self.dewarp_model is not None else None
         settings = (
@@ -106,6 +108,7 @@ class ProcessingRecipe:
         return PageProcessingRequest(
             orientation_method=self.orientation_method,
             deskew_method=self.deskew_method,
+            deskew_angle_degrees=self.deskew_angle_degrees,
             dewarp_method=self.dewarp_method,
             dewarp_model=model,
             dewarp_already_applied=self.dewarp_already_applied,
@@ -133,6 +136,8 @@ class ProcessingRecipe:
             # Version 1 predates the bundled page model and shadow stage.
             normalized.setdefault("auto_dewarp_uvdoc_grid", True)
             normalized.setdefault("shadow_method", "none")
+        if normalized.get("schema_version") in {1, 2}:
+            normalized.setdefault("deskew_angle_degrees", None)
         try:
             recipe = cls(**normalized)
         except TypeError as exc:
