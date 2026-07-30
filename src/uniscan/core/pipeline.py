@@ -18,6 +18,9 @@ from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.orientation import rotate_right_angle
 from uniscan.core.scanner_adapter import (
     DEFAULT_ACTIVE_DOCUMENT_BACKENDS,
+    DETECTOR_BACKEND_CV_HYBRID,
+    DETECTOR_BACKEND_OPENCV_HOUGH,
+    DETECTOR_BACKEND_OPENCV_MINRECT,
     _find_quad_contour,
     scan_with_document_detector,
 )
@@ -147,18 +150,29 @@ def _rectify_split_page(
 ):
     attempted: set[str] = set()
     for backend in detector_backends:
-        if backend in attempted:
-            continue
-        attempted.add(backend)
-        scan_output = scan_with_document_detector(
-            image,
-            enabled=True,
-            backends=(backend,),
-            scanner_root=scanner_root,
-            uvdoc_cache_home=uvdoc_cache_home,
-        )
-        if _is_trusted_page_rectification(image, scan_output):
-            return scan_output
+        # The hybrid detector returns its first available contour before this
+        # split-page trust gate sees it. If that quad is an internal table,
+        # continue through the hybrid's weaker full-page estimators instead of
+        # silently keeping an avoidable unrectified fallback.
+        variants = (backend,)
+        if backend == DETECTOR_BACKEND_CV_HYBRID:
+            variants += (
+                DETECTOR_BACKEND_OPENCV_HOUGH,
+                DETECTOR_BACKEND_OPENCV_MINRECT,
+            )
+        for variant in variants:
+            if variant in attempted:
+                continue
+            attempted.add(variant)
+            scan_output = scan_with_document_detector(
+                image,
+                enabled=True,
+                backends=(variant,),
+                scanner_root=scanner_root,
+                uvdoc_cache_home=uvdoc_cache_home,
+            )
+            if _is_trusted_page_rectification(image, scan_output):
+                return scan_output
     return None
 
 
@@ -229,6 +243,32 @@ def process_loaded_items(
         crop_area_ratio = (warped_width * warped_height) / max(1, raw_width * raw_height)
         landscape_crop_from_portrait = source_aspect < 1.3 <= warped_aspect
         trusted_landscape_crop = landscape_crop_from_portrait and crop_area_ratio >= 0.30
+        if options.two_page_mode and landscape_crop_from_portrait and not trusted_landscape_crop:
+            detector_policy = options.detector_backends or DEFAULT_ACTIVE_DOCUMENT_BACKENDS
+            if DETECTOR_BACKEND_CV_HYBRID in detector_policy:
+                retry_output = scan_with_document_detector(
+                    oriented_raw,
+                    enabled=True,
+                    backends=(DETECTOR_BACKEND_OPENCV_HOUGH,),
+                    scanner_root=scanner_root,
+                    uvdoc_cache_home=uvdoc_cache_home,
+                )
+                retry_warped = (
+                    retry_output.warped if retry_output.warped is not None else oriented_raw
+                )
+                retry_height, retry_width = retry_warped.shape[:2]
+                retry_aspect = retry_width / max(1, retry_height)
+                retry_area_ratio = (retry_width * retry_height) / max(1, raw_width * raw_height)
+                if retry_output.detected and retry_aspect >= 1.3 and retry_area_ratio >= 0.30:
+                    oriented_warped = retry_warped
+                    contour = retry_output.contour
+                    backend = retry_output.backend
+                    detected = True
+                    fallback_reason = None
+                    warped_height, warped_width = retry_height, retry_width
+                    warped_aspect = retry_aspect
+                    trusted_landscape_crop = True
+
         if options.two_page_mode and landscape_crop_from_portrait and not trusted_landscape_crop:
             # A table or other internal rectangle can fool boundary detection
             # into turning a portrait source into a wide strip. Keep the full

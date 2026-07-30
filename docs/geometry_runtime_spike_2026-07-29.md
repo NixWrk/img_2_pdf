@@ -135,7 +135,9 @@ ONNX production candidate. Keep DocScanner-L explicit and bundled UVDoc as the a
 until real UniScan camera captures are scored. DvD remains an isolated GPU reference: it is
 materially slower, uses about five times DocScanner's peak allocated GPU memory, needs upstream
 repairs, and has no exact ONNX path yet. No real UniScan capture corpus is present in this
-repository, so that final gate requires actual camera inputs rather than another public benchmark.
+repository beyond the first [real-book pilot](geometry_real_example_2026-07-30.md). That example
+favours validated auto/UVDoc over DocScanner-L and DvD, but a broader camera corpus is still needed
+before changing the automatic default.
 
 ## Asset delivery
 

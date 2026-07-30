@@ -314,6 +314,48 @@ def test_large_landscape_crop_inside_portrait_canvas_can_split(monkeypatch) -> N
     assert all(page.detected for page in pages)
 
 
+def test_bad_hybrid_landscape_crop_retries_hough_before_embedded_split(monkeypatch) -> None:
+    source = np.full((900, 600, 3), 245, dtype=np.uint8)
+    spread = _spread_image()
+    attempted_backends: list[str] = []
+
+    def detector(_image, *, backends, **_kwargs):
+        backend = backends[0]
+        attempted_backends.append(backend)
+        if backend == "cv_hybrid":
+            return ScanOutput(
+                warped=np.full((100, 600, 3), 235, dtype=np.uint8),
+                contour=None,
+                backend=backend,
+                detected=True,
+                raw_result=None,
+            )
+        return ScanOutput(
+            warped=spread,
+            contour=None,
+            backend=backend,
+            detected=True,
+            raw_result=None,
+        )
+
+    monkeypatch.setattr("uniscan.core.pipeline.scan_with_document_detector", detector)
+
+    pages = process_loaded_items(
+        [("embedded-spread.png", source)],
+        options=PipelineOptions(
+            detect_document=True,
+            two_page_mode=True,
+            detector_backends=("cv_hybrid",),
+            rectify_split_pages=False,
+        ),
+    )
+
+    assert len(pages) == 2
+    assert all(page.detected for page in pages)
+    assert all(page.backend == "opencv_hough" for page in pages)
+    assert attempted_backends == ["cv_hybrid", "opencv_hough"]
+
+
 def test_embedded_spread_inside_portrait_canvas_can_split() -> None:
     canvas = np.full((900, 600, 3), 255, dtype=np.uint8)
     photo = np.full((360, 600, 3), 35, dtype=np.uint8)
@@ -494,6 +536,42 @@ def test_split_page_rectification_respects_requested_detector_policy(monkeypatch
 
     assert result is None
     assert attempted_backends == ["office_lens_onnx"]
+
+
+def test_split_page_rectification_continues_hybrid_after_untrusted_quad(monkeypatch) -> None:
+    attempted_backends: list[str] = []
+
+    def detector(image, *, backends, **_kwargs):
+        backend = backends[0]
+        attempted_backends.append(backend)
+        height, width = image.shape[:2]
+        if backend == "cv_hybrid":
+            strip_width = width // 4
+            contour = np.array(
+                [[0, 0], [strip_width, 0], [strip_width, height - 1], [0, height - 1]],
+                dtype=np.float32,
+            )
+            return ScanOutput(image[:, :strip_width], contour, backend, True, None)
+        contour = np.array(
+            [[10, 10], [width - 10, 10], [width - 10, height - 1], [10, height - 1]],
+            dtype=np.float32,
+        )
+        return ScanOutput(image, contour, backend, True, None)
+
+    monkeypatch.setattr("uniscan.core.pipeline.scan_with_document_detector", detector)
+
+    from uniscan.core.pipeline import _rectify_split_page
+
+    result = _rectify_split_page(
+        np.full((500, 400, 3), 220, dtype=np.uint8),
+        detector_backends=("cv_hybrid",),
+        scanner_root=None,
+        uvdoc_cache_home=None,
+    )
+
+    assert result is not None
+    assert result.backend == "opencv_hough"
+    assert attempted_backends == ["cv_hybrid", "opencv_hough"]
 
 
 def test_build_pdf_uses_fixed_dpi_layout_and_atomically_publishes(tmp_path, monkeypatch) -> None:
