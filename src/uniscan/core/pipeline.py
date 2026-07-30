@@ -13,6 +13,7 @@ import cv2
 import img2pdf
 import numpy as np
 
+from uniscan.core.boundary_review import assess_boundary_review
 from uniscan.core.layout import detect_content_box
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.orientation import rotate_right_angle
@@ -64,6 +65,28 @@ class PageResult:
     spread_detected: bool = False
     spread_confidence: float = 0.0
     spread_reason: str | None = None
+    needs_review: bool = False
+    review_reasons: tuple[str, ...] = ()
+    boundary_dark_border_fraction: float = 0.0
+
+
+def _boundary_review_fields(
+    image: np.ndarray,
+    *,
+    options: PipelineOptions,
+    detected: bool,
+) -> dict[str, object]:
+    diagnostics = assess_boundary_review(
+        image,
+        detection_enabled=options.detect_document,
+        detected=detected,
+        proposal_only=options.detect_proposal_only,
+    )
+    return {
+        "needs_review": diagnostics.needs_review,
+        "review_reasons": diagnostics.reasons,
+        "boundary_dark_border_fraction": diagnostics.dark_border_fraction,
+    }
 
 
 def _detection_fallback_reason(scan_output) -> str:
@@ -358,6 +381,11 @@ def process_loaded_items(
                             spread_detected=True,
                             spread_confidence=spread.candidate.confidence,
                             spread_reason=spread.reason,
+                            **_boundary_review_fields(
+                                warped_half,
+                                options=options,
+                                detected=half_detected,
+                            ),
                         )
                     )
             else:
@@ -374,6 +402,11 @@ def process_loaded_items(
                         detected=detected,
                         fallback_reason=fallback_reason,
                         spread_reason=spread.reason,
+                        **_boundary_review_fields(
+                            oriented_warped,
+                            options=options,
+                            detected=detected,
+                        ),
                     )
                 )
         else:
@@ -389,6 +422,11 @@ def process_loaded_items(
                     backend=backend,
                     detected=detected,
                     fallback_reason=fallback_reason,
+                    **_boundary_review_fields(
+                        oriented_warped,
+                        options=options,
+                        detected=detected,
+                    ),
                 )
             )
 

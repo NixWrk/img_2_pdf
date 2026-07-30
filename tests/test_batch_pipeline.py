@@ -277,7 +277,7 @@ def test_report_records_complete_effective_processing_configuration(tmp_path) ->
     )
 
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
-    assert report["schemaVersion"] == 4
+    assert report["schemaVersion"] == 5
     assert report["pdfDpi"] == 200
     assert report["inputPdfDpi"] == 200
     assert report["outputPdfDpi"] == 200
@@ -297,6 +297,42 @@ def test_report_records_complete_effective_processing_configuration(tmp_path) ->
     assert report["threshold"] == 170
     assert report["applyThreshold"] is False
     assert report["detectorBackends"] == []
+
+
+def test_batch_report_flags_page8_like_suspicious_boundary(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "page8-like.png"
+    image = np.full((700, 500, 3), 238, dtype=np.uint8)
+    image[:150, :] = 24
+    image[:, :70] = 18
+    ok, buffer = cv2.imencode(".png", image)
+    assert ok
+    buffer.tofile(str(source))
+
+    monkeypatch.setattr(
+        "uniscan.core.pipeline.scan_with_document_detector",
+        lambda frame, **_kwargs: ScanOutput(
+            warped=frame,
+            contour=None,
+            backend="test_detector",
+            detected=True,
+            raw_result=None,
+        ),
+    )
+
+    result = run_batch_pipeline(
+        inputs=[source],
+        output_pdf=tmp_path / "review.pdf",
+        detect_document=True,
+        detector_policy="cv_hybrid",
+        lens_mode="none",
+    )
+
+    report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    assert result.review_pages == 1
+    assert report["needsReviewPages"] == 1
+    assert report["pages"][0]["needsReview"] is True
+    assert report["pages"][0]["reviewReasons"] == ["large_dark_border_region"]
+    assert report["pages"][0]["boundaryDarkBorderFraction"] >= 0.12
 
 
 def test_document_mode_preserves_color_and_grayscale_is_explicit(tmp_path) -> None:

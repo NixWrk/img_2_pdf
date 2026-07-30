@@ -51,6 +51,13 @@ the existing page-area and page-band thresholds. It now returns 21/21 detector d
 That number is a control-flow check, not a quality score. In particular, the accepted Hough boundary
 on page 8 left still contains table and binding background and needs a manual four-corner override.
 
+The pipeline now adds a separate conservative boundary-quality result instead of treating detector
+success as visual acceptance. It flags a detector miss or a large dark component connected to an
+output edge, records `needsReview`, `reviewReasons` and `boundaryDarkBorderFraction` per page, and
+shows `[Needs review]` in the GUI. Applying a manual four-corner crop clears the flag. On the same
+300-DPI page-8 rerun, the left output was flagged at `0.198722`; the normal right output remained
+unflagged at `0.011329`.
+
 ## Methodology audit of the first “full-auto” report
 
 The report previously described as full automatic was not a full pipeline run. Its report records

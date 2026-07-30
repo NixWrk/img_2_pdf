@@ -37,6 +37,8 @@ def test_session_manifest_round_trip(tmp_path) -> None:
         warped_image=_image(20),
         contour=np.array([[1, 2], [3, 4], [5, 6], [7, 8]], dtype=np.float32),
         backend="fake",
+        needs_review=True,
+        review_reasons=("large_dark_border_region",),
     )
     first.selected = True
     first.set_dewarp_control_points([(0.0, 0.0), (0.5, 0.015), (1.0, 0.0)])
@@ -48,7 +50,7 @@ def test_session_manifest_round_trip(tmp_path) -> None:
     )
     session.add_image(name="second", image=_image(30))
     session.save_manifest(manifest)
-    assert json.loads(manifest.read_text(encoding="utf-8"))["schemaVersion"] == 5
+    assert json.loads(manifest.read_text(encoding="utf-8"))["schemaVersion"] == 6
     session.close(preserve=True)
 
     restored, was_restored = load_or_create_session(manifest)
@@ -57,6 +59,8 @@ def test_session_manifest_round_trip(tmp_path) -> None:
     assert [entry.name for entry in restored.entries] == ["first", "second"]
     assert restored.entries[0].selected is True
     assert restored.entries[0].detected_backend == "fake"
+    assert restored.entries[0].needs_review is True
+    assert restored.entries[0].review_reasons == ("large_dark_border_region",)
     np.testing.assert_array_equal(restored.entries[0].detected_contour, first.detected_contour)
     assert restored.entries[0].dewarp_control_points == first.dewarp_control_points
     assert restored.entries[0].dewarp_control_curves == first.dewarp_control_curves
@@ -362,7 +366,7 @@ def test_manifest_v2_round_trips_committed_recipe_and_v1_migrates(tmp_path) -> N
     )
     session.save_manifest(manifest)
     payload = json.loads(manifest.read_text(encoding="utf-8"))
-    assert payload["schemaVersion"] == 5
+    assert payload["schemaVersion"] == 6
     session.close(preserve=True)
 
     restored = CaptureSession.restore_manifest(manifest)

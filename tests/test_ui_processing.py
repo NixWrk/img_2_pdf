@@ -478,7 +478,20 @@ def test_ingest_keeps_detected_crop_as_uncommitted_proposal(tmp_path) -> None:
     contour = np.float32([[1, 1], [14, 1], [14, 10], [1, 10]])
 
     app._ingest_page_results(
-        [PageResult("page", raw, warped, warped, contour, "cv_hybrid", True, None)]
+        [
+            PageResult(
+                "page",
+                raw,
+                warped,
+                warped,
+                contour,
+                "cv_hybrid",
+                True,
+                None,
+                needs_review=True,
+                review_reasons=("large_dark_border_region",),
+            )
+        ]
     )
 
     entry = app.session.entries[0]
@@ -488,6 +501,8 @@ def test_ingest_keeps_detected_crop_as_uncommitted_proposal(tmp_path) -> None:
     np.testing.assert_array_equal(entry.detected_contour, contour)
     assert entry.detected_backend == "cv_hybrid"
     assert entry.crop_state == CROP_STATE_PROPOSED
+    assert entry.needs_review is True
+    assert entry.review_reasons == ("large_dark_border_region",)
     assert _entry_has_crop_proposal(entry) is True
 
 
@@ -502,6 +517,8 @@ def test_crop_proposal_previews_then_commits_only_through_apply(tmp_path) -> Non
         [PageResult("page", raw, raw[2:12, 3:15], raw, contour, "cv_hybrid", True, None)]
     )
     entry = app.session.entries[0]
+    entry.needs_review = True
+    entry.review_reasons = ("large_dark_border_region",)
     expected = app._review_after_image(entry, raw)
 
     # Previewing a proposal leaves every durable image on the raw generation.
@@ -520,6 +537,8 @@ def test_crop_proposal_previews_then_commits_only_through_apply(tmp_path) -> Non
     np.testing.assert_array_equal(entry.detected_contour, contour)
     assert entry.detected_backend == "cv_hybrid"
     assert entry.crop_state == CROP_STATE_APPLIED
+    assert entry.needs_review is False
+    assert entry.review_reasons == ()
     assert _entry_has_crop_proposal(entry) is False
 
 
@@ -535,6 +554,9 @@ def test_crop_apply_all_rolls_back_every_page_when_later_commit_fails(
             [PageResult(str(index), raw, raw, raw, contour, "cv_hybrid", True, None)]
         )
     entries = list(app.session.entries)
+    for entry in entries:
+        entry.needs_review = True
+        entry.review_reasons = ("large_dark_border_region",)
     snapshots = [
         (
             entry.original_image.copy(),
@@ -542,6 +564,8 @@ def test_crop_apply_all_rolls_back_every_page_when_later_commit_fails(
             entry.detected_contour.copy(),
             entry.detected_backend,
             entry.crop_state,
+            entry.needs_review,
+            entry.review_reasons,
             entry.revision,
         )
         for entry in entries
@@ -566,12 +590,23 @@ def test_crop_apply_all_rolls_back_every_page_when_later_commit_fails(
         app._apply_perspective_crops(proposals)
 
     for entry, snapshot in zip(entries, snapshots, strict=True):
-        original, current, old_contour, backend, crop_state, revision = snapshot
+        (
+            original,
+            current,
+            old_contour,
+            backend,
+            crop_state,
+            needs_review,
+            review_reasons,
+            revision,
+        ) = snapshot
         np.testing.assert_array_equal(entry.original_image, original)
         np.testing.assert_array_equal(entry.current_image, current)
         np.testing.assert_array_equal(entry.detected_contour, old_contour)
         assert entry.detected_backend == backend
         assert entry.crop_state == crop_state
+        assert entry.needs_review == needs_review
+        assert entry.review_reasons == review_reasons
         assert entry.revision == revision
 
 
@@ -589,11 +624,67 @@ def test_failed_detection_does_not_leave_success_backend_status(tmp_path) -> Non
     assert entry.crop_state != CROP_STATE_PROPOSED
     assert _entry_needs_crop_review(entry) is True
     assert (
+        _entry_needs_crop_review(SimpleNamespace(crop_state=CROP_STATE_APPLIED, needs_review=True))
+        is True
+    )
+    assert (
         _entry_needs_crop_review(
             SimpleNamespace(detected_contour=None, detected_backend="intentional_split")
         )
         is False
     )
+
+
+def test_page_list_distinguishes_automatic_needs_review_flag() -> None:
+    app = object.__new__(UnifiedScanApp)
+    app.session = SimpleNamespace(
+        entries=[
+            SimpleNamespace(
+                entry_id="bad",
+                name="page 8 [L]",
+                crop_state=CROP_STATE_APPLIED,
+                detected_contour=None,
+                needs_review=True,
+            ),
+            SimpleNamespace(
+                entry_id="plain",
+                name="page 8 [R]",
+                crop_state="none",
+                detected_contour=None,
+                needs_review=False,
+            ),
+        ]
+    )
+
+    class _Listbox:
+        def __init__(self) -> None:
+            self.items: list[str] = []
+
+        def delete(self, *_args) -> None:
+            self.items.clear()
+
+        def insert(self, _position, value: str) -> None:
+            self.items.append(value)
+
+        def curselection(self):
+            return ()
+
+        def selection_set(self, _index) -> None:
+            pass
+
+    app.page_listbox = _Listbox()
+    app.page_count_var = _Var("")
+    app.toolbar_export_pdf_button = None
+    app.toolbar_export_options_button = None
+    app._sync_page_selection_to_session = lambda: None
+    app._update_page_action_states = lambda: None
+    app._sync_controls_from_single_committed_page = lambda: None
+    app.update_page_preview = lambda: None
+
+    app.refresh_page_list()
+
+    assert app.page_listbox.items[0].endswith("page 8 [L]  [Needs review]")
+    assert app.page_listbox.items[1].endswith("page 8 [R]  ⚠")
 
 
 def test_preview_error_is_explicit_and_stale_generation_is_ignored() -> None:

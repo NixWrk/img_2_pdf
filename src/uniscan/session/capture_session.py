@@ -244,6 +244,8 @@ class CaptureEntry:
     detected_contour: np.ndarray | None = None
     detected_backend: str | None = None
     crop_state: str = CROP_STATE_NONE
+    needs_review: bool = False
+    review_reasons: tuple[str, ...] = ()
     dewarp_control_points: tuple[tuple[float, float], ...] | None = None
     dewarp_control_curves: tuple[tuple[float, tuple[tuple[float, float], ...]], ...] | None = None
     committed_processing: CommittedPageProcessing | None = None
@@ -274,6 +276,8 @@ class CaptureEntry:
         backend: str | None,
         store: PageStore,
         crop_state: str | None = None,
+        needs_review: bool = False,
+        review_reasons: tuple[str, ...] = (),
     ) -> "CaptureEntry":
         resolved_crop_state = _resolve_crop_state(crop_state, contour, backend)
         entry_id = uuid4().hex
@@ -285,6 +289,8 @@ class CaptureEntry:
             detected_contour=contour,
             detected_backend=backend,
             crop_state=resolved_crop_state,
+            needs_review=bool(needs_review),
+            review_reasons=tuple(review_reasons),
             entry_id=entry_id,
         )
 
@@ -493,6 +499,8 @@ class CaptureSession:
         contour: np.ndarray | None,
         backend: str | None,
         crop_state: str | None = None,
+        needs_review: bool = False,
+        review_reasons: tuple[str, ...] = (),
     ) -> CaptureEntry:
         entry = CaptureEntry.from_raw_and_warped(
             name=name,
@@ -502,6 +510,8 @@ class CaptureSession:
             backend=backend,
             store=self.store,
             crop_state=crop_state,
+            needs_review=needs_review,
+            review_reasons=review_reasons,
         )
         self.add_entry(entry)
         return entry
@@ -637,6 +647,8 @@ class CaptureSession:
         contour: np.ndarray | None = None,
         backend: str | None = None,
         crop_state: str | None = None,
+        needs_review: bool = False,
+        review_reasons: tuple[str, ...] = (),
     ) -> bool:
         """Replace entry images in-place while preserving ordering and identity."""
         index = self._find_index(entry_id)
@@ -662,6 +674,8 @@ class CaptureSession:
         entry.detected_contour = contour
         entry.detected_backend = backend
         entry.crop_state = resolved_crop_state
+        entry.needs_review = bool(needs_review)
+        entry.review_reasons = tuple(review_reasons)
         return True
 
     def selected_entries(self) -> list[CaptureEntry]:
@@ -676,7 +690,7 @@ class CaptureSession:
             entry_id: index for index, entry_id in enumerate(self._document_order)
         }
         payload = {
-            "schemaVersion": 5,
+            "schemaVersion": 6,
             "sessionDir": str(self.store.session_dir.resolve()),
             "entries": [
                 {
@@ -685,6 +699,8 @@ class CaptureSession:
                     "name": entry.name,
                     "selected": entry.selected,
                     "cropState": entry.crop_state,
+                    "needsReview": entry.needs_review,
+                    "reviewReasons": list(entry.review_reasons),
                     "detectedBackend": entry.detected_backend,
                     "detectedContour": (
                         entry.detected_contour.tolist()
@@ -791,7 +807,7 @@ class CaptureSession:
         manifest_version = payload.get("schemaVersion")
         if (
             type(manifest_version) is not int
-            or manifest_version not in {1, 2, 3, 4, 5}
+            or manifest_version not in {1, 2, 3, 4, 5, 6}
             or not isinstance(payload.get("entries"), list)
         ):
             raise ValueError(f"Unsupported session manifest: {manifest_path}")
@@ -878,6 +894,20 @@ class CaptureSession:
                         if contour is not None or backend_raw is not None
                         else CROP_STATE_NONE
                     )
+                if manifest_version >= 6:
+                    needs_review_raw = item.get("needsReview", False)
+                    review_reasons_raw = item.get("reviewReasons", [])
+                    if type(needs_review_raw) is not bool:
+                        raise ValueError("invalid needs-review flag")
+                    if not isinstance(review_reasons_raw, list) or any(
+                        not isinstance(reason, str) for reason in review_reasons_raw
+                    ):
+                        raise ValueError("invalid review reasons")
+                    needs_review = needs_review_raw
+                    review_reasons = tuple(review_reasons_raw)
+                else:
+                    needs_review = False
+                    review_reasons = ()
                 committed_payload = (
                     item.get("committedProcessing") if manifest_version >= 2 else None
                 )
@@ -934,6 +964,8 @@ class CaptureSession:
                     detected_contour=contour,
                     detected_backend=backend_raw,
                     crop_state=crop_state,
+                    needs_review=needs_review,
+                    review_reasons=review_reasons,
                     dewarp_control_points=control_points,
                     dewarp_control_curves=control_curves,
                     committed_processing=committed_processing,

@@ -442,7 +442,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(
             f"Wrote {result.total_pages} page(s) to {result.output_pdf} "
-            f"(detected {result.detected_pages}/{result.total_pages})."
+            f"(detected {result.detected_pages}/{result.total_pages}, "
+            f"needs review {result.review_pages})."
         )
         if result.image_outputs:
             print(f"Wrote {len(result.image_outputs)} image(s) to {args.images_dir}.")

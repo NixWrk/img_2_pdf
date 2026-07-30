@@ -165,6 +165,9 @@ class PageRunReport:
     spread_detected: bool = False
     spread_confidence: float = 0.0
     spread_reason: str | None = None
+    needs_review: bool = False
+    review_reasons: tuple[str, ...] = ()
+    boundary_dark_border_fraction: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -178,6 +181,7 @@ class BatchPipelineResult:
     total_pages: int
     detected_pages: int
     fallback_pages: int
+    review_pages: int
     pages: tuple[PageRunReport, ...]
 
 
@@ -904,9 +908,10 @@ def _report_payload(
 ) -> dict[str, object]:
     detected_pages = sum(page.detected for page in pages)
     fallback_pages = sum(page.fallback_reason is not None for page in pages)
+    review_pages = sum(page.needs_review for page in pages)
     effective_preprocess = preprocess_settings or PreprocessSettings()
     return {
-        "schemaVersion": 4,
+        "schemaVersion": 5,
         "outputPdf": str(output_pdf),
         "reportPath": str(report_path),
         "imagesDirectory": str(images_dir) if images_dir is not None else None,
@@ -959,6 +964,7 @@ def _report_payload(
         "totalPages": len(pages),
         "detectedPages": detected_pages,
         "fallbackPages": fallback_pages,
+        "needsReviewPages": review_pages,
         "pages": [
             {
                 "index": page.index,
@@ -1025,6 +1031,9 @@ def _report_payload(
                 "spreadDetected": page.spread_detected,
                 "spreadConfidence": page.spread_confidence,
                 "spreadReason": page.spread_reason,
+                "needsReview": page.needs_review,
+                "reviewReasons": list(page.review_reasons),
+                "boundaryDarkBorderFraction": page.boundary_dark_border_fraction,
             }
             for page in pages
         ],
@@ -1471,6 +1480,9 @@ def run_batch_pipeline(
                         spread_detected=page.spread_detected,
                         spread_confidence=page.spread_confidence,
                         spread_reason=page.spread_reason,
+                        needs_review=page.needs_review,
+                        review_reasons=page.review_reasons,
+                        boundary_dark_border_fraction=page.boundary_dark_border_fraction,
                     )
                 )
 
@@ -1565,6 +1577,7 @@ def run_batch_pipeline(
 
     detected_pages = sum(page.detected for page in page_reports)
     fallback_pages = sum(page.fallback_reason is not None for page in page_reports)
+    review_pages = sum(page.needs_review for page in page_reports)
     return BatchPipelineResult(
         output_pdf=output_pdf,
         report_path=report_path,
@@ -1573,5 +1586,6 @@ def run_batch_pipeline(
         total_pages=len(page_reports),
         detected_pages=detected_pages,
         fallback_pages=fallback_pages,
+        review_pages=review_pages,
         pages=tuple(page_reports),
     )

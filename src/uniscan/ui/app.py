@@ -188,6 +188,8 @@ class _StagedImportPage:
     contour: np.ndarray | None
     backend: str | None
     fallback_reason: str | None
+    needs_review: bool = False
+    review_reasons: tuple[str, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -446,8 +448,10 @@ def _entry_has_crop_proposal(entry) -> bool:
 
 
 def _entry_needs_crop_review(entry) -> bool:
-    """Return whether no usable crop proposal/status exists for an entry."""
-    return _entry_crop_state(entry) == CROP_STATE_NONE
+    """Return whether automatic geometry should be checked by an operator."""
+    return (
+        bool(getattr(entry, "needs_review", False)) or _entry_crop_state(entry) == CROP_STATE_NONE
+    )
 
 
 IMPORT_PREFERENCES_SCHEMA = 1
@@ -2750,6 +2754,8 @@ class UnifiedScanApp(ctk.CTk):
                     result.backend if result.detected and result.contour is not None else None
                 ),
                 crop_state=CROP_STATE_PROPOSED if result.contour is not None else CROP_STATE_NONE,
+                needs_review=result.needs_review,
+                review_reasons=result.review_reasons,
             )
 
     def _ingest_staged_import_pages(self, pages: list[_StagedImportPage]) -> None:
@@ -2767,6 +2773,8 @@ class UnifiedScanApp(ctk.CTk):
                     contour=page.contour,
                     backend=page.backend if page.contour is not None else None,
                     crop_state=CROP_STATE_PROPOSED if page.contour is not None else CROP_STATE_NONE,
+                    needs_review=page.needs_review,
+                    review_reasons=page.review_reasons,
                 )
                 added_entry_ids.append(entry.entry_id)
         except Exception:
@@ -2964,6 +2972,8 @@ class UnifiedScanApp(ctk.CTk):
                                 contour=result.contour,
                                 backend=result.backend if result.detected else None,
                                 fallback_reason=result.fallback_reason,
+                                needs_review=result.needs_review,
+                                review_reasons=result.review_reasons,
                             )
                         )
                         fallback_pages += result.fallback_reason is not None
@@ -3480,6 +3490,8 @@ class UnifiedScanApp(ctk.CTk):
                                 contour=result.contour,
                                 backend=result.backend if result.detected else None,
                                 fallback_reason=result.fallback_reason,
+                                needs_review=result.needs_review,
+                                review_reasons=result.review_reasons,
                             )
                         )
                         added_pages += 1
@@ -3534,6 +3546,8 @@ class UnifiedScanApp(ctk.CTk):
         for idx, entry in enumerate(self.session.entries, start=1):
             if _entry_has_crop_proposal(entry):
                 tag = "  [crop proposal]"
+            elif bool(getattr(entry, "needs_review", False)):
+                tag = "  [Needs review]"
             elif _entry_needs_crop_review(entry):
                 tag = "  ⚠"
             else:
@@ -4116,6 +4130,8 @@ class UnifiedScanApp(ctk.CTk):
                     result.backend if result.detected and result.contour is not None else None
                 ),
                 crop_state=CROP_STATE_PROPOSED if result.contour is not None else CROP_STATE_NONE,
+                needs_review=result.needs_review,
+                review_reasons=result.review_reasons,
             )
             if not ok:
                 raise RuntimeError("Selected page was not found in session.")
@@ -4149,6 +4165,8 @@ class UnifiedScanApp(ctk.CTk):
                     result.backend if result.detected and result.contour is not None else None
                 ),
                 crop_state=CROP_STATE_PROPOSED if result.contour is not None else CROP_STATE_NONE,
+                needs_review=result.needs_review,
+                review_reasons=result.review_reasons,
             )
             if not ok:
                 raise RuntimeError("Selected page was not found in session.")
@@ -4260,6 +4278,8 @@ class UnifiedScanApp(ctk.CTk):
                         ),
                         "snapshot_backend": entry.detected_backend,
                         "snapshot_crop_state": entry.crop_state,
+                        "snapshot_needs_review": entry.needs_review,
+                        "snapshot_review_reasons": entry.review_reasons,
                         "snapshot_control_points": entry.dewarp_control_points,
                         "snapshot_control_curves": entry.dewarp_control_curves,
                         "snapshot_committed": entry.committed_processing,
@@ -4302,6 +4322,8 @@ class UnifiedScanApp(ctk.CTk):
                             contour=item["snapshot_contour"],
                             backend=item["snapshot_backend"],
                             crop_state=item["snapshot_crop_state"],
+                            needs_review=item["snapshot_needs_review"],
+                            review_reasons=item["snapshot_review_reasons"],
                         ):
                             raise RuntimeError("page disappeared during rollback")
                         entry.dewarp_control_points = item["snapshot_control_points"]

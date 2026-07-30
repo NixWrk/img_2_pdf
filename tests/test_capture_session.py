@@ -147,6 +147,8 @@ def test_replace_entry_image_clears_stale_detection_metadata(tmp_path) -> None:
         warped_image=_img(20),
         contour=np.float32([[0, 0], [11, 0], [11, 9], [0, 9]]),
         backend="old-detector",
+        needs_review=True,
+        review_reasons=("large_dark_border_region",),
     )
 
     assert session.replace_entry_image(
@@ -157,6 +159,8 @@ def test_replace_entry_image_clears_stale_detection_metadata(tmp_path) -> None:
 
     assert entry.detected_contour is None
     assert entry.detected_backend is None
+    assert entry.needs_review is False
+    assert entry.review_reasons == ()
     session.close()
 
 
