@@ -289,7 +289,9 @@ quality while DocScanner-L was the strongest exact ONNX production candidate. Li
 measure shadows, possible glare, clipping, and unevenness without claiming to reconstruct missing
 detail.
 
-See [the geometry guide](docs/document_geometry.md) for algorithms and diagnostics.
+See [the geometry guide](docs/document_geometry.md) for algorithms and diagnostics, and
+[the stage-order audit](docs/geometry_stage_order_audit_2026-08-15.md) for the measured limitations
+of the current order and the plan that addresses them.
 
 ## JSON report
 

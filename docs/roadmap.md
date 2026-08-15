@@ -50,6 +50,8 @@ reports, CI, a portable Windows build, and deterministic crop/geometry benchmark
 - [ ] Phase 6 — schema migration, fingerprint validation, and single-writer locking are complete;
   explicit project lifecycle, retention, and presets remain.
 - [ ] Phase 7 — real-document validation and personal release.
+- [ ] Phase 8 — geometry stage order, single-resample geometry, and operator control over model
+  decisions.
 
 ## Phase 1 — automatic geometry
 
@@ -209,6 +211,36 @@ Goal: prove the result works on the user's actual documents and Windows machine.
 
 Exit criteria: the portable build completes the real personal workflow and benchmark regressions
 are visible before a release is accepted.
+
+## Phase 8 — geometry stage order and operator control
+
+Goal: stop losing more image quality to the geometry chain than the geometry models recover, and
+make every automatic geometry decision correctable rather than replaceable.
+
+Findings, measurements and per-item acceptance criteria are in
+[the stage-order audit](geometry_stage_order_audit_2026-08-15.md). Summary:
+
+1. Apply page geometry with a single interpolation of the authoritative pixels: compose the
+   boundary homography, manual corner crop, deskew rotation and dewarp grid into one backward map.
+2. Reorder the controller to `orientation → dewarp → deskew → lighting → cleanup → layout`, with a
+   recipe schema bump and migration.
+3. Make an edited wave curve refine the committed dewarp method instead of replacing it, and make
+   the editor preview run the same chain as Apply.
+4. Decide with measurements whether the page model belongs before the boundary crop, splitting the
+   spread on the raw frame first.
+5. Reject perspective regressions symmetrically with curvature regressions.
+6. Add operator control to the lighting stage, including protection for the binding shadow band.
+7. Let batch conversion replay per-page manual recipes.
+
+Exit criteria: a page with crop, deskew and dewarp all active is interpolated once; a manual curve
+keeps the selected page model; a GUI session with manual corrections reproduces byte-equivalent
+pages through the CLI.
+
+Planned commits:
+
+1. `perf: apply page geometry in a single resampling pass`
+2. `fix: rectify pages before removing residual skew`
+3. `feat: refine model dewarp with operator curves`
 
 ## Deferred unless the product scope changes
 

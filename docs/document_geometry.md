@@ -88,12 +88,17 @@ correction, and rejects a candidate that does not improve measurable geometry or
 artifacts. Automatic page-model candidates must also retain enough text-line evidence and bounded
 edge content; a perspective gain cannot excuse a meaningful curvature regression.
 
-Automatic mode builds two candidates and keeps the flatter one. The built-in text-line method
-models vertical displacement only, so it wins on pure page waves. The bundled UVDoc page model
-(`--dewarp uvdoc`) predicts a sampling grid for the whole page, which also removes perspective and
-returns the page without its photographed background, so it wins on real photographs. A
-user-adjusted wave model outranks both and skips the extra inference. `--no-auto-dewarp-page-model`
-keeps automatic mode on text lines alone.
+Automatic mode builds two candidates and prefers the page model when it measures better on
+projective convergence **or** on curvature; the text-line candidate keeps the page otherwise. The
+built-in text-line method models vertical displacement only, so it wins on pure page waves. The
+bundled UVDoc page model (`--dewarp uvdoc`) predicts a sampling grid for the whole page, which also
+removes perspective and returns the page without its photographed background, so it wins on real
+photographs. A user-adjusted wave model outranks both and skips the extra inference.
+`--no-auto-dewarp-page-model` keeps automatic mode on text lines alone.
+
+Both criteria come from `measure_dewarp_quality`, which is also the evidence the text-line
+candidate optimizes, so candidate and selector are not independent. See
+[the stage-order audit](geometry_stage_order_audit_2026-08-15.md) for the measured consequences.
 
 Because UVDoc reframes the page, blank-background framing checks are relaxed; either reduced
 curvature or reduced line convergence must prove that geometry improved. When neither the source
@@ -205,6 +210,27 @@ result is correct. For automatic
 settings, **Apply preview to pages** commits the
 full-resolution result, and export publishes that committed generation without replaying different
 global settings.
+
+## Known limitations of the current stage order
+
+Measured on the tracked example in
+[the stage-order audit](geometry_stage_order_audit_2026-08-15.md); remediation is planned there as
+items G1–G3.
+
+- Deskew is estimated and applied before dewarp, so the angle describes a page that rectification
+  then replaces. On a difficult half of the example this order alone changed measured curvature by
+  a factor of four.
+- Boundary warp, split-half warp, deskew rotation and the dewarp remap are separate interpolations
+  of the authoritative pixels, and a manual four-corner crop adds another. Three to four passes
+  remove roughly a quarter of the high-frequency detail before cleanup begins.
+- **Apply points** in the wave editor commits the text-line method, so it replaces a page-model
+  result instead of refining it, and automatic mode skips the page model entirely once a user model
+  exists. Explicit `--dewarp uvdoc` with saved curves is the only path that applies both.
+- The page model runs after boundary detection and spread splitting, which is outside the
+  distribution it was trained on. It is rejected on seven of eight halves of the difficult spreads,
+  most often for cutting away edge content.
+- The lighting stage has no operator control beyond method selection, and batch conversion cannot
+  replay per-page manual corrections.
 
 ## Automation and quality policy
 

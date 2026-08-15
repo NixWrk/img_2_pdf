@@ -56,10 +56,10 @@ All notable changes to UniScan are documented here. The project follows Semantic
   that flattens the whole page surface, including perspective, and returns the page without its
   photographed background. It runs on the CPU through ONNX Runtime in roughly 150 ms per page, and
   its weights ship with UniScan under MIT/Apache-2.0 terms.
-- Automatic dewarp now builds both the text-line and UVDoc candidates and keeps whichever measures
-  flatter, so pure page waves still take the cheap text-line path while photographed pages take the
-  page model. A user-adjusted wave model outranks both, and `--no-auto-dewarp-page-model` restores
-  text-line-only behaviour.
+- Automatic dewarp now builds both the text-line and UVDoc candidates and prefers the page model
+  when it measures better on projective convergence or on curvature, so pure page waves still take
+  the cheap text-line path while photographed pages take the page model. A user-adjusted wave model
+  outranks both, and `--no-auto-dewarp-page-model` restores text-line-only behaviour.
 
 - Bundled DocShadow shadow remover and a validated lighting stage that runs after geometry
   correction (`--shadow auto|classical|docshadow`). Automatic mode only acts on a page with
