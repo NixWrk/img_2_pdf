@@ -9,7 +9,10 @@ from typing import Callable
 
 from uniscan.core import uvdoc
 from uniscan.io import imread_unicode, imwrite_unicode
-from uniscan.tools.model_tournament import load_model_tournament_manifest
+from uniscan.tools.model_tournament import (
+    load_model_tournament_manifest,
+    model_tournament_manifest_identity_sha256,
+)
 from uniscan.tools.standard_geometry import sha256_file
 
 
@@ -56,6 +59,7 @@ def run_bundled_uvdoc_candidate(
         "modelIdentity": uvdoc.model_identity(),
         "benchmarkProfile": profile.get("id") if isinstance(profile, dict) else None,
         "sourceManifestSha256": sha256_file(corpus / "manifest.json"),
+        "sourceManifestIdentitySha256": model_tournament_manifest_identity_sha256(manifest),
         "outputs": outputs,
     }
     path = destination / "candidate.json"

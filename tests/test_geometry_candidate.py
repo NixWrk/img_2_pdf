@@ -48,5 +48,6 @@ def test_bundled_uvdoc_candidate_records_model_manifest_and_latency(
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["modelIdentity"] == "uvdoc:sha256:test"
     assert len(metadata["sourceManifestSha256"]) == 64
+    assert len(metadata["sourceManifestIdentitySha256"]) == 64
     assert metadata["outputs"]["case-1"]["latencyMs"] >= 0
     assert np.array_equal(imread_unicode(tmp_path / "candidate/case-1.png"), image)

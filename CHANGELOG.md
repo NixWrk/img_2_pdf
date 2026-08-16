@@ -8,6 +8,8 @@ All notable changes to UniScan are documented here. The project follows Semantic
 
 - Model-tournament schema v2 preserves candidate aspect ratio during metric alignment, records the
   original/reference dimensions and aspect error, and macro-averages equally across categories.
+- Model-tournament schema v3 separates the exact manifest-file SHA-256 from a portable canonical
+  identity that excludes local provenance paths; new official-metric sidecars bind to that identity.
 - Automatic dewarp now rejects a perspective regression larger than the same bounded noise allowance
   used for curvature safety, even when another geometry signal improves.
 

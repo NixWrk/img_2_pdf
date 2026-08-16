@@ -32,7 +32,8 @@ Supported tasks are `geometry`, `lighting` and `restoration`. Metric weights are
 sum to 1. Candidate images with a different size are fitted to the paired-reference canvas with a
 uniform scale and median-border padding; their aspect ratio is never changed by the evaluator.
 Original/reference sizes, absolute log aspect-ratio error, `exp(-error)` aspect score and the
-alignment method are recorded in the schema-v2 report. The visual composite is multiplied by the
+alignment method are recorded in the schema-v3 report (these scoring fields were introduced in
+schema v2). The visual composite is multiplied by the
 aspect score, so even blank pages cannot hide a shape error.
 
 The current quality score is a weighted combination of luminance SSIM, one-pixel-tolerant edge F1,
@@ -75,7 +76,9 @@ download, store it in the experiment inventory, and require that exact value on 
 download. The importer additionally records the extracted tree SHA-256. A run with no expected tree
 hash is marked `expectedSha256Verified: false`; it is useful for discovering a digest, not as a
 trusted final import. The normalized manifest also pins every input and reference SHA-256, and the
-tournament verifies those files again before scoring.
+tournament verifies those files again before scoring. Absolute download paths are deliberately not
+stored in normalized provenance, so importing the same verified trees in different directories
+produces byte-identical manifests.
 
 Published output folders often use incompatible suffixes. Normalize each complete output set before
 comparison:
@@ -102,7 +105,8 @@ Generate the pinned CPU baseline on those exact corrected inputs:
   --output out\uvdoc-onnx
 ```
 
-Its `candidate.json` records the verified graph/data identity, manifest SHA-256 and per-case latency.
+Its `candidate.json` records the verified graph/data identity, exact manifest-file SHA-256,
+portable manifest identity and per-case latency.
 
 ### Geometry metric identities
 
@@ -141,9 +145,9 @@ normalized output directory. Put the aggregate result in `official-metrics.json`
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "benchmarkProfile": "docunet-corrected",
-  "manifestSha256": "<from the first tournament report>",
+  "manifestIdentitySha256": "<from the first tournament report>",
   "outputSetSha256": "<from that candidate in the first report>",
   "implementation": {
     "matlab": "R2019a",
@@ -160,9 +164,13 @@ normalized output directory. Put the aggregate result in `official-metrics.json`
 }
 ```
 
-Rerun the tournament to attach it. UniScan rejects the sidecar if its benchmark profile, manifest
-SHA-256 or candidate output-set SHA-256 differs. The numbers above illustrate the schema; never copy
-paper-table values into a sidecar and present them as a local evaluation.
+Rerun the tournament to attach it. UniScan rejects a schema-v2 sidecar if its benchmark profile,
+portable manifest identity or candidate output-set SHA-256 differs. `manifestSha256` remains in the
+report as the digest of the exact JSON artifact; `manifestIdentitySha256` is canonical JSON with
+`sourceProvenance.path` fields omitted and is the portable experiment binding. Legacy schema-v1
+sidecars remain accepted only when their raw manifest-file SHA-256 still matches. The numbers above
+illustrate the schema; never copy paper-table values into a sidecar and present them as a local
+evaluation.
 
 ## Candidate output metadata
 

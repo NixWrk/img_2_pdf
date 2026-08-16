@@ -78,11 +78,41 @@ def test_standard_corpus_import_hashes_sources_and_applies_known_rotation(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["benchmarkProfile"]["knownCorrections"] == {"64_1": "rotate180"}
     assert manifest["sourceProvenance"]["distorted"]["expectedSha256Verified"] is True
+    assert "path" not in manifest["sourceProvenance"]["distorted"]
+    assert "path" not in manifest["sourceProvenance"]["references"]
     assert len(manifest["cases"][0]["inputSha256"]) == 64
     assert len(manifest["cases"][0]["referenceSha256"]) == 64
     corrected = imread_unicode(tmp_path / "corpus/inputs/64_1.png")
     assert np.array_equal(corrected, cv2.rotate(page, cv2.ROTATE_180))
     assert manifest["cases"][0]["subsets"] == ["docunet-ocr-setting-1"]
+
+
+def test_standard_corpus_manifest_is_identical_across_source_locations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _small_docunet_profile(monkeypatch)
+    image = np.full((10, 14, 3), 180, dtype=np.uint8)
+    manifests: list[bytes] = []
+
+    for location in ("source-a", "source-b"):
+        root = tmp_path / location
+        distorted = root / "distorted"
+        references = root / "references"
+        _write(distorted / "1_1.png", image)
+        _write(distorted / "64_1.png", image)
+        _write(references / "1.png", image)
+        _write(references / "64.png", image)
+        manifest_path = import_standard_geometry_corpus(
+            profile_id="docunet-corrected",
+            distorted_dir=distorted,
+            reference_dir=references,
+            destination_dir=tmp_path / f"corpus-{location}",
+            expected_distorted_sha256=sha256_tree(distorted),
+            expected_reference_sha256=sha256_tree(references),
+        )
+        manifests.append(manifest_path.read_bytes())
+
+    assert manifests[0] == manifests[1]
 
 
 def test_candidate_import_normalizes_names_and_rejects_wrong_hash(
@@ -113,6 +143,7 @@ def test_candidate_import_normalizes_names_and_rejects_wrong_hash(
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["outputs"] == {"1_1": "1_1.png", "64_1": "64_1.png"}
     assert metadata["modelIdentity"].startswith("sha256:")
+    assert "path" not in metadata["sourceProvenance"]
 
 
 def test_document_geometry_metrics_have_clear_invariants() -> None:

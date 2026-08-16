@@ -130,6 +130,7 @@ class ModelTournamentReport:
     corpus_version: str
     task: str
     manifest_sha256: str
+    manifest_identity_sha256: str
     metric_weights: dict[str, float]
     benchmark_profile: dict[str, object] | None
     metric_implementations: dict[str, object]
@@ -140,11 +141,12 @@ class ModelTournamentReport:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "selectionPolicy": "quality-first-license-agnostic",
             "corpusVersion": self.corpus_version,
             "task": self.task,
             "manifestSha256": self.manifest_sha256,
+            "manifestIdentitySha256": self.manifest_identity_sha256,
             "metricWeights": self.metric_weights,
             "benchmarkProfile": self.benchmark_profile,
             "metricImplementations": self.metric_implementations,
@@ -161,6 +163,29 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def model_tournament_manifest_identity_sha256(manifest: Mapping[str, object]) -> str:
+    """Hash manifest semantics while excluding local source-provenance paths."""
+
+    def portable_provenance(value: object) -> object:
+        if isinstance(value, dict):
+            return {key: portable_provenance(item) for key, item in value.items() if key != "path"}
+        if isinstance(value, list):
+            return [portable_provenance(item) for item in value]
+        return value
+
+    payload = dict(manifest)
+    if "sourceProvenance" in payload:
+        payload["sourceProvenance"] = portable_provenance(payload["sourceProvenance"])
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _safe_relative_path(root: Path, relative: object, *, field: str) -> Path:
@@ -360,6 +385,7 @@ def _official_evaluation(
     root: Path,
     *,
     manifest_sha256: str,
+    manifest_identity_sha256: str,
     output_set_sha256: str,
     benchmark_profile: Mapping[str, object] | None,
 ) -> dict[str, object] | None:
@@ -370,13 +396,16 @@ def _official_evaluation(
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"Cannot read official metric sidecar: {path}: {exc}") from exc
-    if not isinstance(payload, dict) or payload.get("schemaVersion") != 1:
+    if not isinstance(payload, dict) or payload.get("schemaVersion") not in (1, 2):
         raise ValueError(f"Unsupported official metric sidecar schema: {path}")
     expected_profile = benchmark_profile.get("id") if benchmark_profile else None
     if payload.get("benchmarkProfile") != expected_profile:
         raise ValueError(f"Official metric sidecar benchmarkProfile does not match: {path}")
-    if payload.get("manifestSha256") != manifest_sha256:
-        raise ValueError(f"Official metric sidecar manifest SHA-256 does not match: {path}")
+    if payload["schemaVersion"] == 1:
+        if payload.get("manifestSha256") != manifest_sha256:
+            raise ValueError(f"Official metric sidecar manifest SHA-256 does not match: {path}")
+    elif payload.get("manifestIdentitySha256") != manifest_identity_sha256:
+        raise ValueError(f"Official metric sidecar manifest identity does not match: {path}")
     if payload.get("outputSetSha256") != output_set_sha256:
         raise ValueError(f"Official metric sidecar output-set SHA-256 does not match: {path}")
     metrics = payload.get("metrics")
@@ -526,6 +555,7 @@ def _score_candidate(
     cases: list[dict[str, object]],
     weights: Mapping[str, float],
     manifest_sha256: str,
+    manifest_identity_sha256: str,
     benchmark_profile: Mapping[str, object] | None,
     tesseract_executable: str | Path | None,
     tesseract_language: str | None,
@@ -659,6 +689,7 @@ def _score_candidate(
         official_evaluation = _official_evaluation(
             resolved_root,
             manifest_sha256=manifest_sha256,
+            manifest_identity_sha256=manifest_identity_sha256,
             output_set_sha256=output_set_sha256,
             benchmark_profile=benchmark_profile,
         )
@@ -744,6 +775,7 @@ def run_model_tournament(
             "driver": "direct-cli-v1",
         }
     manifest_sha256 = _sha256(corpus / "manifest.json")
+    manifest_identity_sha256 = model_tournament_manifest_identity_sha256(manifest)
     reference_ocr_cache: dict[Path, str] = {}
     results = tuple(
         _score_candidate(
@@ -753,6 +785,7 @@ def run_model_tournament(
             cases=cases,
             weights=weights,
             manifest_sha256=manifest_sha256,
+            manifest_identity_sha256=manifest_identity_sha256,
             benchmark_profile=benchmark_profile,
             tesseract_executable=tesseract_executable,
             tesseract_language=tesseract_language,
@@ -770,9 +803,15 @@ def run_model_tournament(
         corpus_version=str(manifest["corpusVersion"]),
         task=task,
         manifest_sha256=manifest_sha256,
+        manifest_identity_sha256=manifest_identity_sha256,
         metric_weights=weights,
         benchmark_profile=benchmark_profile,
         metric_implementations={
+            "manifestIdentity": {
+                "implementation": "canonical-json-without-provenance-paths-v1",
+                "artifactHash": "manifestSha256",
+                "portableHash": "manifestIdentitySha256",
+            },
             "candidateAlignment": {
                 "implementation": "fit-preserve-aspect-v1",
                 "aspectError": "absolute-log-ratio",

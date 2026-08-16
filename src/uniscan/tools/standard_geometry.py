@@ -302,12 +302,10 @@ def import_standard_geometry_corpus(
         },
         "sourceProvenance": {
             "distorted": {
-                "path": str(distorted_root),
                 "treeSha256": distorted_hash,
                 "expectedSha256Verified": distorted_verified,
             },
             "references": {
-                "path": str(reference_root),
                 "treeSha256": reference_hash,
                 "expectedSha256Verified": reference_verified,
             },
@@ -369,7 +367,6 @@ def import_standard_geometry_candidate(
         "modelIdentity": model_identity or f"sha256:{source_hash}",
         "benchmarkProfile": profile.id,
         "sourceProvenance": {
-            "path": str(source_root),
             "treeSha256": source_hash,
             "expectedSha256Verified": source_verified,
         },

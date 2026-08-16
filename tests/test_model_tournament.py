@@ -11,6 +11,7 @@ from uniscan.cli import main
 from uniscan.io import imwrite_unicode
 from uniscan.tools.model_tournament import (
     load_model_tournament_manifest,
+    model_tournament_manifest_identity_sha256,
     parse_candidate_specs,
     run_model_tournament,
 )
@@ -98,8 +99,10 @@ def test_quality_ranking_is_independent_of_license_family(tmp_path: Path) -> Non
     assert report.candidates[0].license == "AGPL-3.0-only"
     assert report.candidates[0].quality_score == pytest.approx(1.0)
     payload = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
-    assert payload["schemaVersion"] == 2
+    assert payload["schemaVersion"] == 3
     assert payload["selectionPolicy"] == "quality-first-license-agnostic"
+    assert len(payload["manifestSha256"]) == 64
+    assert len(payload["manifestIdentitySha256"]) == 64
     case = payload["candidates"][0]["cases"][0]
     assert len(case["outputSha256"]) == 64
     assert case["referenceSize"] == [128, 96]
@@ -255,6 +258,77 @@ def test_standard_profile_adds_geometry_metrics_and_hash_bound_official_sidecar(
     assert second.candidates[0].official_evaluation is not None
     assert second.candidates[0].official_evaluation["metrics"]["ld"] == 0.0
     assert len(second.candidates[0].official_evaluation["sidecarSha256"]) == 64
+
+
+def test_manifest_identity_and_schema2_sidecar_are_portable_across_locations(
+    tmp_path: Path,
+) -> None:
+    corpora = []
+    reference = None
+    for index, source_path in enumerate(("C:/downloads/docunet", "D:/datasets/docunet")):
+        parent = tmp_path / f"location-{index}"
+        parent.mkdir()
+        corpus, current_reference = _paired_corpus(parent)
+        reference = current_reference
+        manifest_path = corpus / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["sourceProvenance"] = {"distorted": {"path": source_path, "treeSha256": "a" * 64}}
+        manifest_path.write_text(json.dumps(manifest, indent=index), encoding="utf-8")
+        corpora.append(corpus)
+
+    assert reference is not None
+    candidate = tmp_path / "portable-candidate"
+    _write(candidate / "page-1.png", reference)
+    first = run_model_tournament(
+        corpus_dir=corpora[0],
+        output_path=tmp_path / "first-report.json",
+        candidates={"exact": candidate},
+    )
+    first_result = first.candidates[0]
+    assert first_result.output_set_sha256 is not None
+
+    sidecar_path = candidate / "official-metrics.json"
+    sidecar_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 2,
+                "benchmarkProfile": None,
+                "manifestIdentitySha256": first.manifest_identity_sha256,
+                "outputSetSha256": first_result.output_set_sha256,
+                "implementation": {"evaluator": "portable-test"},
+                "metrics": {"msSsim": 1.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    second = run_model_tournament(
+        corpus_dir=corpora[1],
+        output_path=tmp_path / "second-report.json",
+        candidates={"exact": candidate},
+    )
+
+    first_manifest = load_model_tournament_manifest(corpora[0])
+    second_manifest = load_model_tournament_manifest(corpora[1])
+    assert first.manifest_sha256 != second.manifest_sha256
+    assert first.manifest_identity_sha256 == second.manifest_identity_sha256
+    assert first.manifest_identity_sha256 == model_tournament_manifest_identity_sha256(
+        first_manifest
+    )
+    assert first.manifest_identity_sha256 == model_tournament_manifest_identity_sha256(
+        second_manifest
+    )
+    assert second.candidates[0].official_evaluation is not None
+
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    sidecar["manifestIdentitySha256"] = "0" * 64
+    sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+    rejected = run_model_tournament(
+        corpus_dir=corpora[1],
+        output_path=tmp_path / "rejected-report.json",
+        candidates={"exact": candidate},
+    )
+    assert rejected.candidates[0].eligible is False
+    assert "manifest identity does not match" in str(rejected.candidates[0].error)
 
 
 def test_ocr_subset_requires_tesseract_and_known_subset(tmp_path: Path) -> None:

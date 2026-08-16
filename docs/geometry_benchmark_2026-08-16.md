@@ -83,8 +83,13 @@ The importer writes absolute source paths into `sourceProvenance`, and the tourn
 entire manifest. The same verified source bytes therefore produced manifest SHA-256
 `6c643e1ff66cedb8624d20bc08c18e0a70aa36b3dd3b4574f9219c49629f474a` instead of the historical
 `791bea59...fcee0`. This does not alter local image metrics, but it prevents a hash-bound official
-sidecar from being reused after moving the source directories. A follow-up should make provenance
-location-independent before treating manifest hashes as portable experiment identities.
+sidecar from being reused after moving the source directories. Tournament schema v3 resolves this
+by retaining the exact file digest separately, adding a canonical location-independent manifest
+identity, and binding new schema-v2 official sidecars to that portable identity. Standard importers
+also no longer write absolute source paths. The recovered common-128 manifest identity is
+`614b4a7e7442a13e59308336b579c4d783a5ff60906f83d9059ed473dbf0265a`; the full-130 identity is
+`66be842424c4474754627034cdc3d80cdd95a0041af062853ed7f54016fb1bb0`. The schema-v2 reports
+above remain historical artifacts with their original raw manifest hashes.
 
 ## Decision
 
