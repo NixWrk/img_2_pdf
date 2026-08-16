@@ -44,6 +44,11 @@ class TournamentCaseScore:
     output_path: str
     output_sha256: str
     resized_to_reference: bool
+    reference_size: tuple[int, int]
+    candidate_original_size: tuple[int, int]
+    aspect_ratio_log_error: float
+    aspect_ratio_score: float
+    alignment: str
     ssim: float
     edge_f1: float
     psnr_db: float
@@ -62,6 +67,11 @@ class TournamentCaseScore:
             "outputPath": self.output_path,
             "outputSha256": self.output_sha256,
             "resizedToReference": self.resized_to_reference,
+            "referenceSize": list(self.reference_size),
+            "candidateOriginalSize": list(self.candidate_original_size),
+            "aspectRatioLogError": self.aspect_ratio_log_error,
+            "aspectRatioScore": self.aspect_ratio_score,
+            "alignment": self.alignment,
             "ssim": self.ssim,
             "edgeF1": self.edge_f1,
             "psnrDb": self.psnr_db,
@@ -130,7 +140,7 @@ class ModelTournamentReport:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "selectionPolicy": "quality-first-license-agnostic",
             "corpusVersion": self.corpus_version,
             "task": self.task,
@@ -219,7 +229,9 @@ def load_model_tournament_manifest(corpus_dir: Path) -> dict[str, object]:
         if benchmark_profile.get("protocolVersion") != 1:
             raise ValueError("benchmarkProfile.protocolVersion must be 1.")
         if target_area != 598400:
-            raise ValueError("benchmarkProfile.targetAreaPixels must be the published value 598400.")
+            raise ValueError(
+                "benchmarkProfile.targetAreaPixels must be the published value 598400."
+            )
         if (
             not isinstance(ms_weights, list)
             or len(ms_weights) != 5
@@ -235,7 +247,9 @@ def load_model_tournament_manifest(corpus_dir: Path) -> dict[str, object]:
                 for value, expected in zip(ms_weights, DOCUNET_MS_SSIM_WEIGHTS)
             )
         ):
-            raise ValueError("benchmarkProfile.msSsimWeights must match the published five weights.")
+            raise ValueError(
+                "benchmarkProfile.msSsimWeights must match the published five weights."
+            )
     if not isinstance(cases, list) or not cases:
         raise ValueError("Tournament manifest must contain at least one case.")
 
@@ -423,6 +437,46 @@ def _luminance(image: np.ndarray) -> np.ndarray:
     return gray.astype(np.float32) / 255.0
 
 
+def _align_candidate_to_reference(
+    reference: np.ndarray,
+    candidate: np.ndarray,
+) -> tuple[np.ndarray, bool, float, str]:
+    """Fit a candidate to the reference canvas without changing its aspect ratio."""
+    reference_height, reference_width = reference.shape[:2]
+    candidate_height, candidate_width = candidate.shape[:2]
+    reference_aspect = reference_width / float(reference_height)
+    candidate_aspect = candidate_width / float(candidate_height)
+    aspect_error = abs(math.log(candidate_aspect / reference_aspect))
+    if candidate.shape[:2] == reference.shape[:2]:
+        return candidate, False, aspect_error, "identity"
+
+    scale = min(
+        reference_width / float(candidate_width),
+        reference_height / float(candidate_height),
+    )
+    fitted_width = min(reference_width, max(1, int(round(candidate_width * scale))))
+    fitted_height = min(reference_height, max(1, int(round(candidate_height * scale))))
+    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+    fitted = cv2.resize(candidate, (fitted_width, fitted_height), interpolation=interpolation)
+
+    border = np.concatenate(
+        (
+            fitted[0, :].reshape(-1, fitted.shape[2]),
+            fitted[-1, :].reshape(-1, fitted.shape[2]),
+            fitted[:, 0].reshape(-1, fitted.shape[2]),
+            fitted[:, -1].reshape(-1, fitted.shape[2]),
+        ),
+        axis=0,
+    )
+    fill = np.median(border, axis=0).astype(fitted.dtype)
+    aligned = np.empty((reference_height, reference_width, fitted.shape[2]), dtype=fitted.dtype)
+    aligned[...] = fill
+    offset_x = (reference_width - fitted_width) // 2
+    offset_y = (reference_height - fitted_height) // 2
+    aligned[offset_y : offset_y + fitted_height, offset_x : offset_x + fitted_width] = fitted
+    return aligned, True, aspect_error, "fit-preserve-aspect"
+
+
 def _ssim(reference: np.ndarray, candidate: np.ndarray) -> float:
     x = _luminance(reference)
     y = _luminance(candidate)
@@ -492,8 +546,6 @@ def _score_candidate(
                 f"{expected_profile!r}."
             )
         scores: list[TournamentCaseScore] = []
-        weighted_quality = 0.0
-        total_weight = 0.0
         category_scores: dict[str, list[tuple[float, float]]] = {}
         for case in cases:
             case_id = str(case["id"])
@@ -509,13 +561,13 @@ def _score_candidate(
                 raise ValueError(f"Cannot decode tournament reference: {reference_path}")
             if candidate is None:
                 raise ValueError(f"Cannot decode candidate output: {output_path}")
-            resized = candidate.shape[:2] != reference.shape[:2]
-            if resized:
-                candidate = cv2.resize(
-                    candidate,
-                    (reference.shape[1], reference.shape[0]),
-                    interpolation=cv2.INTER_AREA,
-                )
+            reference_size = (reference.shape[1], reference.shape[0])
+            candidate_original_size = (candidate.shape[1], candidate.shape[0])
+            candidate, resized, aspect_error, alignment = _align_candidate_to_reference(
+                reference,
+                candidate,
+            )
+            aspect_score = math.exp(-aspect_error)
             ssim = _ssim(reference, candidate)
             edge_f1 = _edge_f1(reference, candidate)
             psnr_db, psnr_score = _psnr(reference, candidate)
@@ -523,12 +575,8 @@ def _score_candidate(
             aad_proxy: float | None = None
             if benchmark_profile is not None:
                 target_area = int(benchmark_profile["targetAreaPixels"])
-                profile_ms_ssim = docunet_ms_ssim(
-                    reference, candidate, target_area=target_area
-                )
-                aad_proxy = aad_opencv_dis_proxy(
-                    reference, candidate, target_area=target_area
-                )
+                profile_ms_ssim = docunet_ms_ssim(reference, candidate, target_area=target_area)
+                aad_proxy = aad_opencv_dis_proxy(reference, candidate, target_area=target_area)
             ocr_edit_distance: int | None = None
             ocr_cer: float | None = None
             if ocr_subset is not None and ocr_subset in case.get("subsets", []):
@@ -551,13 +599,12 @@ def _score_candidate(
                 )
                 ocr_edit_distance = levenshtein_distance(reference_text, candidate_text)
                 ocr_cer = ocr_edit_distance / len(reference_text)
-            quality = (
+            visual_quality = (
                 weights["ssim"] * ssim + weights["edgeF1"] * edge_f1 + weights["psnr"] * psnr_score
             )
+            quality = visual_quality * aspect_score
             case_weight = float(case.get("weight", 1.0))
             category = str(case.get("category", "default"))
-            weighted_quality += quality * case_weight
-            total_weight += case_weight
             category_scores.setdefault(category, []).append((quality, case_weight))
             scores.append(
                 TournamentCaseScore(
@@ -566,6 +613,11 @@ def _score_candidate(
                     output_path=str(output_path),
                     output_sha256=_sha256(output_path),
                     resized_to_reference=resized,
+                    reference_size=reference_size,
+                    candidate_original_size=candidate_original_size,
+                    aspect_ratio_log_error=aspect_error,
+                    aspect_ratio_score=aspect_score,
+                    alignment=alignment,
                     ssim=ssim,
                     edge_f1=edge_f1,
                     psnr_db=psnr_db,
@@ -585,11 +637,11 @@ def _score_candidate(
             for category, values in sorted(category_scores.items())
         }
         geometry_metrics: dict[str, float] = {}
-        profile_scores = [score.docunet_ms_ssim for score in scores if score.docunet_ms_ssim is not None]
+        profile_scores = [
+            score.docunet_ms_ssim for score in scores if score.docunet_ms_ssim is not None
+        ]
         aad_scores = [
-            score.aad_opencv_dis_proxy
-            for score in scores
-            if score.aad_opencv_dis_proxy is not None
+            score.aad_opencv_dis_proxy for score in scores if score.aad_opencv_dis_proxy is not None
         ]
         edit_distances = [
             score.ocr_edit_distance for score in scores if score.ocr_edit_distance is not None
@@ -622,7 +674,7 @@ def _score_candidate(
             ),
             eligible=True,
             error=None,
-            quality_score=weighted_quality / total_weight,
+            quality_score=sum(categories.values()) / len(categories),
             mean_latency_ms=(sum(latencies) / len(latencies) if latencies else None),
             categories=categories,
             geometry_metrics=geometry_metrics,
@@ -720,27 +772,39 @@ def run_model_tournament(
         manifest_sha256=manifest_sha256,
         metric_weights=weights,
         benchmark_profile=benchmark_profile,
-        metric_implementations=(
-            {
-                "docunetMsSsim": {
-                    "implementation": "uniscan-python-opencv-v1",
-                    "publishedProtocol": True,
-                    "officialMatlabComparable": False,
-                    "reason": "MATLAB ssim/impyramid results vary by release.",
-                },
-                "aadOpenCvDisProxy": {
-                    "implementation": "AAD equations with OpenCV DIS fast flow",
-                    "officialMetric": False,
-                    "reason": "Published AAD requires the official MATLAB SIFTflow implementation.",
-                },
-                "officialEvaluation": {
-                    "sidecar": "official-metrics.json",
-                    "integrity": "manifest and candidate output-set SHA-256 required",
-                },
-            }
-            if benchmark_profile is not None
-            else {}
-        ),
+        metric_implementations={
+            "candidateAlignment": {
+                "implementation": "fit-preserve-aspect-v1",
+                "aspectError": "absolute-log-ratio",
+                "aspectScore": "exp(-absolute-log-ratio)",
+                "padding": "median-candidate-border",
+            },
+            "categoryAggregation": {
+                "implementation": "equal-category-macro-average-v1",
+                "caseWeights": "within-category",
+            },
+            **(
+                {
+                    "docunetMsSsim": {
+                        "implementation": "uniscan-python-opencv-v1",
+                        "publishedProtocol": True,
+                        "officialMatlabComparable": False,
+                        "reason": "MATLAB ssim/impyramid results vary by release.",
+                    },
+                    "aadOpenCvDisProxy": {
+                        "implementation": "AAD equations with OpenCV DIS fast flow",
+                        "officialMetric": False,
+                        "reason": "Published AAD requires the official MATLAB SIFTflow implementation.",
+                    },
+                    "officialEvaluation": {
+                        "sidecar": "official-metrics.json",
+                        "integrity": "manifest and candidate output-set SHA-256 required",
+                    },
+                }
+                if benchmark_profile is not None
+                else {}
+            ),
+        },
         ocr_runtime=ocr_runtime,
         winner=ranking[0] if ranking else None,
         ranking=ranking,
@@ -769,8 +833,7 @@ def summarize_model_tournament(report: ModelTournamentReport) -> str:
             suffix = ""
             if candidate.geometry_metrics:
                 rendered = ", ".join(
-                    f"{metric}={value:.6f}"
-                    for metric, value in candidate.geometry_metrics.items()
+                    f"{metric}={value:.6f}" for metric, value in candidate.geometry_metrics.items()
                 )
                 suffix = f"; {rendered}"
             lines.append(f"{rank}. {name}: quality={candidate.quality_score:.6f}{suffix}")

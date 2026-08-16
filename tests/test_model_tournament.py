@@ -98,8 +98,14 @@ def test_quality_ranking_is_independent_of_license_family(tmp_path: Path) -> Non
     assert report.candidates[0].license == "AGPL-3.0-only"
     assert report.candidates[0].quality_score == pytest.approx(1.0)
     payload = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
+    assert payload["schemaVersion"] == 2
     assert payload["selectionPolicy"] == "quality-first-license-agnostic"
-    assert len(payload["candidates"][0]["cases"][0]["outputSha256"]) == 64
+    case = payload["candidates"][0]["cases"][0]
+    assert len(case["outputSha256"]) == 64
+    assert case["referenceSize"] == [128, 96]
+    assert case["candidateOriginalSize"] == [128, 96]
+    assert case["aspectRatioScore"] == pytest.approx(1.0)
+    assert case["alignment"] == "identity"
 
 
 def test_incomplete_candidate_is_reported_but_does_not_abort_ranking(tmp_path: Path) -> None:
@@ -267,3 +273,79 @@ def test_ocr_subset_requires_tesseract_and_known_subset(tmp_path: Path) -> None:
             candidates={"exact": candidate},
             ocr_subset="ocr-test",
         )
+
+
+def test_wrong_aspect_ratio_is_preserved_and_penalized(tmp_path: Path) -> None:
+    corpus, reference = _paired_corpus(tmp_path)
+    exact = tmp_path / "exact"
+    wrong_aspect = tmp_path / "wrong-aspect"
+    _write(exact / "page-1.png", reference)
+    _write(
+        wrong_aspect / "page-1.png",
+        cv2.resize(reference, (96, 96), interpolation=cv2.INTER_AREA),
+    )
+
+    report = run_model_tournament(
+        corpus_dir=corpus,
+        output_path=tmp_path / "report.json",
+        candidates={"exact": exact, "wrong-aspect": wrong_aspect},
+    )
+
+    result = next(candidate for candidate in report.candidates if candidate.name == "wrong-aspect")
+    case = result.cases[0]
+    assert report.winner == "exact"
+    assert case.reference_size == (128, 96)
+    assert case.candidate_original_size == (96, 96)
+    assert case.aspect_ratio_log_error == pytest.approx(abs(np.log(0.75)))
+    assert case.aspect_ratio_score == pytest.approx(0.75)
+    assert case.alignment == "fit-preserve-aspect"
+    assert case.resized_to_reference is True
+    assert case.quality_score < 0.55
+
+
+def test_quality_score_macro_averages_categories(tmp_path: Path) -> None:
+    corpus, reference = _paired_corpus(tmp_path)
+    manifest_path = corpus / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["cases"] = [
+        {
+            "id": "easy-1",
+            "category": "easy",
+            "input": "inputs/source.png",
+            "reference": "references/flat.png",
+            "output": "easy-1.png",
+        },
+        {
+            "id": "easy-2",
+            "category": "easy",
+            "input": "inputs/source.png",
+            "reference": "references/flat.png",
+            "output": "easy-2.png",
+        },
+        {
+            "id": "hard-1",
+            "category": "hard",
+            "input": "inputs/source.png",
+            "reference": "references/flat.png",
+            "output": "hard-1.png",
+        },
+    ]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    candidate = tmp_path / "candidate"
+    _write(candidate / "easy-1.png", reference)
+    _write(candidate / "easy-2.png", reference)
+    _write(candidate / "hard-1.png", np.full_like(reference, 255))
+
+    report = run_model_tournament(
+        corpus_dir=corpus,
+        output_path=tmp_path / "report.json",
+        candidates={"mixed": candidate},
+    )
+
+    result = report.candidates[0]
+    macro_average = sum(result.categories.values()) / len(result.categories)
+    case_average = sum(case.quality_score for case in result.cases) / len(result.cases)
+    assert result.categories["easy"] == pytest.approx(1.0)
+    assert result.quality_score == pytest.approx(macro_average)
+    assert result.quality_score != pytest.approx(case_average)
+    assert report.metric_implementations["categoryAggregation"]["caseWeights"] == "within-category"

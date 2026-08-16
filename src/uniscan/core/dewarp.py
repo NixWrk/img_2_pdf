@@ -475,6 +475,12 @@ def _candidate_rejection_reason(
         )
         if curvature_worsened:
             return "curvature_worsened"
+        allowed_perspective_rise = max(0.02, before.perspective_score * 0.15)
+        perspective_worsened = (
+            after.perspective_score > before.perspective_score + allowed_perspective_rise
+        )
+        if perspective_worsened:
+            return "perspective_worsened"
     if require_curvature_improvement and before.line_count >= 3:
         if after.line_count < 3:
             return "textline_evidence_lost"

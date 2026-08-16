@@ -6,6 +6,11 @@ All notable changes to UniScan are documented here. The project follows Semantic
 
 ### Added
 
+- Model-tournament schema v2 preserves candidate aspect ratio during metric alignment, records the
+  original/reference dimensions and aspect error, and macro-averages equally across categories.
+- Automatic dewarp now rejects a perspective regression larger than the same bounded noise allowance
+  used for curvature safety, even when another geometry signal improves.
+
 - Separate input-render and output-layout PDF DPI controls, plus fail-closed pixel limits for
   raster images, every TIFF/PDF page, standard-page layout, restored GUI pages, and stage-cache
   entries.

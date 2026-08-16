@@ -86,7 +86,8 @@ the preview must still be applied before export. `--dewarp auto` measures curvat
 borders, edge ink, aspect ratio, text-line curvature, and projective convergence before and after
 correction, and rejects a candidate that does not improve measurable geometry or introduces
 artifacts. Automatic page-model candidates must also retain enough text-line evidence and bounded
-edge content; a perspective gain cannot excuse a meaningful curvature regression.
+edge content; a perspective gain cannot excuse a meaningful curvature regression, and a curvature
+gain cannot excuse perspective worsening beyond `max(0.02, 15% of the source score)`.
 
 Automatic mode builds two candidates and prefers the page model when it measures better on
 projective convergence **or** on curvature; the text-line candidate keeps the page otherwise. The

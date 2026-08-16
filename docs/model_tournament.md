@@ -29,13 +29,17 @@ Create `manifest.json` in a corpus directory:
 ```
 
 Supported tasks are `geometry`, `lighting` and `restoration`. Metric weights are explicit and must
-sum to 1. Candidate images with a different size are resized to the paired reference and this is
-recorded in the report. Inputs, references and candidate paths cannot escape their declared roots.
+sum to 1. Candidate images with a different size are fitted to the paired-reference canvas with a
+uniform scale and median-border padding; their aspect ratio is never changed by the evaluator.
+Original/reference sizes, absolute log aspect-ratio error, `exp(-error)` aspect score and the
+alignment method are recorded in the schema-v2 report. The visual composite is multiplied by the
+aspect score, so even blank pages cannot hide a shape error.
 
 The current quality score is a weighted combination of luminance SSIM, one-pixel-tolerant edge F1,
-and PSNR mapped to `[0, 1]` at 50 dB. Case weights and per-category aggregates prevent a large easy
-category from silently dominating the result. These generic metrics are not a replacement for
-dataset-specific LD/AAD and OCR CER in a final publication-quality decision.
+and PSNR mapped to `[0, 1]` at 50 dB. Case weights produce a weighted mean inside each category;
+the candidate quality score is the equal-weight macro-average of those category means. A large easy
+category therefore cannot dominate merely by containing more cases. These generic metrics are not
+a replacement for dataset-specific LD/AAD and OCR CER in a final publication-quality decision.
 
 ## Standard geometry profiles
 

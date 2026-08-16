@@ -364,6 +364,36 @@ def test_quality_gate_allows_small_curvature_tradeoff_for_large_perspective_gain
     )
 
 
+def test_quality_gate_rejects_perspective_regression_despite_flatter_lines() -> None:
+    before = DewarpQualityMetrics(1.0, 8, 0.05, 0.0, 0.08, 0.76)
+    after = DewarpQualityMetrics(0.8, 8, 0.50, 0.0, 0.06, 0.78)
+
+    assert (
+        _candidate_rejection_reason(
+            before,
+            after,
+            require_curvature_improvement=True,
+            allow_reframing=True,
+        )
+        == "perspective_worsened"
+    )
+
+
+def test_quality_gate_allows_bounded_perspective_noise() -> None:
+    before = DewarpQualityMetrics(1.0, 8, 0.10, 0.0, 0.08, 0.76)
+    after = DewarpQualityMetrics(0.8, 8, 0.119, 0.0, 0.06, 0.78)
+
+    assert (
+        _candidate_rejection_reason(
+            before,
+            after,
+            require_curvature_improvement=True,
+            allow_reframing=True,
+        )
+        is None
+    )
+
+
 def test_quality_gate_rejects_large_edge_content_loss_for_page_model() -> None:
     before = DewarpQualityMetrics(1.2, 8, 0.1, 0.0, 0.10, 0.76)
     after = DewarpQualityMetrics(0.5, 8, 0.04, 0.0, 0.02, 0.78)
