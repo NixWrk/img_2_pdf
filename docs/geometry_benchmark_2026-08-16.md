@@ -95,5 +95,6 @@ above remain historical artifacts with their original raw manifest hashes.
 
 Do not use the old stretched quality values for model selection. Schema v2 removes a material bias
 and shows that DvD and DocScanner-L are tied on the local image composite, with DocScanner-L still
-better for OCR and far easier to deploy. Keep bundled UVDoc as the conservative automatic default
-until the separate real-camera gate is broad enough to support a change.
+better for OCR and far easier to deploy. The subsequent
+[balanced real-camera gate](geometry_real_camera_benchmark_2026-08-17.md) is complete and does not
+support a change: bundled UVDoc remains the conservative automatic neural default.

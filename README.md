@@ -283,13 +283,15 @@ and have page-like proportions, so table columns and partial crops are rejected.
 runtime. `--dewarp docscanner_l` runs the exact SHA-pinned external DocScanner-L ONNX graph when
 `UNISCAN_DOCSCANNER_MODEL` points to it. `--dewarp auto` is a conservative policy when explicitly
 selected: it tries text-line dewarp, measures whether geometry improved, and rejects harmful
-candidates. UVDoc is not considered unless `--auto-dewarp-uvdoc` is also present, and DocScanner-L
-remains explicit until real-camera evaluation is complete. On the full DIR300 benchmark, DvD led
-quality while DocScanner-L was the strongest exact ONNX production candidate. Lighting diagnostics
+candidates. UVDoc is not considered unless `--auto-dewarp-uvdoc` is also present. The balanced
+real-camera gate retains bundled UVDoc as the automatic neural default; DocScanner-L remains an
+explicit alternative. On the aspect-corrected full DIR300 benchmark, DvD led quality while
+DocScanner-L was the strongest exact ONNX production candidate. Lighting diagnostics
 measure shadows, possible glare, clipping, and unevenness without claiming to reconstruct missing
 detail.
 
-See [the geometry guide](docs/document_geometry.md) for algorithms and diagnostics, and
+See [the geometry guide](docs/document_geometry.md), the
+[balanced real-camera benchmark](docs/geometry_real_camera_benchmark_2026-08-17.md), and
 [the stage-order audit](docs/geometry_stage_order_audit_2026-08-15.md) for the measured limitations
 of the current order and the plan that addresses them.
 

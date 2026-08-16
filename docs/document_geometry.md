@@ -189,7 +189,9 @@ The GUI offers **None**, **Automatic (validated)**, **Page model (UVDoc)**,
 **Page model (DocScanner-L)**, and the explicit offline text-line method. DocScanner-L uses an
 external opset-17 graph whose byte length and SHA-256 must match UniScan's manifest; set
 `UNISCAN_DOCSCANNER_MODEL` to its location. It is the strongest exact ONNX candidate in the full
-DIR300 run and remains an explicit choice until the real-camera gate is complete. Workspace
+DIR300 run. The balanced real-camera gate is complete and retains bundled UVDoc as the automatic
+neural default; DocScanner-L remains an explicit choice because its small visual gain did not
+offset worse OCR/gate results and materially higher CPU latency. Workspace
 Processing exposes
 **Page perspective** and **Edit page waves** directly. The inline perspective editor shows
 draggable corner handles beside a live rectified result. Changed corners are saved when navigating

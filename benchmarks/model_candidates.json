@@ -1,17 +1,19 @@
 {
   "schemaVersion": 1,
-  "reviewedAt": "2026-07-30",
+  "reviewedAt": "2026-08-17",
   "selectionPolicy": "quality-first-license-agnostic",
   "candidates": [
     {
       "id": "uvdoc-onnx",
       "tasks": ["geometry"],
       "source": "https://github.com/tanguymagne/UVDoc",
-      "status": "integrated-baseline",
+      "status": "integrated-automatic-default",
       "priority": 0,
       "license": "MIT AND Apache-2.0",
       "delivery": "bundled",
-      "runtime": "onnxruntime-cpu"
+      "runtime": "onnxruntime-cpu",
+      "benchmarkDecision": "retain-automatic-default-balanced-real-camera-ocr-safety-runtime",
+      "evidence": "docs/geometry_real_camera_benchmark_2026-08-17.md"
     },
     {
       "id": "paddleocr-uvdoc",
@@ -32,8 +34,8 @@
       "license": "LicenseRef-DocScanner-NonCommercial-ShareAlike",
       "delivery": "verified-external-release-asset",
       "runtime": "onnxruntime-cpu",
-      "benchmarkDecision": "dir300-runner-up-strongest-exact-onnx-awaiting-real-camera-gate",
-      "evidence": "docs/geometry_runtime_spike_2026-07-29.md",
+      "benchmarkDecision": "dir300-runner-up-real-camera-visual-runner-up-keep-explicit",
+      "evidence": "docs/geometry_real_camera_benchmark_2026-08-17.md",
       "realEvidence": "docs/geometry_real_example_2026-07-30.md"
     },
     {
@@ -45,8 +47,8 @@
       "license": "AGPL-3.0-only",
       "delivery": "external",
       "runtime": "pytorch-cuda-diffusion",
-      "benchmarkDecision": "dir300-quality-leader-official-metrics-accepted-exact-onnx-blocked",
-      "evidence": "docs/geometry_runtime_spike_2026-07-29.md",
+      "benchmarkDecision": "dir300-quality-leader-real-camera-visual-leader-keep-isolated-gpu-reference",
+      "evidence": "docs/geometry_real_camera_benchmark_2026-08-17.md",
       "realEvidence": "docs/geometry_real_example_2026-07-30.md"
     },
     {
