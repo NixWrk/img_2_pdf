@@ -34,8 +34,8 @@ All notable changes to UniScan are documented here. The project follows Semantic
   lighting evidence.
 - GUI controls and live preview for document binarization, despeckle, A4/Letter layout,
   margins/alignment, plus on-demand lighting analysis for the selected page.
-- One GUI-independent page-processing controller now owns the canonical orientation, deskew,
-  dewarp, cleanup, lighting, and layout order for both batch conversion and GUI preview/apply.
+- One GUI-independent page-processing controller now owns the canonical orientation, dewarp,
+  deskew, lighting, cleanup, and layout order for both batch conversion and GUI preview/apply.
 - Binary A4/Letter layout now preserves strict black/white pixels during resizing.
 - Atomic bounded lossless stage cache with pixel/options/upstream fingerprints, dependency-aware
   invalidation, corrupt-entry fallback, GUI persistence/clear action, optional CLI persistence, and
@@ -66,7 +66,7 @@ All notable changes to UniScan are documented here. The project follows Semantic
 - Automatic dewarp now builds both the text-line and UVDoc candidates and prefers the page model
   when it measures better on projective convergence or on curvature, so pure page waves still take
   the cheap text-line path while photographed pages take the page model. A user-adjusted wave model
-  outranks both, and `--no-auto-dewarp-page-model` restores text-line-only behaviour.
+  refines the selected backend, and `--no-auto-dewarp-page-model` restores text-line-only behaviour.
 
 - Bundled DocShadow shadow remover and a validated lighting stage that runs after geometry
   correction (`--shadow auto|classical|docshadow`). Automatic mode only acts on a page with
@@ -76,6 +76,16 @@ All notable changes to UniScan are documented here. The project follows Semantic
   the licence and delivery reasons, so rejected ones are not re-evaluated later.
 
 ### Changed
+
+- Perspective crop, accepted dewarp grid, regional user curves and deskew now compose into one
+  backward map and sample authoritative pixels once; batch diagnostics expose the actual geometry
+  resample count.
+- Dewarp now precedes deskew. Processing recipe schema v4 migrates legacy stage order with an
+  explicit reason, and batch reports preserve the executed stage order.
+- Editing dewarp curves preserves and refines the committed UVDoc/DocScanner-L/automatic backend;
+  editor preview and Apply now execute the same durable request.
+- The matched single-pass raw-half rectify-first spike was rejected: boundaries fell from 8/8 to
+  4/8, while geometry, sharpness and OCR all regressed.
 
 - DocShadow is fetched from its immutable upstream v1.0.0 release asset during Windows builds,
   published atomically only after pinned size/SHA-256 verification, and removed from Git history.

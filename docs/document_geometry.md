@@ -94,7 +94,8 @@ projective convergence **or** on curvature; the text-line candidate keeps the pa
 built-in text-line method models vertical displacement only, so it wins on pure page waves. The
 bundled UVDoc page model (`--dewarp uvdoc`) predicts a sampling grid for the whole page, which also
 removes perspective and returns the page without its photographed background, so it wins on real
-photographs. A user-adjusted wave model outranks both and skips the extra inference.
+photographs. A user-adjusted wave model refines whichever candidate automatic selection keeps;
+it no longer suppresses page-model inference or replaces the selected backend.
 `--no-auto-dewarp-page-model` keeps automatic mode on text lines alone.
 
 Both criteria come from `measure_dewarp_quality`, which is also the evidence the text-line
@@ -137,10 +138,12 @@ page. PDF allocation is checked using PDFium's rounded-up render dimensions; an 
 fails before rendering instead of being silently downsampled. A4/Letter layout also refuses an
 output canvas above 150,000,000 pixels before allocating it.
 
-The batch JSON report uses schema version 4. It records `inputPdfDpi`, `outputPdfDpi`,
+The batch JSON report uses schema version 6. It records `inputPdfDpi`, `outputPdfDpi`,
 `pdfJpegQuality`, and `maxInputPixels`; `pdfDpi` remains as a compatibility alias for
 `outputPdfDpi`. The report also records the requested orientation policy globally and the applied
-angle, confidence, and reason for each page, plus the spread decision and confidence.
+angle, confidence, and reason for each page, plus the spread decision and confidence. Schema v6
+also records `processingStageOrder`, `geometryResampleCount`, and any recipe migration reason per
+page.
 
 ## Document cleanup and lighting evidence
 
@@ -214,26 +217,31 @@ settings, **Apply preview to pages** commits the
 full-resolution result, and export publishes that committed generation without replaying different
 global settings.
 
-## Known limitations of the current stage order
+## Geometry stage order and sampling
 
-Measured on the tracked example in
-[the stage-order audit](geometry_stage_order_audit_2026-08-15.md); remediation is planned there as
-items G1–G3.
+The controller order is `orientation → dewarp → deskew → lighting → cleanup → layout`. Dewarp is
+therefore selected first and the small residual angle is estimated on the rectified page. Recipe
+schema v4 migrates earlier recipes to this order and records
+`migrated_legacy_deskew_before_dewarp_order` in the committed diagnostics.
 
-- Deskew is estimated and applied before dewarp, so the angle describes a page that rectification
-  then replaces. On a difficult half of the example this order alone changed measured curvature by
-  a factor of four.
-- Boundary warp, split-half warp, deskew rotation and the dewarp remap are separate interpolations
-  of the authoritative pixels, and a manual four-corner crop adds another. Three to four passes
-  remove roughly a quarter of the high-frequency detail before cleanup begins.
-- **Apply points** in the wave editor commits the text-line method, so it replaces a page-model
-  result instead of refining it, and automatic mode skips the page model entirely once a user model
-  exists. Explicit `--dewarp uvdoc` with saved curves is the only path that applies both.
-- The page model runs after boundary detection and spread splitting, which is outside the
-  distribution it was trained on. It is rejected on seven of eight halves of the difficult spreads,
-  most often for cutting away edge content.
-- The lighting stage has no operator control beyond method selection, and batch conversion cannot
-  replay per-page manual corrections.
+Four-corner perspective, the accepted dewarp grid, the three user curves and deskew rotation are
+represented as output-to-source maps. When more than one is active, the maps are composed and the
+authoritative source pixels are sampled once. Per-stage candidate diagnostics and cache keys keep
+their prior meaning; `geometryResampleCount` in the batch report exposes the final sampling count.
+PaddleOCR remains an honest chained fallback because its adapter does not expose a sampling grid.
+
+**Apply points** now keeps the committed page backend. For example, editing a UVDoc result records
+`selected_method=uvdoc` and `uvdoc_with_user_adjustment`; the editor preview and Apply use the same
+processing request. Model plus curves round-trip through recipe schema v4 and autosave.
+
+The upstream placement alternative was measured on the four difficult tracked spreads after the
+map-composition change, with both branches sampling authoritative pixels once. Raw-half-first
+UVDoc reduced mean sharpness from 300.0 to 197.5, boundary detection fell from 8/8 to 4/8, mean
+curvature rose from 0.515 to 1.578 and OCR confidence fell from 51.62 to 39.48. It was rejected; see
+[`geometry_rectify_first_spike_2026-08-20.md`](geometry_rectify_first_spike_2026-08-20.md).
+
+The remaining operator-control limitations are lighting strength/protected regions and headless
+replay of all per-page manual corrections (G6 and G7 in the stage-order audit).
 
 ## Automation and quality policy
 

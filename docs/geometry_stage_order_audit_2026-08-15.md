@@ -209,3 +209,12 @@ G1 first: it is independent of every model decision, cannot regress geometry acc
 recovers quality on every page including pages where no model runs. G2 and G3 follow, because both
 change the recipe schema and are best migrated once. G4 only makes sense after G1 and G2, since a
 model comparison run through a four-pass chain measures the chain as much as the model.
+
+## Closure — 2026-08-20
+
+| ID | Status | Evidence |
+| --- | --- | --- |
+| G1 | closed | Perspective, accepted dewarp/user grids and deskew compose into one backward map; the regression test reports one authoritative resample and the tracked page-7 probe is 16.6% sharper than the chained reference. See [`geometry_composition_2026-08-20.md`](geometry_composition_2026-08-20.md). |
+| G2 | closed | Controller order is `orientation → dewarp → deskew → lighting → cleanup → layout`; algorithm v5, recipe schema v4 and batch-report schema v6 expose the change and migration reason. |
+| G3 | closed | Automatic selection no longer short-circuits on a user model; GUI preview and Apply share one request and model-plus-curves round-trip through recipe/autosave state. |
+| G4 | closed — rejected | The corrected matched-half, single-pass spike retained 8/8 boundaries in the shipped order versus 4/8 raw-first. Full measurements and the decision are in [`geometry_rectify_first_spike_2026-08-20.md`](geometry_rectify_first_spike_2026-08-20.md). |

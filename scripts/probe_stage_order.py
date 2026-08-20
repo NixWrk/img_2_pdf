@@ -13,6 +13,14 @@ Three independent probes back `docs/geometry_stage_order_audit_2026-08-15.md`:
 ``gate``
     What validated automatic dewarp actually selects and rejects per page half.
 
+``placement``
+    The shipped boundary/split -> page-model path against raw split -> page
+    model -> boundary crop on all four difficult spreads.
+
+``composition``
+    Crop, UVDoc and residual deskew on one tracked raw half as the historical
+    chained renderer and as one composed backward map.
+
 Rendering must match ``uniscan.io.loaders._render_pdf_page`` exactly: PDFium
 returns BGRA and the loader asks for ``rev_byteorder``. Rendering without it
 swaps red and blue, which changes the grayscale projection every geometry and
@@ -33,8 +41,21 @@ import numpy as np
 import pypdfium2 as pdfium
 
 from uniscan.core.dewarp import dewarp_document, measure_dewarp_quality
+from uniscan.core.geometry import (
+    BackwardMap,
+    compose_backward_maps,
+    identity_backward_map,
+    perspective_backward_map,
+    render_backward_map,
+    rotation_backward_map,
+)
 from uniscan.core.pipeline import PipelineOptions, process_loaded_items
 from uniscan.core.preprocess import deskew_document
+from uniscan.core.processing import PageProcessingRequest, process_document_page
+from uniscan.core.scanner_adapter import (
+    DETECTOR_BACKEND_CV_HYBRID,
+    scan_with_document_detector,
+)
 from uniscan.core import uvdoc
 
 DIFFICULT_SPREADS = (2, 4, 6, 10)  # zero-based; source PDF pages 3, 5, 7 and 11
@@ -271,6 +292,192 @@ def probe_gate(pdf_path: Path, dpi: int) -> list[dict[str, object]]:
     return rows
 
 
+def probe_placement(
+    pdf_path: Path,
+    dpi: int,
+    *,
+    tesseract: Path | None,
+    work_dir: Path,
+) -> list[dict[str, object]]:
+    """Compare page-model placement on matched raw-frame spread halves."""
+    rows: list[dict[str, object]] = []
+    for page_index in DIFFICULT_SPREADS:
+        source = render_page(pdf_path, page_index, dpi)
+        halves = process_loaded_items(
+            [(f"p{page_index + 1}", source)],
+            options=PipelineOptions(
+                detect_document=True,
+                two_page_mode=True,
+                rectify_split_pages=False,
+            ),
+        )
+        for half_index, page in enumerate(halves):
+            side = "L" if half_index == 0 else "R"
+            tag_prefix = f"p{page_index + 1}_{side}"
+            shipped = process_document_page(
+                page.warped,
+                PageProcessingRequest(
+                    dewarp_method="uvdoc",
+                    deskew_method="hybrid",
+                    geometry_source=page.geometry_source,
+                    upstream_backward_map=page.geometry_map,
+                    upstream_pixels_resampled=page.geometry_was_resampled,
+                ),
+            )
+            rows.append(
+                {
+                    "sourcePage": page_index + 1,
+                    "side": side,
+                    "order": "boundary_split_uvdoc_deskew",
+                    "boundaryDetected": page.detected,
+                    "geometryResampleCount": shipped.diagnostics.geometry_resample_count,
+                    **describe(
+                        shipped.image,
+                        f"{tag_prefix}_shipped",
+                        tesseract=tesseract,
+                        work_dir=work_dir,
+                    ),
+                }
+            )
+
+            # `page.raw` is the matched raw-frame half replayed at the same
+            # gutter ratio as `page.warped`; unlike the old whole-frame v3
+            # probe, it retains the page's own surrounding background.
+            raw_height, raw_width = page.raw.shape[:2]
+            grid = uvdoc.predict_grid(page.raw)
+            uv_map_x, uv_map_y = uvdoc.grid_to_backward_map(
+                grid,
+                size=(raw_width, raw_height),
+            )
+            uv_map = BackwardMap(uv_map_x, uv_map_y)
+            rectified_raw = render_backward_map(page.raw, uv_map)
+            boundary = scan_with_document_detector(
+                rectified_raw,
+                enabled=True,
+                backends=(DETECTOR_BACKEND_CV_HYBRID,),
+            )
+            if boundary.detected and boundary.contour is not None:
+                boundary_map = perspective_backward_map(rectified_raw, boundary.contour)
+                cropped = render_backward_map(rectified_raw, boundary_map)
+            else:
+                boundary_map = identity_backward_map((raw_width, raw_height))
+                cropped = rectified_raw
+            _deskew_preview, angle = deskew_document(cropped, method="hybrid")
+            deskew_map = rotation_backward_map(
+                (cropped.shape[1], cropped.shape[0]),
+                angle,
+            )
+            composed = compose_backward_maps(uv_map, boundary_map)
+            composed = compose_backward_maps(composed, deskew_map)
+            rectify_first = render_backward_map(page.raw, composed)
+            rows.append(
+                {
+                    "sourcePage": page_index + 1,
+                    "side": side,
+                    "order": "raw_split_uvdoc_boundary_deskew",
+                    "boundaryDetected": boundary.detected,
+                    "deskewAngle": round(angle, 3),
+                    "geometryResampleCount": 1,
+                    **describe(
+                        rectify_first,
+                        f"{tag_prefix}_rectify_first",
+                        tesseract=tesseract,
+                        work_dir=work_dir,
+                    ),
+                }
+            )
+    return rows
+
+
+def probe_composition(
+    source: np.ndarray,
+    *,
+    tesseract: Path | None,
+    work_dir: Path,
+) -> list[dict[str, object]]:
+    """Measure the G1 one-sample renderer on the difficult left half."""
+    pages = process_loaded_items(
+        [("composition", source)],
+        options=PipelineOptions(
+            detect_document=True,
+            two_page_mode=True,
+            rectify_split_pages=False,
+        ),
+    )
+    if len(pages) != 2:
+        raise RuntimeError(f"Composition probe expected two raw halves, got {len(pages)}.")
+    raw_half = pages[0].raw
+    boundary = scan_with_document_detector(
+        raw_half,
+        enabled=True,
+        backends=(DETECTOR_BACKEND_CV_HYBRID,),
+    )
+    if not boundary.detected or boundary.contour is None:
+        raise RuntimeError("Composition probe could not detect the tracked left-half boundary.")
+
+    crop_map = perspective_backward_map(raw_half, boundary.contour)
+    cropped = render_backward_map(raw_half, crop_map)
+    crop_height, crop_width = cropped.shape[:2]
+    split_points = np.asarray(
+        (
+            (0.5, crop_height * 0.012 + 0.5),
+            (crop_width * 0.985 + 0.5, 0.5),
+            (crop_width - 1.0, crop_height * 0.986 + 0.5),
+            (crop_width * 0.014 + 0.5, crop_height - 1.0),
+        ),
+        dtype=np.float32,
+    )
+    split_map = perspective_backward_map(cropped, split_points)
+    split_rectified = render_backward_map(cropped, split_map)
+    split_height, split_width = split_rectified.shape[:2]
+    manual_points = np.asarray(
+        (
+            (split_width * 0.02 + 0.5, 0.5),
+            (split_width - 1.0, split_height * 0.018 + 0.5),
+            (split_width * 0.975 + 0.5, split_height - 1.0),
+            (0.5, split_height * 0.978 + 0.5),
+        ),
+        dtype=np.float32,
+    )
+    manual_map = perspective_backward_map(split_rectified, manual_points)
+    manually_cropped = render_backward_map(split_rectified, manual_map)
+    page_height, page_width = manually_cropped.shape[:2]
+    grid = uvdoc.predict_grid(manually_cropped)
+    uv_x, uv_y = uvdoc.grid_to_backward_map(grid, size=(page_width, page_height))
+    uv_map = BackwardMap(uv_x, uv_y)
+    dewarped = render_backward_map(manually_cropped, uv_map)
+    chained, angle = deskew_document(dewarped, method="hybrid")
+    deskew_map = rotation_backward_map((page_width, page_height), angle)
+    composed_map = compose_backward_maps(crop_map, split_map)
+    composed_map = compose_backward_maps(composed_map, manual_map)
+    composed_map = compose_backward_maps(composed_map, uv_map)
+    composed_map = compose_backward_maps(composed_map, deskew_map)
+    composed = render_backward_map(raw_half, composed_map)
+
+    return [
+        {
+            "renderer": "chained",
+            "geometryResampleCount": 5,
+            **describe(
+                chained,
+                "composition_chained",
+                tesseract=tesseract,
+                work_dir=work_dir,
+            ),
+        },
+        {
+            "renderer": "composed_single_pass",
+            "geometryResampleCount": 1,
+            **describe(
+                composed,
+                "composition_single_pass",
+                tesseract=tesseract,
+                work_dir=work_dir,
+            ),
+        },
+    ]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pdf", type=Path, required=True, help="Source document.")
@@ -281,7 +488,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, help="Optional JSON report path.")
     parser.add_argument(
         "--probe",
-        choices=("resample", "order", "gate", "all"),
+        choices=("resample", "order", "gate", "placement", "composition", "all"),
         default="all",
     )
     args = parser.parse_args()
@@ -329,6 +536,39 @@ def main() -> None:
                 f"selected={row['selected']:<9} "
                 f"curv {row['curvatureBefore']:.3f}->{row['curvatureAfter']:.3f} "
                 f"{row['durationMs']:>5}ms  {row['reason']}"
+            )
+
+    if args.probe in ("placement", "all"):
+        rows = probe_placement(
+            args.pdf,
+            args.dpi,
+            tesseract=args.tesseract,
+            work_dir=args.work_dir,
+        )
+        report["placement"] = rows
+        print("\nPage-model placement on matched raw halves")
+        for row in rows:
+            line = (
+                f"  p{row['sourcePage']}{row['side']} {row['order']:<36} "
+                f"curv {row['curvature']:>6.3f} persp {row['perspective']:>7.4f} "
+                f"sharp {row['sharpness']:>7.1f} detected={row['boundaryDetected']}"
+            )
+            if "alnumChars" in row:
+                line += f" chars {row['alnumChars']:>5} conf {row['meanConfidence']:>6.2f}"
+            print(line)
+
+    if args.probe in ("composition", "all"):
+        rows = probe_composition(
+            source,
+            tesseract=args.tesseract,
+            work_dir=args.work_dir,
+        )
+        report["composition"] = rows
+        print("\nComposed geometry on the tracked left half")
+        for row in rows:
+            print(
+                f"  {row['renderer']:<24} samples={row['geometryResampleCount']} "
+                f"sharp {row['sharpness']:>7.1f} curv {row['curvature']:>6.3f}"
             )
 
     if args.output is not None:
