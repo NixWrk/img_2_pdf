@@ -25,6 +25,9 @@ CROP_STATE_NONE = "none"
 CROP_STATE_PROPOSED = "proposed"
 CROP_STATE_APPLIED = "applied"
 CROP_STATES = frozenset({CROP_STATE_NONE, CROP_STATE_PROPOSED, CROP_STATE_APPLIED})
+PROCESSING_RECIPE_SCHEMA_VERSION = 4
+CANONICAL_STAGE_ORDER = "orientation,dewarp,deskew,lighting,cleanup,layout"
+STAGE_ORDER_MIGRATION_REASON = "migrated_legacy_deskew_before_dewarp_order"
 
 
 def _resolve_crop_state(
@@ -50,6 +53,7 @@ class ProcessingRecipe:
 
     schema_version: int
     orientation_method: str
+    perspective_points: tuple[tuple[float, float], ...] | None
     deskew_method: str
     deskew_angle_degrees: float | None
     dewarp_method: str
@@ -68,12 +72,22 @@ class ProcessingRecipe:
     vertical_alignment: str
     lighting_diagnostics: bool
     source_fingerprint: str | None
+    stage_order: str
+    migration_reason: str | None
 
     @classmethod
     def from_request(cls, request: PageProcessingRequest) -> "ProcessingRecipe":
         return cls(
-            schema_version=3,
+            schema_version=PROCESSING_RECIPE_SCHEMA_VERSION,
             orientation_method=request.orientation_method,
+            perspective_points=(
+                tuple(
+                    (float(x), float(y))
+                    for x, y in np.asarray(request.perspective_points, dtype=np.float64).reshape(4, 2)
+                )
+                if request.perspective_points is not None
+                else None
+            ),
             deskew_method=request.deskew_method,
             deskew_angle_degrees=request.deskew_angle_degrees,
             dewarp_method=request.dewarp_method,
@@ -94,11 +108,18 @@ class ProcessingRecipe:
             vertical_alignment=request.vertical_alignment,
             lighting_diagnostics=request.lighting_diagnostics,
             source_fingerprint=request.source_fingerprint,
+            stage_order=CANONICAL_STAGE_ORDER,
+            migration_reason=request.recipe_migration_reason,
         )
 
     def to_request(self) -> PageProcessingRequest:
-        if type(self.schema_version) is not int or self.schema_version not in (1, 2, 3):
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version != PROCESSING_RECIPE_SCHEMA_VERSION
+        ):
             raise ValueError(f"Unsupported processing recipe: {self.schema_version}")
+        if self.stage_order != CANONICAL_STAGE_ORDER:
+            raise ValueError(f"Unsupported processing stage order: {self.stage_order}")
         model = DewarpModel(**self.dewarp_model) if self.dewarp_model is not None else None
         settings = (
             PreprocessSettings(**self.preprocess_settings)
@@ -107,6 +128,7 @@ class ProcessingRecipe:
         )
         return PageProcessingRequest(
             orientation_method=self.orientation_method,
+            perspective_points=self.perspective_points,
             deskew_method=self.deskew_method,
             deskew_angle_degrees=self.deskew_angle_degrees,
             dewarp_method=self.dewarp_method,
@@ -125,6 +147,7 @@ class ProcessingRecipe:
             vertical_alignment=self.vertical_alignment,
             lighting_diagnostics=self.lighting_diagnostics,
             source_fingerprint=self.source_fingerprint,
+            recipe_migration_reason=self.migration_reason,
         )
 
     @classmethod
@@ -132,12 +155,22 @@ class ProcessingRecipe:
         if not isinstance(payload, dict):
             raise ValueError("Processing recipe is not an object.")
         normalized = dict(payload)
-        if normalized.get("schema_version") == 1:
+        original_schema = normalized.get("schema_version")
+        if original_schema == 1:
             # Version 1 predates the bundled page model and shadow stage.
             normalized.setdefault("auto_dewarp_uvdoc_grid", True)
             normalized.setdefault("shadow_method", "none")
-        if normalized.get("schema_version") in {1, 2}:
+        if original_schema in {1, 2}:
             normalized.setdefault("deskew_angle_degrees", None)
+        if original_schema in {1, 2, 3}:
+            normalized["schema_version"] = PROCESSING_RECIPE_SCHEMA_VERSION
+            normalized.setdefault("perspective_points", None)
+            normalized["stage_order"] = CANONICAL_STAGE_ORDER
+            normalized["migration_reason"] = STAGE_ORDER_MIGRATION_REASON
+        elif original_schema == PROCESSING_RECIPE_SCHEMA_VERSION:
+            normalized.setdefault("perspective_points", None)
+            normalized.setdefault("stage_order", CANONICAL_STAGE_ORDER)
+            normalized.setdefault("migration_reason", None)
         try:
             recipe = cls(**normalized)
         except TypeError as exc:
@@ -156,6 +189,18 @@ class ProcessingRecipe:
             raise ValueError("Processing recipe string fields are invalid.")
         if not isinstance(recipe.page_dpi, int) or isinstance(recipe.page_dpi, bool):
             raise ValueError("Processing recipe DPI is invalid.")
+        if recipe.perspective_points is not None:
+            try:
+                points = np.asarray(recipe.perspective_points, dtype=np.float64).reshape(4, 2)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Processing recipe perspective points are invalid.") from exc
+            if not np.isfinite(points).all():
+                raise ValueError("Processing recipe perspective points are invalid.")
+            object.__setattr__(
+                recipe,
+                "perspective_points",
+                tuple((float(x), float(y)) for x, y in points),
+            )
         recipe.to_request()
         return recipe
 

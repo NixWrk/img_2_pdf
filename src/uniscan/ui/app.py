@@ -32,6 +32,7 @@ from uniscan.core.dewarp import (
     DEWARP_METHOD_AUTO,
     DEWARP_METHOD_DOCSCANNER,
     DEWARP_METHOD_NONE,
+    DEWARP_METHOD_PADDLEOCR_UVDOC,
     DEWARP_METHOD_TEXTLINE,
     DEWARP_METHOD_UVDOC,
     DewarpModel,
@@ -2604,10 +2605,14 @@ class UnifiedScanApp(ctk.CTk):
             self.dewarp_method_var.get(),
             DEWARP_METHOD_NONE,
         )
+        perspective_points = None
+        if entry is not None and entry.committed_processing is not None:
+            perspective_points = entry.committed_processing.recipe.perspective_points
         return PageProcessingRequest(
             orientation_method=ORIENTATION_UI_METHODS.get(
                 self.orientation_method_var.get(), ORIENTATION_METHOD_NONE
             ),
+            perspective_points=perspective_points,
             deskew_method=DESKEW_UI_METHODS.get(self.deskew_method_var.get(), DESKEW_METHOD_NONE),
             deskew_angle_degrees=(
                 float(self.manual_deskew_angle_var.get())
@@ -2678,6 +2683,23 @@ class UnifiedScanApp(ctk.CTk):
         """Return committed source pixels or an explicitly labelled crop proposal."""
         committed = entry.preview_original_image if fast_preview else entry.original_image
         if not _entry_has_crop_proposal(entry):
+            recipe = (
+                entry.committed_processing.recipe
+                if entry.committed_processing is not None
+                else None
+            )
+            if recipe is not None and recipe.perspective_points is not None:
+                points = np.asarray(recipe.perspective_points, dtype=np.float32)
+                if fast_preview:
+                    points = scale_contour(
+                        points,
+                        src_shape=entry.original_image.shape[:2],
+                        dst_shape=committed.shape[:2],
+                    )
+                try:
+                    return warp_perspective_from_points(committed, points)
+                except ValueError:
+                    pass
             return committed
 
         raw = entry.preview_raw_image if fast_preview else entry.raw_image
@@ -2699,7 +2721,11 @@ class UnifiedScanApp(ctk.CTk):
         # perspective result, but keep export/current pixels on the durable
         # original until the user presses Apply in the corner editor.
         del before_image
-        source = self._review_source_image(entry, fast_preview=False)
+        source = (
+            self._review_source_image(entry, fast_preview=False)
+            if _entry_has_crop_proposal(entry)
+            else entry.original_image
+        )
         return self._process_review_page(
             source,
             entry=entry,
@@ -4210,12 +4236,24 @@ class UnifiedScanApp(ctk.CTk):
             return None
         return points[:4]
 
-    def _render_after_geometry_change(self, image: np.ndarray, previous_committed):
-        if previous_committed is None:
-            return image, None
-        previous_request = previous_committed.recipe.to_request()
+    def _render_after_geometry_change(
+        self,
+        image: np.ndarray,
+        previous_committed,
+        *,
+        perspective_points,
+    ):
+        previous_request = (
+            previous_committed.recipe.to_request()
+            if previous_committed is not None
+            else PageProcessingRequest()
+        )
         request = replace(
             previous_request,
+            perspective_points=tuple(
+                (float(x), float(y))
+                for x, y in np.asarray(perspective_points, dtype=np.float32).reshape(4, 2)
+            ),
             dewarp_already_applied=False,
             stage_cache=self.processing_cache,
             source_fingerprint=None,
@@ -4244,12 +4282,13 @@ class UnifiedScanApp(ctk.CTk):
                 if source_image is None or source_image.size == 0:
                     raise RuntimeError(f"Selected page is empty: {entry.name}")
                 normalized = np.asarray(points, dtype=np.float32).reshape(-1, 2)
-                warped = warp_perspective_from_points(source_image, normalized)
-                if warped is None or warped.size == 0:
+                planned = warp_perspective_from_points(source_image, normalized)
+                if planned is None or planned.size == 0:
                     raise RuntimeError("Perspective transform returned empty image.")
                 current, committed = self._render_after_geometry_change(
-                    warped,
+                    source_image,
                     entry.committed_processing,
+                    perspective_points=normalized,
                 )
                 paths = {
                     name: stage_dir / f"{index:06d}-{name}.png"
@@ -4258,7 +4297,7 @@ class UnifiedScanApp(ctk.CTk):
                 images = {
                     "old-original": entry.original_image,
                     "old-current": entry.current_image,
-                    "new-original": warped,
+                    "new-original": source_image,
                     "new-current": current,
                 }
                 for name, image in images.items():
@@ -4306,6 +4345,8 @@ class UnifiedScanApp(ctk.CTk):
                     ):
                         raise RuntimeError(f"Page disappeared during crop apply: {entry.name}")
                     entry.committed_processing = item["committed"]
+                    entry.dewarp_control_points = item["snapshot_control_points"]
+                    entry.dewarp_control_curves = item["snapshot_control_curves"]
             except Exception as exc:
                 rollback_errors = []
                 for item in reversed(attempted):
@@ -5517,7 +5558,59 @@ class UnifiedScanApp(ctk.CTk):
         if self.inline_editor_close_callback is not None:
             self.inline_editor_close_callback()
 
-        source = entry.original_image
+        authoritative_source = entry.original_image
+        previous_committed = entry.committed_processing
+        committed_dewarp_method = DEWARP_UI_METHODS.get(
+            self.dewarp_method_var.get(),
+            DEWARP_METHOD_TEXTLINE,
+        )
+        if previous_committed is not None:
+            committed_dewarp_method = previous_committed.recipe.dewarp_method
+            if committed_dewarp_method == DEWARP_METHOD_AUTO:
+                prior_dewarp = previous_committed.diagnostics.get("dewarp", {})
+                if isinstance(prior_dewarp, dict):
+                    selected = prior_dewarp.get("selected_method")
+                    if selected in {
+                        DEWARP_METHOD_TEXTLINE,
+                        DEWARP_METHOD_UVDOC,
+                        DEWARP_METHOD_DOCSCANNER,
+                        DEWARP_METHOD_PADDLEOCR_UVDOC,
+                    }:
+                        committed_dewarp_method = str(selected)
+        if committed_dewarp_method == DEWARP_METHOD_NONE:
+            committed_dewarp_method = DEWARP_METHOD_TEXTLINE
+        editor_base_request = (
+            previous_committed.recipe.to_request()
+            if previous_committed is not None
+            else self._processing_request(entry=entry, preview=False)
+        )
+        display_dewarp_method = (
+            committed_dewarp_method
+            if committed_dewarp_method
+            in {
+                DEWARP_METHOD_UVDOC,
+                DEWARP_METHOD_DOCSCANNER,
+                DEWARP_METHOD_PADDLEOCR_UVDOC,
+            }
+            else DEWARP_METHOD_NONE
+        )
+        model_input_request = replace(
+            editor_base_request,
+            dewarp_method=display_dewarp_method,
+            dewarp_model=None,
+            dewarp_already_applied=False,
+            deskew_method=DESKEW_METHOD_NONE,
+            deskew_angle_degrees=None,
+            shadow_method=SHADOW_METHOD_NONE,
+            postprocess_name="None",
+            preprocess_settings=None,
+            page_layout="none",
+            lighting_diagnostics=False,
+            stage_cache=self.processing_cache,
+            source_fingerprint=None,
+            cancel_cb=None,
+        )
+        source = process_document_page(authoritative_source, model_input_request).image
         source_height, source_width = source.shape[:2]
 
         if entry.dewarp_control_curves is not None:
@@ -5642,6 +5735,17 @@ class UnifiedScanApp(ctk.CTk):
                 control_curves=curves,
             )
 
+        def adjusted_request() -> PageProcessingRequest:
+            return replace(
+                editor_base_request,
+                dewarp_method=committed_dewarp_method,
+                dewarp_model=current_model(),
+                dewarp_already_applied=False,
+                stage_cache=self.processing_cache,
+                source_fingerprint=None,
+                cancel_cb=None,
+            )
+
         def draw_overlay() -> None:
             left_canvas.delete("dewarp-overlay")
             display_width = int(state["display_width"])
@@ -5685,14 +5789,9 @@ class UnifiedScanApp(ctk.CTk):
                     )
 
         def render_corrected() -> None:
-            state["last_corrected_source_shape"] = source.shape
-            corrected = process_document_page(
-                source,
-                PageProcessingRequest(
-                    dewarp_method=DEWARP_METHOD_TEXTLINE,
-                    dewarp_model=current_model(),
-                ),
-            ).image
+            state["last_corrected_source_shape"] = authoritative_source.shape
+            corrected = process_document_page(authoritative_source, adjusted_request()).image
+            state["last_corrected"] = corrected
             display_corrected = _fit_image_to_box(
                 corrected,
                 max(200, right_canvas.winfo_width() - 16),
@@ -5979,16 +6078,19 @@ class UnifiedScanApp(ctk.CTk):
 
         def apply_points() -> None:
             try:
-                previous_committed = entry.committed_processing
                 entry.set_dewarp_control_curves(
                     [(float(curve["anchor"]), curve["points"]) for curve in state["curves"]]
                 )
-                self.dewarp_method_var.set("Text lines (offline)")
-                diagnostics = self._reprocess_with_dewarp(
-                    entry,
-                    previous_committed,
-                    method=DEWARP_METHOD_TEXTLINE,
+                method_label = next(
+                    (
+                        label
+                        for label, method in DEWARP_UI_METHODS.items()
+                        if method == committed_dewarp_method
+                    ),
+                    self.dewarp_method_var.get(),
                 )
+                self.dewarp_method_var.set(method_label)
+                diagnostics = self._commit_processing_request(entry, adjusted_request())
                 self.refresh_page_list(keep_entry_ids=(entry.entry_id,))
                 self._set_status(
                     f"Saved 3 dewarp curves; "

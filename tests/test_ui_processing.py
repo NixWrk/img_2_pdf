@@ -532,7 +532,9 @@ def test_crop_proposal_previews_then_commits_only_through_apply(tmp_path) -> Non
         backend=entry.detected_backend,
     )
 
-    np.testing.assert_array_equal(entry.original_image, expected)
+    # Applied corners remain a durable map over the raw source; they are not
+    # baked into a second-generation original image.
+    np.testing.assert_array_equal(entry.original_image, raw)
     np.testing.assert_array_equal(entry.current_image, expected)
     np.testing.assert_array_equal(entry.detected_contour, contour)
     assert entry.detected_backend == "cv_hybrid"
@@ -540,6 +542,11 @@ def test_crop_proposal_previews_then_commits_only_through_apply(tmp_path) -> Non
     assert entry.needs_review is False
     assert entry.review_reasons == ()
     assert _entry_has_crop_proposal(entry) is False
+    assert entry.committed_processing is not None
+    assert entry.committed_processing.recipe.perspective_points == tuple(
+        (float(x), float(y)) for x, y in contour
+    )
+    assert entry.committed_processing.diagnostics["geometry_resample_count"] == 1
 
 
 def test_crop_apply_all_rolls_back_every_page_when_later_commit_fails(

@@ -14,6 +14,13 @@ import img2pdf
 import numpy as np
 
 from uniscan.core.boundary_review import assess_boundary_review
+from uniscan.core.geometry import (
+    BackwardMap,
+    compose_backward_maps,
+    identity_backward_map,
+    perspective_backward_map,
+    slice_backward_map,
+)
 from uniscan.core.layout import detect_content_box
 from uniscan.core.postprocess import POSTPROCESSING_OPTIONS
 from uniscan.core.orientation import rotate_right_angle
@@ -22,6 +29,8 @@ from uniscan.core.scanner_adapter import (
     DETECTOR_BACKEND_CV_HYBRID,
     DETECTOR_BACKEND_OPENCV_HOUGH,
     DETECTOR_BACKEND_OPENCV_MINRECT,
+    DETECTOR_BACKEND_PADDLEOCR_UVDOC,
+    DETECTOR_BACKEND_UVDOC,
     _find_quad_contour,
     scan_with_document_detector,
 )
@@ -68,6 +77,33 @@ class PageResult:
     needs_review: bool = False
     review_reasons: tuple[str, ...] = ()
     boundary_dark_border_fraction: float = 0.0
+    geometry_source: np.ndarray | None = None
+    geometry_map: BackwardMap | None = None
+    geometry_was_resampled: bool = False
+
+
+def _initial_geometry_map(
+    source: np.ndarray,
+    warped: np.ndarray,
+    contour: np.ndarray | None,
+    *,
+    backend: str | None,
+    detected: bool,
+) -> tuple[np.ndarray, BackwardMap, bool]:
+    """Recover a detector homography, or make already-rendered pixels authoritative."""
+    if contour is not None and backend not in {
+        DETECTOR_BACKEND_UVDOC,
+        DETECTOR_BACKEND_PADDLEOCR_UVDOC,
+    }:
+        try:
+            backward_map = perspective_backward_map(source, contour)
+            if backward_map.output_size == (warped.shape[1], warped.shape[0]):
+                return source, backward_map, True
+        except ValueError:
+            pass
+    if not detected and source.shape == warped.shape:
+        return source, identity_backward_map((source.shape[1], source.shape[0])), False
+    return warped, identity_backward_map((warped.shape[1], warped.shape[0])), True
 
 
 def _boundary_review_fields(
@@ -305,6 +341,14 @@ def process_loaded_items(
             warped_height, warped_width = oriented_warped.shape[:2]
             warped_aspect = warped_width / max(1, warped_height)
 
+        geometry_source, spread_geometry_map, geometry_was_resampled = _initial_geometry_map(
+            oriented_raw,
+            oriented_warped,
+            contour,
+            backend=backend,
+            detected=detected,
+        )
+        whole_geometry_map = spread_geometry_map
         spread_input = oriented_warped
         raw_split_input = oriented_raw
         embedded_landscape_crop = False
@@ -320,6 +364,13 @@ def process_loaded_items(
                 x1 = x0 + content_box.width
                 y1 = y0 + content_box.height
                 spread_input = oriented_warped[y0:y1, x0:x1]
+                spread_geometry_map = slice_backward_map(
+                    spread_geometry_map,
+                    x0=x0,
+                    y0=y0,
+                    x1=x1,
+                    y1=y1,
+                )
 
                 raw_x0 = int(round(x0 * raw_width / max(1, warped_width)))
                 raw_y0 = int(round(y0 * raw_height / max(1, warped_height)))
@@ -345,9 +396,27 @@ def process_loaded_items(
                 left_warped_width = warped_halves[0].shape[1]
                 ratio = left_warped_width / max(1, warped_width)
                 raw_halves = _safe_split_proportional(raw_split_input, ratio=ratio)
-                for half_index, (raw_half, warped_half) in enumerate(
-                    zip(raw_halves, warped_halves)
+                geometry_halves = (
+                    slice_backward_map(
+                        spread_geometry_map,
+                        x0=0,
+                        y0=0,
+                        x1=left_warped_width,
+                        y1=spread_input.shape[0],
+                    ),
+                    slice_backward_map(
+                        spread_geometry_map,
+                        x0=left_warped_width,
+                        y0=0,
+                        x1=spread_input.shape[1],
+                        y1=spread_input.shape[0],
+                    ),
+                )
+                for half_index, (raw_half, warped_half, half_geometry_map) in enumerate(
+                    zip(raw_halves, warped_halves, geometry_halves)
                 ):
+                    half_geometry_source = geometry_source
+                    half_geometry_was_resampled = geometry_was_resampled
                     half_backend = backend
                     half_detected = detected
                     half_fallback_reason = fallback_reason
@@ -361,6 +430,30 @@ def process_loaded_items(
                             uvdoc_cache_home=uvdoc_cache_home,
                         )
                         if half_scan is not None:
+                            try:
+                                correction_map = perspective_backward_map(
+                                    warped_half,
+                                    half_scan.contour,
+                                )
+                                if correction_map.output_size != (
+                                    half_scan.warped.shape[1],
+                                    half_scan.warped.shape[0],
+                                ):
+                                    raise ValueError("split rectification size mismatch")
+                                half_geometry_map = compose_backward_maps(
+                                    half_geometry_map,
+                                    correction_map,
+                                )
+                                half_geometry_was_resampled = True
+                            except ValueError:
+                                half_geometry_source = half_scan.warped
+                                half_geometry_was_resampled = True
+                                half_geometry_map = identity_backward_map(
+                                    (
+                                        half_scan.warped.shape[1],
+                                        half_scan.warped.shape[0],
+                                    )
+                                )
                             warped_half = half_scan.warped
                             half_backend = half_scan.backend
                             half_detected = True
@@ -381,6 +474,9 @@ def process_loaded_items(
                             spread_detected=True,
                             spread_confidence=spread.candidate.confidence,
                             spread_reason=spread.reason,
+                            geometry_source=half_geometry_source,
+                            geometry_map=half_geometry_map,
+                            geometry_was_resampled=half_geometry_was_resampled,
                             **_boundary_review_fields(
                                 warped_half,
                                 options=options,
@@ -402,6 +498,9 @@ def process_loaded_items(
                         detected=detected,
                         fallback_reason=fallback_reason,
                         spread_reason=spread.reason,
+                        geometry_source=geometry_source,
+                        geometry_map=whole_geometry_map,
+                        geometry_was_resampled=geometry_was_resampled,
                         **_boundary_review_fields(
                             oriented_warped,
                             options=options,
@@ -422,6 +521,9 @@ def process_loaded_items(
                     backend=backend,
                     detected=detected,
                     fallback_reason=fallback_reason,
+                    geometry_source=geometry_source,
+                    geometry_map=whole_geometry_map,
+                    geometry_was_resampled=geometry_was_resampled,
                     **_boundary_review_fields(
                         oriented_warped,
                         options=options,

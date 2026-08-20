@@ -25,6 +25,29 @@ def test_stage_cache_round_trip_and_stats(tmp_path) -> None:
     assert cache.stats.writes == 1
 
 
+def test_stage_cache_round_trips_geometry_map_under_same_key(tmp_path) -> None:
+    cache = ProcessingStageCache(tmp_path / "cache", max_bytes=1024 * 1024, max_entries=4)
+    image = np.full((40, 50), 173, dtype=np.uint8)
+    key = cache.stage_key(cache.fingerprint_image(image), "dewarp", {"method": "textline"})
+    map_x, map_y = np.meshgrid(
+        np.arange(50, dtype=np.float32) + 0.25,
+        np.arange(40, dtype=np.float32) - 0.5,
+    )
+
+    assert cache.put(key, image, {"applied": True}) is True
+    assert cache.put_backward_map(key, map_x, map_y) is True
+    restored = cache.get_backward_map(key)
+
+    assert restored is not None
+    np.testing.assert_array_equal(restored[0], map_x)
+    np.testing.assert_array_equal(restored[1], map_y)
+    assert cache.stats.hits == 0
+    assert cache.stats.misses == 0
+
+    cache.discard(key)
+    assert not (cache.root_dir / f"{key}.npz").exists()
+
+
 def test_stage_cache_key_invalidates_downstream_options() -> None:
     source = "a" * 64
     first = ProcessingStageCache.stage_key(source, "dewarp", {"method": "none"})

@@ -161,17 +161,28 @@ def test_auto_prefers_the_flatter_candidate(monkeypatch) -> None:
     assert diagnostics.selected_method == expected
 
 
-def test_auto_keeps_a_user_model_without_running_uvdoc(monkeypatch) -> None:
+def test_auto_user_model_refines_selected_uvdoc_candidate(monkeypatch) -> None:
     from uniscan.core.dewarp import DewarpModel
 
     image = _text_page()
     calls: list[bool] = []
 
-    def unexpected(_image):
+    def available_uvdoc(_image):
         calls.append(True)
-        raise AssertionError("a user-adjusted model must win outright")
+        return _image.copy(), DewarpDiagnostics(method=DEWARP_METHOD_UVDOC, applied=True)
 
-    monkeypatch.setattr("uniscan.core.dewarp._uvdoc_grid_dewarp", unexpected)
+    monkeypatch.setattr("uniscan.core.dewarp._uvdoc_grid_dewarp", available_uvdoc)
+    monkeypatch.setattr(
+        "uniscan.core.dewarp._textline_dewarp",
+        lambda source, *, model: (
+            source.copy(),
+            DewarpDiagnostics(method="textline", applied=False, reason="not_available"),
+        ),
+    )
+    monkeypatch.setattr(
+        "uniscan.core.dewarp._candidate_rejection_reason",
+        lambda *_args, **_kwargs: None,
+    )
     model = DewarpModel(
         method="textline",
         control_points=((0.0, 0.0), (0.5, 0.02), (1.0, 0.0)),
@@ -180,8 +191,9 @@ def test_auto_keeps_a_user_model_without_running_uvdoc(monkeypatch) -> None:
 
     _corrected, diagnostics = dewarp_document(image, method=DEWARP_METHOD_AUTO, model=model)
 
-    assert calls == []
-    assert diagnostics.selected_method == "textline"
+    assert calls == [True]
+    assert diagnostics.selected_method == DEWARP_METHOD_UVDOC
+    assert diagnostics.reason == "uvdoc_with_user_adjustment"
 
 
 def test_auto_can_disable_the_grid_model(monkeypatch) -> None:

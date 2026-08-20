@@ -277,7 +277,7 @@ def test_report_records_complete_effective_processing_configuration(tmp_path) ->
     )
 
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
-    assert report["schemaVersion"] == 5
+    assert report["schemaVersion"] == 6
     assert report["pdfDpi"] == 200
     assert report["inputPdfDpi"] == 200
     assert report["outputPdfDpi"] == 200
@@ -297,6 +297,12 @@ def test_report_records_complete_effective_processing_configuration(tmp_path) ->
     assert report["threshold"] == 170
     assert report["applyThreshold"] is False
     assert report["detectorBackends"] == []
+    assert report["pages"][0]["processingStageOrder"][:3] == [
+        "orientation",
+        "dewarp",
+        "deskew",
+    ]
+    assert report["pages"][0]["geometryResampleCount"] == 0
 
 
 def test_batch_report_flags_page8_like_suspicious_boundary(tmp_path, monkeypatch) -> None:

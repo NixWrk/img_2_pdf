@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import threading
 from uuid import uuid4
+from zipfile import BadZipFile
 
 import cv2
 import numpy as np
@@ -79,10 +80,10 @@ class ProcessingStageCache:
         return self.root_dir / f"{key}.png", self.root_dir / f"{key}.json"
 
     @staticmethod
-    def _discard_paths(image_path: Path, metadata_path: Path) -> None:
+    def _discard_paths(*paths: Path) -> None:
         # Remove metadata first: one successful unlink immediately makes the
         # two-file entry invisible to readers even if the image is locked.
-        for path in (metadata_path, image_path):
+        for path in paths:
             try:
                 path.unlink(missing_ok=True)
             except OSError:
@@ -95,14 +96,14 @@ class ProcessingStageCache:
         """Best-effort removal of one cache entry and all of its files."""
         image_path, metadata_path = self._paths(key)
         with self._lock:
-            self._discard_paths(image_path, metadata_path)
+            self._discard_paths(metadata_path, image_path, self.root_dir / f"{key}.npz")
             self._rejected_keys.add(key)
 
     def reject_hit(self, key: str) -> None:
         """Discard a semantically invalid hit and correct cache telemetry."""
         image_path, metadata_path = self._paths(key)
         with self._lock:
-            self._discard_paths(image_path, metadata_path)
+            self._discard_paths(metadata_path, image_path, self.root_dir / f"{key}.npz")
             self._rejected_keys.add(key)
             if self.stats.hits > 0:
                 self.stats.hits -= 1
@@ -130,7 +131,7 @@ class ProcessingStageCache:
                 if not isinstance(payload, dict):
                     raise ValueError("invalid cache metadata")
             except (OSError, RuntimeError, UnicodeError, ValueError, json.JSONDecodeError):
-                self._discard_paths(image_path, metadata_path)
+                self._discard_paths(metadata_path, image_path, self.root_dir / f"{key}.npz")
                 self._rejected_keys.add(key)
                 self.stats.misses += 1
                 return None
@@ -174,25 +175,94 @@ class ProcessingStageCache:
             self._prune_locked()
         return True
 
+    def get_backward_map(self, key: str) -> tuple[np.ndarray, np.ndarray] | None:
+        """Read an optional geometry-map sidecar without changing hit telemetry."""
+        self._paths(key)  # Validate the key consistently with image entries.
+        map_path = self.root_dir / f"{key}.npz"
+        with self._lock:
+            if not map_path.is_file():
+                return None
+            try:
+                with np.load(map_path, allow_pickle=False) as payload:
+                    map_x = np.asarray(payload["map_x"], dtype=np.float32)
+                    map_y = np.asarray(payload["map_y"], dtype=np.float32)
+                if (
+                    map_x.ndim != 2
+                    or map_x.shape != map_y.shape
+                    or not map_x.size
+                    or not np.isfinite(map_x).all()
+                    or not np.isfinite(map_y).all()
+                ):
+                    raise ValueError("invalid backward map")
+                os.utime(map_path, None)
+            except (OSError, ValueError, KeyError, EOFError, BadZipFile):
+                map_path.unlink(missing_ok=True)
+                return None
+        return np.ascontiguousarray(map_x), np.ascontiguousarray(map_y)
+
+    def put_backward_map(
+        self,
+        key: str,
+        map_x: np.ndarray,
+        map_y: np.ndarray,
+    ) -> bool:
+        """Atomically attach a dense output-to-input map to an existing stage key."""
+        image_path, metadata_path = self._paths(key)
+        if not image_path.is_file() or not metadata_path.is_file():
+            return False
+        x = np.asarray(map_x, dtype=np.float32)
+        y = np.asarray(map_y, dtype=np.float32)
+        if (
+            x.ndim != 2
+            or x.shape != y.shape
+            or not x.size
+            or not np.isfinite(x).all()
+            or not np.isfinite(y).all()
+        ):
+            return False
+        map_path = self.root_dir / f"{key}.npz"
+        temporary = self.root_dir / f".{key}.{uuid4().hex}.npz.tmp"
+        with self._lock:
+            try:
+                with temporary.open("wb") as output:
+                    np.savez_compressed(
+                        output,
+                        map_x=np.ascontiguousarray(x),
+                        map_y=np.ascontiguousarray(y),
+                    )
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(temporary, map_path)
+            except OSError:
+                return False
+            finally:
+                temporary.unlink(missing_ok=True)
+            self._prune_locked()
+        return True
+
     def _prune_locked(self) -> None:
-        entries: list[tuple[float, Path, Path, int]] = []
+        entries: list[tuple[float, Path, Path, Path, int]] = []
         for image_path in self.root_dir.glob("*.png"):
             metadata_path = image_path.with_suffix(".json")
+            map_path = image_path.with_suffix(".npz")
             try:
                 size = image_path.stat().st_size
                 modified = image_path.stat().st_mtime
                 if metadata_path.exists():
                     size += metadata_path.stat().st_size
+                if map_path.exists():
+                    size += map_path.stat().st_size
             except OSError:
                 continue
-            entries.append((modified, image_path, metadata_path, size))
+            entries.append((modified, image_path, metadata_path, map_path, size))
         entries.sort(key=lambda item: item[0])
-        total_bytes = sum(item[3] for item in entries)
+        total_bytes = sum(item[4] for item in entries)
         while entries and (len(entries) > self.max_entries or total_bytes > self.max_bytes):
-            _modified, image_path, metadata_path, size = entries.pop(0)
+            _modified, image_path, metadata_path, map_path, size = entries.pop(0)
             try:
                 image_path.unlink(missing_ok=True)
                 metadata_path.unlink(missing_ok=True)
+                map_path.unlink(missing_ok=True)
             except OSError:
                 continue
             total_bytes -= size
@@ -200,7 +270,7 @@ class ProcessingStageCache:
 
     def clear(self) -> None:
         with self._lock:
-            for pattern in ("*.png", "*.json", ".*.tmp"):
+            for pattern in ("*.png", "*.json", "*.npz", ".*.tmp"):
                 for path in self.root_dir.glob(pattern):
                     path.unlink(missing_ok=True)
             self._rejected_keys.clear()

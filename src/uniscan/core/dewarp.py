@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path
 import time
@@ -9,6 +10,13 @@ import warnings
 
 import cv2
 import numpy as np
+
+from .geometry import (
+    BackwardMap,
+    compose_backward_maps,
+    identity_backward_map,
+    render_backward_map,
+)
 
 DEWARP_METHOD_NONE = "none"
 DEWARP_METHOD_AUTO = "auto"
@@ -24,6 +32,17 @@ DEWARP_METHOD_CHOICES = (
     DEWARP_METHOD_DOCSCANNER,
     DEWARP_METHOD_PADDLEOCR_UVDOC,
 )
+
+_ACTIVE_MAP_COLLECTOR: ContextVar[dict[str, BackwardMap] | None] = ContextVar(
+    "uniscan_dewarp_map_collector",
+    default=None,
+)
+
+
+def _record_backward_map(method: str, backward_map: BackwardMap) -> None:
+    collector = _ACTIVE_MAP_COLLECTOR.get()
+    if collector is not None:
+        collector[method] = backward_map
 
 
 @dataclass(slots=True, frozen=True)
@@ -580,10 +599,15 @@ def estimate_textline_dewarp_model(
     )
 
 
-def apply_dewarp_model(image: np.ndarray, model: DewarpModel) -> np.ndarray:
-    """Apply one curve uniformly or interpolate several curves over page height."""
+def dewarp_model_backward_map(
+    size: tuple[int, int],
+    model: DewarpModel,
+) -> BackwardMap:
+    """Build the editable curve map without sampling the page pixels."""
     curves = _model_control_curves(model)
-    height, width = image.shape[:2]
+    width, height = size
+    if width < 1 or height < 1:
+        raise ValueError("Dewarp-map dimensions must be positive.")
     normalized_x = np.linspace(0.0, 1.0, width, dtype=np.float32)
     smooth_sigma = max(1.0, width / 180.0)
     profiles = []
@@ -619,14 +643,13 @@ def apply_dewarp_model(image: np.ndarray, model: DewarpModel) -> np.ndarray:
     map_x = np.broadcast_to(np.arange(width, dtype=np.float32), (height, width)).copy()
     map_y = displacement_field
     map_y += np.arange(height, dtype=np.float32)[:, None]
-    corrected = cv2.remap(
-        image,
-        map_x,
-        map_y,
-        interpolation=cv2.INTER_CUBIC,
-        borderMode=cv2.BORDER_REPLICATE,
-    )
-    return corrected
+    return BackwardMap(map_x, map_y)
+
+
+def apply_dewarp_model(image: np.ndarray, model: DewarpModel) -> np.ndarray:
+    """Apply one curve uniformly or interpolate several curves over page height."""
+    height, width = image.shape[:2]
+    return render_backward_map(image, dewarp_model_backward_map((width, height), model))
 
 
 def _textline_dewarp(
@@ -652,7 +675,10 @@ def _textline_dewarp(
             ),
             reason="user_adjusted_model" if model.source == "user" else None,
         )
-    return apply_dewarp_model(image, model), diagnostics
+    height, width = image.shape[:2]
+    backward_map = dewarp_model_backward_map((width, height), model)
+    _record_backward_map(DEWARP_METHOD_TEXTLINE, backward_map)
+    return render_backward_map(image, backward_map), diagnostics
 
 
 def _uvdoc_dewarp(
@@ -687,7 +713,15 @@ def _uvdoc_grid_dewarp(image: np.ndarray) -> tuple[np.ndarray, DewarpDiagnostics
             applied=False,
             reason="uvdoc_model_unavailable",
         )
-    corrected = uvdoc.dewarp(image)
+    if _ACTIVE_MAP_COLLECTOR.get() is None:
+        corrected = uvdoc.dewarp(image)
+    else:
+        grid = uvdoc.predict_grid(image)
+        height, width = image.shape[:2]
+        map_x, map_y = uvdoc.grid_to_backward_map(grid, size=(width, height))
+        backward_map = BackwardMap(map_x, map_y)
+        _record_backward_map(DEWARP_METHOD_UVDOC, backward_map)
+        corrected = render_backward_map(image, backward_map)
     if corrected is None or corrected.size == 0:
         return image.copy(), DewarpDiagnostics(
             method=DEWARP_METHOD_UVDOC,
@@ -707,7 +741,15 @@ def _docscanner_dewarp(image: np.ndarray) -> tuple[np.ndarray, DewarpDiagnostics
             applied=False,
             reason="docscanner_model_unavailable",
         )
-    corrected = docscanner.dewarp(image)
+    if _ACTIVE_MAP_COLLECTOR.get() is None:
+        corrected = docscanner.dewarp(image)
+    else:
+        grid = docscanner.predict_grid(image)
+        height, width = image.shape[:2]
+        map_x, map_y = docscanner.grid_to_backward_map(grid, size=(width, height))
+        backward_map = BackwardMap(map_x, map_y)
+        _record_backward_map(DEWARP_METHOD_DOCSCANNER, backward_map)
+        corrected = docscanner.sample_backward_map(image, map_x, map_y)
     if corrected is None or corrected.size == 0:
         return image.copy(), DewarpDiagnostics(
             method=DEWARP_METHOD_DOCSCANNER,
@@ -758,30 +800,20 @@ def _automatic_dewarp(
     auto_use_uvdoc_grid: bool,
     model: DewarpModel | None,
 ) -> tuple[np.ndarray, DewarpDiagnostics, DewarpQualityMetrics]:
-    textline_candidate, textline_diagnostics = _textline_dewarp(image, model=model)
+    # A user curve is a refinement, not a competing page detector. Automatic
+    # selection must therefore run against the unmodified candidates first.
+    del model
+    textline_candidate, textline_diagnostics = _textline_dewarp(image, model=None)
     textline_after: DewarpQualityMetrics | None = None
     if textline_diagnostics.applied:
         textline_after = measure_dewarp_quality(textline_candidate)
         rejection = None
-        if model is None:
-            rejection = _candidate_rejection_reason(
-                before,
-                textline_after,
-                require_curvature_improvement=True,
-            )
+        rejection = _candidate_rejection_reason(
+            before,
+            textline_after,
+            require_curvature_improvement=True,
+        )
         if rejection is None:
-            if model is not None:
-                # A user-adjusted model is an explicit decision: no model gets
-                # to overrule it, and no extra inference is worth running.
-                return (
-                    textline_candidate,
-                    replace(
-                        textline_diagnostics,
-                        method=DEWARP_METHOD_AUTO,
-                        selected_method=DEWARP_METHOD_TEXTLINE,
-                    ),
-                    textline_after,
-                )
             textline_reason = None
         else:
             textline_after = None
@@ -911,6 +943,14 @@ def dewarp_document(
             auto_use_uvdoc_grid=auto_use_uvdoc_grid,
             model=model,
         )
+        if model is not None and diagnostics.applied:
+            corrected = apply_dewarp_model(corrected, model)
+            selected = diagnostics.selected_method
+            diagnostics = replace(
+                diagnostics,
+                reason=f"{selected}_with_user_adjustment",
+            )
+            after = measure_dewarp_quality(corrected)
         return corrected, _quality_diagnostics(
             diagnostics,
             before=before,
@@ -989,3 +1029,112 @@ def dewarp_document(
             started=started,
         )
     raise ValueError(f"Unsupported dewarp method: {method}")
+
+
+def _backend_backward_map(
+    image: np.ndarray,
+    method: str,
+    *,
+    explicit_textline_model: DewarpModel | None = None,
+) -> BackwardMap | None:
+    """Recreate an accepted backend's output-to-input map without using its pixels."""
+    height, width = image.shape[:2]
+    if method == DEWARP_METHOD_NONE:
+        return identity_backward_map((width, height))
+    if method == DEWARP_METHOD_TEXTLINE:
+        model = explicit_textline_model
+        if model is None:
+            model, _diagnostics = estimate_textline_dewarp_model(image)
+        return (
+            dewarp_model_backward_map((width, height), model)
+            if model is not None
+            else identity_backward_map((width, height))
+        )
+    if method == DEWARP_METHOD_UVDOC:
+        from . import uvdoc
+
+        grid = uvdoc.predict_grid(image)
+        map_x, map_y = uvdoc.grid_to_backward_map(grid, size=(width, height))
+        return BackwardMap(map_x, map_y)
+    if method == DEWARP_METHOD_DOCSCANNER:
+        from . import docscanner
+
+        grid = docscanner.predict_grid(image)
+        map_x, map_y = docscanner.grid_to_backward_map(grid, size=(width, height))
+        return BackwardMap(map_x, map_y)
+    # PaddleOCR exposes only already-rendered pixels, so it cannot participate
+    # in a lossless map composition until that adapter exposes its grid.
+    return None
+
+
+def dewarp_document_with_map(
+    image: np.ndarray,
+    *,
+    method: str = DEWARP_METHOD_TEXTLINE,
+    uvdoc_cache_home: Path | None = None,
+    auto_use_uvdoc: bool = False,
+    auto_use_uvdoc_grid: bool = True,
+    model: DewarpModel | None = None,
+) -> tuple[np.ndarray, DewarpDiagnostics, BackwardMap | None]:
+    """Run normal selection and also return the accepted backward map.
+
+    The returned image is the ordinary diagnostic/selection preview. Callers
+    that already own an upstream map should compose ``backward_map`` with it
+    and render the authoritative source only once.
+    """
+    captured_maps: dict[str, BackwardMap] = {}
+    token = _ACTIVE_MAP_COLLECTOR.set(captured_maps)
+    try:
+        corrected, diagnostics = dewarp_document(
+            image,
+            method=method,
+            uvdoc_cache_home=uvdoc_cache_home,
+            auto_use_uvdoc=auto_use_uvdoc,
+            auto_use_uvdoc_grid=auto_use_uvdoc_grid,
+            model=model,
+        )
+    finally:
+        _ACTIVE_MAP_COLLECTOR.reset(token)
+    backward_map = dewarp_backward_map(
+        image,
+        method=method,
+        diagnostics=diagnostics,
+        model=model,
+        captured_maps=captured_maps,
+    )
+    return corrected, diagnostics, backward_map
+
+
+def dewarp_backward_map(
+    image: np.ndarray,
+    *,
+    method: str,
+    diagnostics: DewarpDiagnostics,
+    model: DewarpModel | None = None,
+    captured_maps: dict[str, BackwardMap] | None = None,
+) -> BackwardMap | None:
+    """Recover the map described by already-computed dewarp diagnostics."""
+    height, width = image.shape[:2]
+    if not diagnostics.applied:
+        return identity_backward_map((width, height))
+    normalized = method.strip().lower()
+    selected = diagnostics.selected_method
+    explicit_textline_model = (
+        model if normalized == DEWARP_METHOD_TEXTLINE and selected == DEWARP_METHOD_TEXTLINE else None
+    )
+    try:
+        backward_map = (captured_maps or {}).get(selected)
+        if backward_map is None:
+            backward_map = _backend_backward_map(
+                image,
+                selected,
+                explicit_textline_model=explicit_textline_model,
+            )
+        if backward_map is not None and model is not None and not (
+            normalized == DEWARP_METHOD_TEXTLINE and selected == DEWARP_METHOD_TEXTLINE
+        ):
+            refinement = dewarp_model_backward_map(backward_map.output_size, model)
+            backward_map = compose_backward_maps(backward_map, refinement)
+    except (OSError, RuntimeError, ValueError):
+        backward_map = None
+    return backward_map

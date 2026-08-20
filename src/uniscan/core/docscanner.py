@@ -179,6 +179,13 @@ def _bilinear_sample(image: np.ndarray, map_x: np.ndarray, map_y: np.ndarray) ->
     return output[:, :, 0] if scalar else output
 
 
+def sample_backward_map(image: np.ndarray, map_x: np.ndarray, map_y: np.ndarray) -> np.ndarray:
+    """Apply an arbitrary composed map with the official PyTorch sampling semantics."""
+    if map_x.shape != map_y.shape:
+        raise ValueError("DocScanner-L backward maps must have equal shapes.")
+    return _bilinear_sample(image, map_x, map_y)
+
+
 def dewarp(image: np.ndarray) -> np.ndarray:
     """Rectify a page while sampling its original full-resolution pixels."""
     grid = predict_grid(image)

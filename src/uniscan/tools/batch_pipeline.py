@@ -161,6 +161,9 @@ class PageRunReport:
     lighting_unevenness: float | None = None
     lighting_warnings: tuple[str, ...] = ()
     processing_stage_durations_ms: dict[str, float] | None = None
+    processing_stage_order: tuple[str, ...] = ()
+    geometry_resample_count: int = 0
+    recipe_migration_reason: str | None = None
     processing_cache_hits: tuple[str, ...] = ()
     spread_detected: bool = False
     spread_confidence: float = 0.0
@@ -911,7 +914,7 @@ def _report_payload(
     review_pages = sum(page.needs_review for page in pages)
     effective_preprocess = preprocess_settings or PreprocessSettings()
     return {
-        "schemaVersion": 5,
+        "schemaVersion": 6,
         "outputPdf": str(output_pdf),
         "reportPath": str(report_path),
         "imagesDirectory": str(images_dir) if images_dir is not None else None,
@@ -1027,6 +1030,9 @@ def _report_payload(
                 "lightingUnevenness": page.lighting_unevenness,
                 "lightingWarnings": list(page.lighting_warnings),
                 "processingStageDurationsMs": page.processing_stage_durations_ms or {},
+                "processingStageOrder": list(page.processing_stage_order),
+                "geometryResampleCount": page.geometry_resample_count,
+                "recipeMigrationReason": page.recipe_migration_reason,
                 "processingCacheHits": list(page.processing_cache_hits),
                 "spreadDetected": page.spread_detected,
                 "spreadConfidence": page.spread_confidence,
@@ -1376,6 +1382,9 @@ def run_batch_pipeline(
                         vertical_alignment=vertical_alignment,
                         lighting_diagnostics=lighting_diagnostics,
                         stage_cache=stage_cache,
+                        geometry_source=page.geometry_source,
+                        upstream_backward_map=page.geometry_map,
+                        upstream_pixels_resampled=page.geometry_was_resampled,
                         cancel_cb=cancel_cb,
                     ),
                 )
@@ -1476,6 +1485,15 @@ def run_batch_pipeline(
                         lighting_unevenness=(lighting.unevenness if lighting is not None else None),
                         lighting_warnings=(lighting.warnings if lighting is not None else ()),
                         processing_stage_durations_ms=processing_diagnostics.stage_durations_ms,
+                        processing_stage_order=tuple(
+                            processing_diagnostics.stage_durations_ms.keys()
+                        ),
+                        geometry_resample_count=(
+                            processing_diagnostics.geometry_resample_count
+                        ),
+                        recipe_migration_reason=(
+                            processing_diagnostics.recipe_migration_reason
+                        ),
                         processing_cache_hits=processing_diagnostics.cache_hits,
                         spread_detected=page.spread_detected,
                         spread_confidence=page.spread_confidence,

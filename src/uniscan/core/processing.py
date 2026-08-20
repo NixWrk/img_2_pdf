@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 import time
 
+import cv2
 import numpy as np
 
 from .cleanup import (
@@ -20,10 +21,23 @@ from .cleanup import (
 )
 from .dewarp import (
     DEWARP_METHOD_CHOICES,
+    DEWARP_METHOD_DOCSCANNER,
     DEWARP_METHOD_NONE,
     DewarpDiagnostics,
     DewarpModel,
+    dewarp_backward_map,
     dewarp_document,
+    dewarp_document_with_map,
+)
+from .geometry import (
+    BackwardMap,
+    compose_backward_maps,
+    identity_backward_map,
+    perspective_backward_map,
+    render_backward_map,
+    right_angle_backward_map,
+    rotate_points_right_angle,
+    rotation_backward_map,
 )
 from .lighting import (
     SHADOW_METHOD_CHOICES,
@@ -56,7 +70,8 @@ from .preprocess import (
 from uniscan.storage.stage_cache import ProcessingStageCache
 
 CancelCb = Callable[[], bool]
-PROCESSING_ALGORITHM_VERSION = 4
+PROCESSING_ALGORITHM_VERSION = 5
+_BASE_DEWARP_DOCUMENT = dewarp_document
 
 
 @dataclass(slots=True)
@@ -64,6 +79,7 @@ class PageProcessingRequest:
     """All settings required to reproduce a processed page."""
 
     orientation_method: str = ORIENTATION_METHOD_NONE
+    perspective_points: tuple[tuple[float, float], ...] | None = None
     deskew_method: str = DESKEW_METHOD_NONE
     deskew_angle_degrees: float | None = None
     dewarp_method: str = DEWARP_METHOD_NONE
@@ -83,6 +99,10 @@ class PageProcessingRequest:
     lighting_diagnostics: bool = False
     stage_cache: ProcessingStageCache | None = field(default=None, repr=False)
     source_fingerprint: str | None = None
+    recipe_migration_reason: str | None = None
+    geometry_source: np.ndarray | None = field(default=None, repr=False)
+    upstream_backward_map: BackwardMap | None = field(default=None, repr=False)
+    upstream_pixels_resampled: bool = False
     cancel_cb: CancelCb | None = field(default=None, repr=False)
 
 
@@ -101,6 +121,8 @@ class PageProcessingDiagnostics:
     layout: PageLayoutDiagnostics
     lighting: LightingDiagnostics | None
     stage_durations_ms: dict[str, float]
+    geometry_resample_count: int = 0
+    recipe_migration_reason: str | None = None
     cache_hits: tuple[str, ...] = ()
 
 
@@ -374,7 +396,7 @@ def process_document_page(
     image: np.ndarray,
     request: PageProcessingRequest,
 ) -> PageProcessingResult:
-    """Run orientation, deskew, dewarp, cleanup, and layout in the canonical order."""
+    """Run orientation, dewarp, deskew, cleanup, and layout in the canonical order."""
     if image.size == 0:
         raise ValueError("Cannot process an empty page image.")
     if request.dewarp_already_applied and request.dewarp_method == DEWARP_METHOD_NONE:
@@ -402,36 +424,58 @@ def process_document_page(
         cache_hits=cache_hits,
     )
     _cancelled(request)
-
-    def deskew_stage():
-        output, estimate = deskew_document_with_diagnostics(
-            oriented,
-            method=request.deskew_method,
-            manual_angle_degrees=request.deskew_angle_degrees,
-        )
-        return output, asdict(estimate)
-
-    deskewed, deskew_payload, upstream_key = _run_stage(
-        stage="deskew",
-        image=oriented,
-        upstream_key=upstream_key,
-        options={
-            "method": request.deskew_method,
-            "manual_angle_degrees": request.deskew_angle_degrees,
-            "diagnostics_version": 3,
-        },
-        operation=deskew_stage,
-        encode_diagnostics=lambda payload: payload,
-        decode_diagnostics=_deskew_from_dict,
-        cacheable=request.deskew_method != DESKEW_METHOD_NONE,
-        request=request,
-        durations=durations,
-        cache_hits=cache_hits,
+    authoritative_source = (
+        request.geometry_source if request.geometry_source is not None else image
     )
-    deskew_angle = float(deskew_payload["angle_degrees"])
-    _cancelled(request)
+    if authoritative_source.size == 0:
+        raise ValueError("Geometry source cannot be empty.")
+    upstream_active = request.upstream_backward_map is not None
+    if request.upstream_backward_map is not None:
+        if request.upstream_backward_map.output_size != (image.shape[1], image.shape[0]):
+            raise ValueError("Upstream geometry map must match the controller input image.")
+        geometry_map = request.upstream_backward_map
+    else:
+        geometry_map = identity_backward_map((image.shape[1], image.shape[0]))
+    if orientation.angle_degrees:
+        orientation_map = right_angle_backward_map(
+            (image.shape[1], image.shape[0]),
+            orientation.angle_degrees,
+        )
+        geometry_map = compose_backward_maps(geometry_map, orientation_map)
+    geometry_preview = oriented
+    perspective_active = request.perspective_points is not None
+    if perspective_active:
+        points = rotate_points_right_angle(
+            np.asarray(request.perspective_points, dtype=np.float32).reshape(4, 2),
+            source_size=(image.shape[1], image.shape[0]),
+            angle_degrees=orientation.angle_degrees,
+        )
+        perspective_map = perspective_backward_map(oriented, points)
+        geometry_map = (
+            perspective_map
+            if not upstream_active and not orientation.angle_degrees
+            else compose_backward_maps(geometry_map, perspective_map)
+        )
+        geometry_preview = render_backward_map(
+            oriented,
+            perspective_map,
+            interpolation=cv2.INTER_LINEAR,
+        )
+        if cache is not None:
+            upstream_key = cache.stage_key(
+                upstream_key,
+                "boundary",
+                {
+                    "version": PROCESSING_ALGORITHM_VERSION,
+                    "points": points.tolist(),
+                },
+            )
+
     if request.dewarp_already_applied:
-        dewarped = deskewed
+        dewarped = geometry_preview
+        dewarp_map = identity_backward_map(
+            (geometry_preview.shape[1], geometry_preview.shape[0])
+        )
         dewarp = DewarpDiagnostics(
             method=request.dewarp_method,
             applied=True,
@@ -458,9 +502,28 @@ def process_document_page(
             from .docscanner import model_identity as docscanner_model_identity
 
             docscanner_identity = docscanner_model_identity()
+        captured_dewarp_map: dict[str, BackwardMap | None] = {}
+
+        def dewarp_stage():
+            options = {
+                "method": request.dewarp_method,
+                "uvdoc_cache_home": request.uvdoc_cache_home,
+                "auto_use_uvdoc": request.auto_dewarp_uvdoc,
+                "auto_use_uvdoc_grid": request.auto_dewarp_uvdoc_grid,
+                "model": request.dewarp_model,
+            }
+            if dewarp_document is _BASE_DEWARP_DOCUMENT:
+                output, diagnostics, backward_map = dewarp_document_with_map(
+                    geometry_preview,
+                    **options,
+                )
+                captured_dewarp_map["value"] = backward_map
+                return output, diagnostics
+            return dewarp_document(geometry_preview, **options)
+
         dewarped, dewarp, upstream_key = _run_stage(
             stage="dewarp",
-            image=deskewed,
+            image=geometry_preview,
             upstream_key=upstream_key,
             options={
                 "method": request.dewarp_method,
@@ -473,14 +536,7 @@ def process_document_page(
                     str(request.uvdoc_cache_home) if request.uvdoc_cache_home is not None else None
                 ),
             },
-            operation=lambda: dewarp_document(
-                deskewed,
-                method=request.dewarp_method,
-                uvdoc_cache_home=request.uvdoc_cache_home,
-                auto_use_uvdoc=request.auto_dewarp_uvdoc,
-                auto_use_uvdoc_grid=request.auto_dewarp_uvdoc_grid,
-                model=request.dewarp_model,
-            ),
+            operation=dewarp_stage,
             encode_diagnostics=asdict,
             decode_diagnostics=_dewarp_from_dict,
             cacheable=(request.dewarp_method != DEWARP_METHOD_NONE and cache_safe_after_dewarp),
@@ -488,6 +544,108 @@ def process_document_page(
             durations=durations,
             cache_hits=cache_hits,
         )
+        dewarp_map = captured_dewarp_map.get("value")
+        if (
+            dewarp_map is None
+            and cache is not None
+            and request.dewarp_method != DEWARP_METHOD_NONE
+            and cache_safe_after_dewarp
+        ):
+            cached_map = cache.get_backward_map(upstream_key)
+            if cached_map is not None:
+                dewarp_map = BackwardMap(*cached_map)
+        if dewarp_map is None:
+            dewarp_map = dewarp_backward_map(
+                geometry_preview,
+                method=request.dewarp_method,
+                diagnostics=dewarp,
+                model=request.dewarp_model,
+            )
+        if (
+            dewarp_map is not None
+            and cache is not None
+            and request.dewarp_method != DEWARP_METHOD_NONE
+            and cache_safe_after_dewarp
+        ):
+            cache.put_backward_map(
+                upstream_key,
+                dewarp_map.map_x,
+                dewarp_map.map_y,
+            )
+
+    _cancelled(request)
+
+    def deskew_stage():
+        output, estimate = deskew_document_with_diagnostics(
+            dewarped,
+            method=request.deskew_method,
+            manual_angle_degrees=request.deskew_angle_degrees,
+        )
+        return output, asdict(estimate)
+
+    deskewed, deskew_payload, upstream_key = _run_stage(
+        stage="deskew",
+        image=dewarped,
+        upstream_key=upstream_key,
+        options={
+            "method": request.deskew_method,
+            "manual_angle_degrees": request.deskew_angle_degrees,
+            "diagnostics_version": 4,
+        },
+        operation=deskew_stage,
+        encode_diagnostics=lambda payload: payload,
+        decode_diagnostics=_deskew_from_dict,
+        cacheable=request.deskew_method != DESKEW_METHOD_NONE and cache_safe_after_dewarp,
+        request=request,
+        durations=durations,
+        cache_hits=cache_hits,
+    )
+    deskew_angle = float(deskew_payload["angle_degrees"])
+    deskew_map = rotation_backward_map(
+        (dewarped.shape[1], dewarped.shape[0]),
+        deskew_angle,
+    )
+
+    active_geometry_count = (
+        int(upstream_active)
+        + int(perspective_active)
+        + int(dewarp.applied)
+        + int(abs(deskew_angle) >= 0.05)
+    )
+    geometry_resample_count = active_geometry_count
+    if active_geometry_count == 0:
+        geometry_output = oriented
+        geometry_resample_count = 0
+    elif active_geometry_count == 1:
+        # Each individual implementation already performs exactly one sample.
+        if perspective_active:
+            geometry_output = geometry_preview
+        elif dewarp.applied:
+            geometry_output = dewarped
+        else:
+            geometry_output = deskewed
+        geometry_resample_count = (
+            int(request.upstream_pixels_resampled) if upstream_active else 1
+        )
+    elif dewarp_map is not None:
+        composed = geometry_map
+        composed = compose_backward_maps(composed, dewarp_map)
+        composed = compose_backward_maps(composed, deskew_map)
+        if dewarp.selected_method == DEWARP_METHOD_DOCSCANNER:
+            from .docscanner import sample_backward_map
+
+            geometry_output = sample_backward_map(
+                authoritative_source,
+                composed.map_x,
+                composed.map_y,
+            )
+        else:
+            geometry_output = render_backward_map(authoritative_source, composed)
+        geometry_resample_count = 1
+    else:
+        # The optional PaddleOCR adapter currently returns pixels but no grid.
+        # Keep it functional and report the honest chained count.
+        geometry_output = deskewed
 
     _cancelled(request)
     shadow_model_identity = None
@@ -502,13 +660,13 @@ def process_document_page(
             shadow_model_identity = "docshadow:unavailable"
     lit, shadow, upstream_key = _run_stage(
         stage="lighting",
-        image=dewarped,
+        image=geometry_output,
         upstream_key=upstream_key,
         options={
             "method": request.shadow_method,
             "model_identity": shadow_model_identity,
         },
-        operation=lambda: remove_document_shadows(dewarped, method=request.shadow_method),
+        operation=lambda: remove_document_shadows(geometry_output, method=request.shadow_method),
         encode_diagnostics=asdict,
         decode_diagnostics=_shadow_from_dict,
         cacheable=(request.shadow_method != SHADOW_METHOD_NONE and cache_safe_after_dewarp),
@@ -615,6 +773,8 @@ def process_document_page(
             layout=layout,
             lighting=lighting,
             stage_durations_ms=durations,
+            geometry_resample_count=geometry_resample_count,
+            recipe_migration_reason=request.recipe_migration_reason,
             cache_hits=tuple(cache_hits),
         ),
     )

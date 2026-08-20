@@ -11,6 +11,7 @@ from uniscan.core.pipeline import (
     process_loaded_items,
     split_spread,
 )
+from uniscan.core.geometry import render_backward_map
 from uniscan.core.scanner_adapter import ScanOutput
 from uniscan.io import imwrite_unicode
 
@@ -59,6 +60,13 @@ def test_process_loaded_items_returns_page_results_with_raw() -> None:
     assert page.raw.shape == _img().shape
     assert page.detected is False
     assert page.fallback_reason is None
+    assert page.geometry_source is not None
+    assert page.geometry_map is not None
+    assert page.geometry_was_resampled is False
+    np.testing.assert_array_equal(
+        render_backward_map(page.geometry_source, page.geometry_map),
+        page.warped,
+    )
 
 
 def test_process_loaded_items_checks_cancellation_after_native_detector(monkeypatch) -> None:

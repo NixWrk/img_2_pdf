@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import numpy as np
 import cv2
@@ -10,6 +11,205 @@ import cv2
 MAX_PERSPECTIVE_IMAGE_DIMENSION = 32_766
 MAX_PERSPECTIVE_OUTPUT_PIXELS = 150_000_000
 MAX_PERSPECTIVE_ASPECT_RATIO = 100.0
+
+
+@dataclass(slots=True, frozen=True)
+class BackwardMap:
+    """Dense output-to-input coordinates for one geometric operation."""
+
+    map_x: np.ndarray
+    map_y: np.ndarray
+
+    def __post_init__(self) -> None:
+        map_x = np.asarray(self.map_x, dtype=np.float32)
+        map_y = np.asarray(self.map_y, dtype=np.float32)
+        if map_x.ndim != 2 or map_y.shape != map_x.shape or not map_x.size:
+            raise ValueError("Backward maps must be non-empty equally sized 2-D arrays.")
+        if not np.isfinite(map_x).all() or not np.isfinite(map_y).all():
+            raise ValueError("Backward maps must contain only finite coordinates.")
+        object.__setattr__(self, "map_x", np.ascontiguousarray(map_x))
+        object.__setattr__(self, "map_y", np.ascontiguousarray(map_y))
+
+    @property
+    def output_size(self) -> tuple[int, int]:
+        height, width = self.map_x.shape
+        return width, height
+
+
+def identity_backward_map(size: tuple[int, int]) -> BackwardMap:
+    """Return an exact pixel-centre identity map for ``(width, height)``."""
+    width, height = size
+    if width < 1 or height < 1:
+        raise ValueError("Backward-map dimensions must be positive.")
+    map_x, map_y = np.meshgrid(
+        np.arange(width, dtype=np.float32),
+        np.arange(height, dtype=np.float32),
+    )
+    return BackwardMap(map_x, map_y)
+
+
+def rotate_points_right_angle(
+    points: np.ndarray,
+    *,
+    source_size: tuple[int, int],
+    angle_degrees: int,
+) -> np.ndarray:
+    """Move source pixel-centre coordinates through an exact right-angle rotation."""
+    width, height = source_size
+    normalized = int(angle_degrees) % 360
+    array = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+    x = array[:, 0]
+    y = array[:, 1]
+    if normalized == 0:
+        return array.copy()
+    if normalized == 90:
+        return np.column_stack((height - 1 - y, x)).astype(np.float32)
+    if normalized == 180:
+        return np.column_stack((width - 1 - x, height - 1 - y)).astype(np.float32)
+    if normalized == 270:
+        return np.column_stack((y, width - 1 - x)).astype(np.float32)
+    raise ValueError("Point rotation angle must be a multiple of 90 degrees.")
+
+
+def right_angle_backward_map(
+    size: tuple[int, int],
+    angle_degrees: int,
+) -> BackwardMap:
+    """Map an exact right-angle rotated image back to its input coordinates."""
+    width, height = size
+    normalized = int(angle_degrees) % 360
+    if normalized == 0:
+        return identity_backward_map(size)
+    if normalized in {90, 270}:
+        output_width, output_height = height, width
+    elif normalized == 180:
+        output_width, output_height = width, height
+    else:
+        raise ValueError("Right-angle map requires a multiple of 90 degrees.")
+    output_x, output_y = np.meshgrid(
+        np.arange(output_width, dtype=np.float32),
+        np.arange(output_height, dtype=np.float32),
+    )
+    if normalized == 90:
+        return BackwardMap(output_y, height - 1 - output_x)
+    if normalized == 180:
+        return BackwardMap(width - 1 - output_x, height - 1 - output_y)
+    return BackwardMap(width - 1 - output_y, output_x)
+
+
+def slice_backward_map(
+    backward_map: BackwardMap,
+    *,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+) -> BackwardMap:
+    """Slice an intermediate image and its output-to-source map identically."""
+    width, height = backward_map.output_size
+    if not (0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height):
+        raise ValueError("Backward-map slice must stay inside its output bounds.")
+    return BackwardMap(
+        backward_map.map_x[y0:y1, x0:x1],
+        backward_map.map_y[y0:y1, x0:x1],
+    )
+
+
+def perspective_backward_map(image: np.ndarray, points: np.ndarray) -> BackwardMap:
+    """Plan the same four-corner crop as ``warpPerspective`` without sampling pixels."""
+    quad, destination, output_size = prepare_perspective_warp(image, points)
+    output_to_source = cv2.getPerspectiveTransform(destination, quad)
+    width, height = output_size
+    output_x, output_y = np.meshgrid(
+        np.arange(width, dtype=np.float32),
+        np.arange(height, dtype=np.float32),
+    )
+    homogeneous = output_to_source @ np.stack(
+        (output_x.reshape(-1), output_y.reshape(-1), np.ones(width * height)),
+        axis=0,
+    )
+    denominator = homogeneous[2]
+    if np.any(np.abs(denominator) < 1e-8):
+        raise ValueError("Perspective transform has points at infinity.")
+    map_x = (homogeneous[0] / denominator).reshape(height, width)
+    map_y = (homogeneous[1] / denominator).reshape(height, width)
+    return BackwardMap(map_x, map_y)
+
+
+def rotation_backward_map(
+    size: tuple[int, int],
+    angle_degrees: float,
+) -> BackwardMap:
+    """Map the expanded deskew output back to the unrotated input."""
+    width, height = size
+    if width < 1 or height < 1 or not math.isfinite(angle_degrees):
+        raise ValueError("Rotation map requires positive dimensions and a finite angle.")
+    if abs(angle_degrees) < 0.05:
+        return identity_backward_map(size)
+    center = (width / 2.0, height / 2.0)
+    input_to_output = cv2.getRotationMatrix2D(center, float(angle_degrees), 1.0)
+    cosine = abs(float(input_to_output[0, 0]))
+    sine = abs(float(input_to_output[0, 1]))
+    output_width = max(1, int(np.ceil(width * cosine + height * sine)))
+    output_height = max(1, int(np.ceil(height * cosine + width * sine)))
+    input_to_output[0, 2] += output_width / 2.0 - center[0]
+    input_to_output[1, 2] += output_height / 2.0 - center[1]
+    output_to_input = cv2.invertAffineTransform(input_to_output)
+    output_x, output_y = np.meshgrid(
+        np.arange(output_width, dtype=np.float32),
+        np.arange(output_height, dtype=np.float32),
+    )
+    map_x = (
+        output_to_input[0, 0] * output_x
+        + output_to_input[0, 1] * output_y
+        + output_to_input[0, 2]
+    )
+    map_y = (
+        output_to_input[1, 0] * output_x
+        + output_to_input[1, 1] * output_y
+        + output_to_input[1, 2]
+    )
+    return BackwardMap(map_x, map_y)
+
+
+def compose_backward_maps(
+    input_map: BackwardMap,
+    output_to_input: BackwardMap,
+) -> BackwardMap:
+    """Compose ``intermediate -> source`` with ``output -> intermediate``."""
+    map_x = cv2.remap(
+        input_map.map_x,
+        output_to_input.map_x,
+        output_to_input.map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+    map_y = cv2.remap(
+        input_map.map_y,
+        output_to_input.map_x,
+        output_to_input.map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+    return BackwardMap(map_x, map_y)
+
+
+def render_backward_map(
+    source: np.ndarray,
+    backward_map: BackwardMap,
+    *,
+    interpolation: int = cv2.INTER_CUBIC,
+) -> np.ndarray:
+    """Sample authoritative pixels once through an already composed map."""
+    if not isinstance(source, np.ndarray) or source.size == 0:
+        raise ValueError("Backward-map source must be a non-empty image.")
+    return cv2.remap(
+        source,
+        backward_map.map_x,
+        backward_map.map_y,
+        interpolation=interpolation,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
 
 
 def order_quad_points(points: np.ndarray) -> np.ndarray:

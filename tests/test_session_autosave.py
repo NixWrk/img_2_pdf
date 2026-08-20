@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from uniscan.core.dewarp import DewarpModel
 from uniscan.session import (
     AutosaveSessionLock,
     CROP_STATE_APPLIED,
@@ -373,7 +374,7 @@ def test_manifest_v2_round_trips_committed_recipe_and_v1_migrates(tmp_path) -> N
     committed = restored.entries[0].committed_processing
     assert committed is not None
     assert committed.recipe.page_dpi == 240
-    assert committed.recipe.schema_version == 3
+    assert committed.recipe.schema_version == 4
     assert committed.recipe.deskew_method == "manual"
     assert committed.recipe.deskew_angle_degrees == pytest.approx(-1.25)
     assert committed.recipe.postprocess_name == "Grayscale"
@@ -400,6 +401,40 @@ def test_processing_recipe_v1_defaults_new_model_stages_safely() -> None:
     assert restored.auto_dewarp_uvdoc_grid is True
     assert restored.shadow_method == "none"
     assert restored.deskew_angle_degrees is None
+
+
+def test_processing_recipe_v3_migrates_stage_order_with_explicit_reason() -> None:
+    payload = ProcessingRecipe.from_request(PageProcessingRequest()).to_payload()
+    payload["schema_version"] = 3
+    payload.pop("perspective_points")
+    payload.pop("stage_order")
+    payload.pop("migration_reason")
+
+    recipe = ProcessingRecipe.from_payload(payload)
+    request = recipe.to_request()
+
+    assert recipe.schema_version == 4
+    assert recipe.stage_order == "orientation,dewarp,deskew,lighting,cleanup,layout"
+    assert recipe.migration_reason == "migrated_legacy_deskew_before_dewarp_order"
+    assert request.recipe_migration_reason == recipe.migration_reason
+
+
+def test_recipe_round_trips_page_model_plus_user_curves() -> None:
+    points = ((0.0, 0.0), (0.5, 0.02), (1.0, 0.0))
+    model = DewarpModel(
+        method="textline",
+        control_points=points,
+        source="user",
+        control_curves=((0.2, points), (0.5, points), (0.8, points)),
+    )
+    recipe = ProcessingRecipe.from_request(
+        PageProcessingRequest(dewarp_method="uvdoc", dewarp_model=model)
+    )
+
+    restored = ProcessingRecipe.from_payload(recipe.to_payload()).to_request()
+
+    assert restored.dewarp_method == "uvdoc"
+    assert restored.dewarp_model == model
 
 
 def test_invalid_optional_recipe_is_dropped_without_quarantining_page(tmp_path) -> None:

@@ -2,7 +2,21 @@ import cv2
 import numpy as np
 import pytest
 
-from uniscan.core.dewarp import DewarpDiagnostics
+from uniscan.core.dewarp import (
+    DewarpDiagnostics,
+    DewarpModel,
+    apply_dewarp_model,
+    dewarp_model_backward_map,
+)
+from uniscan.core.geometry import (
+    compose_backward_maps,
+    perspective_backward_map,
+    render_backward_map,
+    rotation_backward_map,
+    warp_perspective_from_points,
+    identity_backward_map,
+)
+from uniscan.core.preprocess import deskew_document_with_diagnostics
 from uniscan.core.postprocess import grayscale
 from uniscan.core.preprocess import PreprocessSettings, apply_enhancements
 from uniscan.core.processing import (
@@ -66,6 +80,118 @@ def test_processing_controller_runs_canonical_stages() -> None:
         "lighting",
         "lighting_diagnostics",
     }
+
+
+def test_processing_runs_dewarp_before_deskew(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_dewarp(source, **_kwargs):
+        calls.append("dewarp")
+        return source.copy(), DewarpDiagnostics(method="textline", applied=False)
+
+    def fake_deskew(source, **_kwargs):
+        from uniscan.core.preprocess import SkewEstimate
+
+        calls.append("deskew")
+        return source.copy(), SkewEstimate(0.0, "hybrid", 1.0, reason="test")
+
+    monkeypatch.setattr("uniscan.core.processing.dewarp_document", fake_dewarp)
+    monkeypatch.setattr(
+        "uniscan.core.processing.deskew_document_with_diagnostics",
+        fake_deskew,
+    )
+
+    process_document_page(
+        np.full((80, 100, 3), 220, dtype=np.uint8),
+        PageProcessingRequest(dewarp_method="textline", deskew_method="hybrid"),
+    )
+
+    assert calls == ["dewarp", "deskew"]
+
+
+def test_crop_dewarp_and_deskew_render_authoritative_pixels_once() -> None:
+    size = 480
+    checker = ((np.indices((size, size)).sum(axis=0) // 3) % 2 * 255).astype(np.uint8)
+    source = cv2.cvtColor(checker, cv2.COLOR_GRAY2BGR)
+    points = ((18.0, 12.0), (461.0, 21.0), (452.0, 466.0), (25.0, 457.0))
+    model = DewarpModel(
+        method="textline",
+        control_points=((0.0, 0.0), (0.5, 0.018), (1.0, 0.0)),
+        source="user",
+    )
+    request = PageProcessingRequest(
+        perspective_points=points,
+        dewarp_method="textline",
+        dewarp_model=model,
+        deskew_method="manual",
+        deskew_angle_degrees=1.6,
+    )
+
+    composed = process_document_page(source, request)
+    reference_map = perspective_backward_map(source, np.asarray(points, dtype=np.float32))
+    reference_map = compose_backward_maps(
+        reference_map,
+        dewarp_model_backward_map(reference_map.output_size, model),
+    )
+    reference_map = compose_backward_maps(
+        reference_map,
+        rotation_backward_map(reference_map.output_size, 1.6),
+    )
+    single_pass_reference = render_backward_map(source, reference_map)
+    cropped = warp_perspective_from_points(source, np.asarray(points, dtype=np.float32))
+    dewarped = apply_dewarp_model(cropped, model)
+    chained, _diagnostics = deskew_document_with_diagnostics(
+        dewarped,
+        method="manual",
+        manual_angle_degrees=1.6,
+    )
+
+    def sharpness(image: np.ndarray) -> float:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+    assert composed.diagnostics.geometry_resample_count == 1
+    assert composed.image.shape == chained.shape
+    np.testing.assert_array_equal(composed.image, single_pass_reference)
+    assert sharpness(composed.image) >= sharpness(chained) * 1.15
+
+
+def test_upstream_boundary_map_composes_with_controller_geometry() -> None:
+    source = np.zeros((180, 220, 3), dtype=np.uint8)
+    for y in range(20, 165, 12):
+        cv2.line(source, (18, y), (202, y), (255, 255, 255), 2)
+    points = np.float32([[12, 8], [210, 15], [202, 173], [18, 168]])
+    upstream = perspective_backward_map(source, points)
+    preview = render_backward_map(source, upstream, interpolation=cv2.INTER_LINEAR)
+    model = DewarpModel(
+        method="textline",
+        control_points=((0.0, 0.0), (0.5, 0.015), (1.0, 0.0)),
+        source="user",
+    )
+
+    result = process_document_page(
+        preview,
+        PageProcessingRequest(
+            geometry_source=source,
+            upstream_backward_map=upstream,
+            dewarp_method="textline",
+            dewarp_model=model,
+            deskew_method="manual",
+            deskew_angle_degrees=-1.2,
+        ),
+    )
+
+    expected_map = compose_backward_maps(
+        upstream,
+        dewarp_model_backward_map(upstream.output_size, model),
+    )
+    expected_map = compose_backward_maps(
+        expected_map,
+        rotation_backward_map(expected_map.output_size, -1.2),
+    )
+    expected = render_backward_map(source, expected_map)
+    assert result.diagnostics.geometry_resample_count == 1
+    np.testing.assert_array_equal(result.image, expected)
 
 
 def test_processing_controller_honors_preapplied_dewarp(monkeypatch) -> None:
@@ -236,6 +362,45 @@ def test_processing_cache_reuses_upstream_and_invalidates_downstream(tmp_path) -
     )
     layout_changed = process_document_page(image, layout_only_request)
     assert layout_changed.diagnostics.cache_hits == ("orientation", "cleanup")
+
+
+def test_processing_cache_reuses_dewarp_map_without_repeating_inference(
+    tmp_path, monkeypatch
+) -> None:
+    cache = ProcessingStageCache(tmp_path / "stages", max_bytes=64 * 1024 * 1024)
+    image = np.full((100, 120, 3), 220, dtype=np.uint8)
+    calls = 0
+
+    def fake_with_map(source, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return (
+            source.copy(),
+            DewarpDiagnostics(
+                method="textline",
+                applied=True,
+                selected_method="textline",
+            ),
+            identity_backward_map((source.shape[1], source.shape[0])),
+        )
+
+    monkeypatch.setattr(
+        "uniscan.core.processing.dewarp_document_with_map",
+        fake_with_map,
+    )
+    request = PageProcessingRequest(
+        dewarp_method="textline",
+        deskew_method="manual",
+        deskew_angle_degrees=1.0,
+        stage_cache=cache,
+    )
+
+    first = process_document_page(image, request)
+    second = process_document_page(image, request)
+
+    assert calls == 1
+    assert second.diagnostics.cache_hits == ("dewarp", "deskew")
+    np.testing.assert_array_equal(second.image, first.image)
 
 
 def test_processing_cache_does_not_reuse_previous_algorithm_version(tmp_path) -> None:

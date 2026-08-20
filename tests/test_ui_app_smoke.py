@@ -359,7 +359,9 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert resized_dewarp_preview_bounds is not None
         assert resized_dewarp_bounds[2] - resized_dewarp_bounds[0] > initial_dewarp_size[0]
         assert resized_dewarp_bounds[3] - resized_dewarp_bounds[1] > initial_dewarp_size[1]
+        preview_pixels = app.dewarp_editor_state["last_corrected"].copy()
         app.dewarp_apply_points_button.invoke()
+        np.testing.assert_array_equal(second_entry.current_image, preview_pixels)
         assert second_entry.dewarp_control_curves is not None
         assert len(second_entry.dewarp_control_curves) == 3
         saved_curves = second_entry.dewarp_control_curves
@@ -628,6 +630,7 @@ def test_split_workflow_previews_two_pages_before_mutating_session(tmp_path, mon
                 app.page_preview_after_image is not None
                 and "2 output pages" in app.page_preview_after_title.cget("text")
             ),
+            timeout=15.0,
         )
         assert app.page_preview_before_image.shape[:2] == spread.shape[:2]
         assert app.page_preview_after_image.shape[1] > spread.shape[1]
