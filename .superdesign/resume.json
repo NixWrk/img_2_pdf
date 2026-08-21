@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "workspace-loaded": {
+      "targetKind": "existing-ui",
+      "projectId": "8652b276-d9ea-4a57-a000-c695928ab831",
+      "baselineDraftId": "b8434f71-bd94-44c9-880c-22e028983fc3",
+      "activeDraftId": "b8434f71-bd94-44c9-880c-22e028983fc3",
+      "designSystemPath": ".superdesign/design-system.md",
+      "referenceIds": [
+        "d15e7a11-84d7-47a5-bcc4-c60bf93054ea",
+        "7edb9fe6-5108-40ed-bd57-5bc16c93ed01"
+      ],
+      "contextFiles": [
+        ".superdesign/design-system.md",
+        ".superdesign/init/theme.md",
+        ".superdesign/init/layouts.md",
+        ".superdesign/init/components.md",
+        ".superdesign/init/routes.md",
+        ".superdesign/init/pages.md",
+        ".superdesign/init/extractable-components.md"
+      ],
+      "fingerprints": {
+        ".superdesign/design-system.md": "9ebe5480e03d6935a33c544ae016f20520c46eb57f4f40a56c4c9c30144f17f2",
+        ".superdesign/init/theme.md": "84103e40557ba50dae633db3fc9550866e54847bbd8b0a84144e24dd2f457489",
+        ".superdesign/init/layouts.md": "d35282c3fdce00f196a86b63339676ea3535bafc53998dcf0afb20fd8a505cd3",
+        ".superdesign/init/components.md": "00e807caa7bd054d55426836525b2a2f659604248349f95144682ee5e00e6cd2",
+        ".superdesign/init/routes.md": "3d51fe6fe4de7fd2170f7925dc7c0d2c671b802bbf88cff11545e027926842f6",
+        ".superdesign/init/pages.md": "7b3b391a85c3f4ea314e2b3497a8e032ee2fa35452b4c0b6f750dc743c9f8b97",
+        ".superdesign/init/extractable-components.md": "49147771829c40ec40e9065a30050f80e222979d8f6f6dd91d9d640fb69028db"
+      },
+      "components": [
+        {
+          "name": "UniScanAppShell",
+          "id": "0f24bee1-9cbe-4e77-87cc-f075e8168a90",
+          "sourcePath": ".superdesign/components/uniscan-app-shell.html"
+        }
+      ],
+      "drafts": {
+        "b8434f71-bd94-44c9-880c-22e028983fc3": {
+          "title": "UniScan Workspace Layout",
+          "visualDirection": "pixel-perfect current Workspace baseline from the audited HEAD f6ab111 screenshot",
+          "currentVersion": 2
+        }
+      },
+      "updatedAt": "2026-08-21T12:31:50.7941370+03:00"
+    }
+  }
+}
