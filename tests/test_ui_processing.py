@@ -13,6 +13,7 @@ from uniscan.diagnostics import DiagnosticCheck, DiagnosticReport
 from uniscan.io.loaders import imwrite_unicode
 from uniscan.session import (
     CROP_STATE_APPLIED,
+    CROP_STATE_NONE,
     CROP_STATE_PROPOSED,
     CaptureSession,
     CommittedPageProcessing,
@@ -1000,6 +1001,62 @@ def test_quick_export_preserves_scope_and_dpi_while_requesting_path() -> None:
     app.quick_export_pdf()
 
     assert observed == [("Selected pages", 420, "")]
+
+
+def test_export_preflight_blocks_review_and_confirms_safe_original(monkeypatch) -> None:
+    app = object.__new__(UnifiedScanApp)
+    statuses: list[str] = []
+    app._set_status = statuses.append
+    warnings: list[tuple[str, str]] = []
+    confirmations: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "uniscan.ui.app.messagebox.showwarning",
+        lambda title, message: warnings.append((title, message)),
+    )
+    monkeypatch.setattr(
+        "uniscan.ui.app.messagebox.askyesno",
+        lambda title, message: confirmations.append((title, message)) or False,
+    )
+
+    blocked = SimpleNamespace(
+        name="needs review",
+        entry_id="blocked",
+        crop_state=CROP_STATE_NONE,
+        detected_contour=None,
+        needs_review=False,
+        committed_processing=None,
+    )
+    assert app._confirm_export_readiness([blocked]) is False
+    assert warnings[-1][0] == "Export blocked"
+    assert confirmations == []
+
+    safe_original = SimpleNamespace(
+        name="safe original",
+        entry_id="warning",
+        crop_state=CROP_STATE_APPLIED,
+        detected_contour=None,
+        needs_review=False,
+        committed_processing=None,
+    )
+    assert app._confirm_export_readiness([safe_original]) is False
+    assert confirmations[-1][0] == "Export readiness"
+    assert statuses[-1] == "Export cancelled."
+
+
+def test_pending_split_preview_is_an_export_candidate() -> None:
+    app = object.__new__(UnifiedScanApp)
+    entry = SimpleNamespace(entry_id="page")
+    app.review_preview_context = (
+        3,
+        "page",
+        PageProcessingRequest(),
+        0.5,
+    )
+
+    assert app._pending_export_candidate_ids([entry]) == {"page"}
+
+    app.review_preview_context = None
+    assert app._pending_export_candidate_ids([entry]) == set()
 
 
 def test_burst_releases_existing_handle_and_commits_staged_raw_frames(

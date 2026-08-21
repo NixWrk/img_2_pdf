@@ -65,6 +65,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.page_layout_var.get() == "Keep source page"
         assert app.preview_mode_var.get() == "Preview"
         assert app.crop_warning_var.get() == ""
+        assert app.export_readiness_var.get() == "No pages to export"
         assert app.page_preview_after_frame.winfo_manager() == "grid"
         assert app.page_preview_before_frame.winfo_manager() == ""
         assert app.tabs._name_list == [app.tab_review_name, app.tab_camera_name]
@@ -110,8 +111,26 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         app.update()
         assert app.page_count_var.get() == "2 pages"
         assert app.crop_warning_var.get() == "⚠ 2 pages need crop review"
+        assert app.export_readiness_var.get() == "Export: 0 ready · 0 warnings · 2 blocked"
         assert app.toolbar_export_pdf_button.cget("state") == "normal"
         assert app.toolbar_export_options_button.cget("state") == "normal"
+        readiness_warnings: list[tuple[str, str]] = []
+        save_requests: list[bool] = []
+        monkeypatch.setattr(
+            app_module.messagebox,
+            "showwarning",
+            lambda title, message: readiness_warnings.append((title, message)),
+        )
+        monkeypatch.setattr(
+            app_module.filedialog,
+            "asksaveasfilename",
+            lambda **_kwargs: save_requests.append(True) or "",
+        )
+        app.export_to_pdf()
+        assert readiness_warnings and readiness_warnings[-1][0] == "Export blocked"
+        assert "2 blocked" in readiness_warnings[-1][1]
+        assert save_requests == []
+        assert app.status_var.get() == "Export blocked: resolve page readiness issues."
         export_calls: list[tuple[str, str, int | str]] = []
         monkeypatch.setattr(
             app,

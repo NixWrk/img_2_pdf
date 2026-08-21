@@ -95,6 +95,7 @@ from uniscan.session import (
 )
 from uniscan.storage import ProcessingStageCache
 from uniscan.ui.camera_health import camera_health_state
+from uniscan.ui.export_preflight import ExportPreflight, build_export_preflight
 from uniscan.ui.import_sources import (
     clipboard_file_paths,
     clipboard_image_to_bgr,
@@ -667,6 +668,7 @@ class UnifiedScanApp(ctk.CTk):
         self.lightweight_preview_var = tk.BooleanVar(value=True)
         self.preview_mode_var = tk.StringVar(value="Preview")
         self.crop_warning_var = tk.StringVar(value="")
+        self.export_readiness_var = tk.StringVar(value="No pages to export")
         self.postprocess_var = tk.StringVar(value="None")
         self.lens_mode_var = tk.StringVar(value="Document")
         self.preprocess_preset_var = tk.StringVar(value="Document")
@@ -826,6 +828,12 @@ class UnifiedScanApp(ctk.CTk):
             command=self.open_export_dialog,
         )
         self.toolbar_export_options_button.pack(side=ctk.RIGHT, padx=4, pady=8)
+        self.export_readiness_label = ctk.CTkLabel(
+            toolbar,
+            textvariable=self.export_readiness_var,
+            text_color=("#60646c", "#a0a4ab"),
+        )
+        self.export_readiness_label.pack(side=ctk.RIGHT, padx=8, pady=8)
 
         self.status_frame = ctk.CTkFrame(container)
         self.status_frame.pack(side=ctk.BOTTOM, fill=ctk.X, padx=12, pady=(0, 12))
@@ -3630,6 +3638,7 @@ class UnifiedScanApp(ctk.CTk):
         page_count = len(self.session.entries)
         self.page_count_var.set(f"{page_count} page" if page_count == 1 else f"{page_count} pages")
         self._update_crop_warning()
+        self._update_export_readiness()
         export_state = tk.NORMAL if page_count else tk.DISABLED
         for button_name in (
             "toolbar_export_pdf_button",
@@ -3675,6 +3684,41 @@ class UnifiedScanApp(ctk.CTk):
                 )
         elif label.winfo_manager():
             label.pack_forget()
+
+    def _update_export_readiness(self) -> None:
+        readiness_var = self.__dict__.get("export_readiness_var")
+        if readiness_var is None:
+            return
+        entries = list(self.session.entries)
+        if not entries:
+            text = "No pages to export"
+            kind = "empty"
+        else:
+            preflight = self._export_preflight(entries)
+            warning_label = "warning" if preflight.warning_count == 1 else "warnings"
+            text = (
+                f"Export: {preflight.ready_count} ready · "
+                f"{preflight.warning_count} {warning_label} · "
+                f"{preflight.blocked_count} blocked"
+            )
+            kind = (
+                "blocked"
+                if preflight.blocked_count
+                else "warning"
+                if preflight.warning_count
+                else "ready"
+            )
+        readiness_var.set(text)
+        label = self.__dict__.get("export_readiness_label")
+        if label is None:
+            return
+        colors = {
+            "empty": ("#60646c", "#a0a4ab"),
+            "ready": ("#157347", "#59d98e"),
+            "warning": ("#8a5a00", "#d6a84b"),
+            "blocked": ("#b42318", "#ff7b72"),
+        }
+        label.configure(text_color=colors[kind])
 
     def _sync_page_selection_to_session(self) -> None:
         selected = set(self.page_listbox.curselection())
@@ -3959,6 +4003,7 @@ class UnifiedScanApp(ctk.CTk):
                 return
             generation = self.review_preview_generation
             self.review_preview_context = (generation, entry.entry_id, request, split_ratio)
+            self._update_export_readiness()
             cancel_event = self.review_preview_cancel_event
             mode_label = "fast preview (approximate)" if fast_preview else "full-resolution"
             self._set_preview_message(
@@ -4023,6 +4068,7 @@ class UnifiedScanApp(ctk.CTk):
     def _cancel_review_page_preview(self) -> None:
         self.review_preview_generation = getattr(self, "review_preview_generation", 0) + 1
         self.review_preview_context = None
+        self._update_export_readiness()
         event = getattr(self, "review_preview_cancel_event", None)
         if event is not None:
             event.set()
@@ -6633,6 +6679,50 @@ class UnifiedScanApp(ctk.CTk):
         ):
             snapshot_dir.cleanup()
 
+    def _pending_export_candidate_ids(self, entries: Iterable[object]) -> set[str]:
+        context = self.__dict__.get("review_preview_context")
+        if context is None:
+            return set()
+        _generation, entry_id, request, split_ratio = context
+        entry = next(
+            (item for item in entries if getattr(item, "entry_id", None) == entry_id),
+            None,
+        )
+        if entry is None:
+            return set()
+        if (
+            split_ratio is not None
+            or _entry_has_crop_proposal(entry)
+            or not _preview_matches_committed(entry, request)
+        ):
+            return {entry_id}
+        return set()
+
+    def _export_preflight(self, entries: Iterable[object]) -> ExportPreflight:
+        pages = tuple(entries)
+        return build_export_preflight(
+            pages,
+            candidate_entry_ids=self._pending_export_candidate_ids(pages),
+        )
+
+    def _confirm_export_readiness(self, entries: Iterable[object]) -> bool:
+        preflight = self._export_preflight(entries)
+        if preflight.blocked_count:
+            messagebox.showwarning(
+                "Export blocked",
+                preflight.summary()
+                + "\n\nApply the candidate and resolve crop review before exporting.",
+            )
+            self._set_status("Export blocked: resolve page readiness issues.")
+            return False
+        if preflight.warning_count and not messagebox.askyesno(
+            "Export readiness",
+            preflight.summary() + "\n\nContinue exporting the current stored pixels?",
+        ):
+            self._set_status("Export cancelled.")
+            return False
+        return True
+
     def _entries_for_export(self):
         if self.export_scope_var.get() == "Selected pages":
             self._sync_page_selection_to_session()
@@ -6717,9 +6807,11 @@ class UnifiedScanApp(ctk.CTk):
 
     def export_to_pdf(self) -> None:
         try:
-            entries = self._entries_for_export()
+            entries = list(self._entries_for_export())
             if not entries:
                 raise RuntimeError("No pages available for export.")
+            if not self._confirm_export_readiness(entries):
+                return
             path_raw = self.export_pdf_path_var.get().strip()
             if not path_raw:
                 chosen = filedialog.asksaveasfilename(
@@ -6734,7 +6826,6 @@ class UnifiedScanApp(ctk.CTk):
             dpi = int(self.export_pdf_dpi_var.get())
             if dpi < 72:
                 raise RuntimeError("PDF DPI must be >= 72.")
-            entries = list(entries)
             self._validate_pdf_layout_dpi(entries, dpi)
             snapshot_dir, snapshots = self._snapshot_entries_for_export(entries)
 
@@ -6775,9 +6866,11 @@ class UnifiedScanApp(ctk.CTk):
 
     def export_to_files(self) -> None:
         try:
-            entries = self._entries_for_export()
+            entries = list(self._entries_for_export())
             if not entries:
                 raise RuntimeError("No pages available for export.")
+            if not self._confirm_export_readiness(entries):
+                return
             path_raw = self.export_dir_var.get().strip()
             if not path_raw:
                 chosen = filedialog.askdirectory(title="Select output directory")
@@ -6787,7 +6880,6 @@ class UnifiedScanApp(ctk.CTk):
                 self.export_dir_var.set(chosen)
 
             fmt = self.export_format_var.get()
-            entries = list(entries)
             snapshot_dir, snapshots = self._snapshot_entries_for_export(entries)
 
             def worker(emit, is_cancelled):
