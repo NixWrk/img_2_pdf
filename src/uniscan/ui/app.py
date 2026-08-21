@@ -103,6 +103,8 @@ from uniscan.ui.import_sources import (
 )
 from uniscan.ui.live_detect import DEFAULT_LIVE_BACKEND, LIVE_BACKEND_CHOICES, LiveContourDetector
 from uniscan.ui.overlays import draw_quad_overlay, scale_contour
+from uniscan.ui.pipeline_strip import render_pipeline_strip
+from uniscan.ui.review_pipeline import build_pipeline_cards
 
 # Poll faster than the camera delivers: a tick without a new frame costs
 # almost nothing, while Tk's ~15 ms timer granularity on Windows would
@@ -624,6 +626,9 @@ class UnifiedScanApp(ctk.CTk):
         self.review_preview_context: tuple[int, str, PageProcessingRequest, float | None] | None = (
             None
         )
+        self.review_preview_diagnostics = None
+        self.review_preview_error: str | None = None
+        self.pipeline_strip: ctk.CTkFrame | None = None
         self.review_processing_window: ctk.CTkFrame | None = None
         self.export_dialog_window: ctk.CTkToplevel | None = None
         self.inline_editor_host: ctk.CTkFrame | None = None
@@ -1201,7 +1206,8 @@ class UnifiedScanApp(ctk.CTk):
         preview = ctk.CTkFrame(tab)
         preview.grid(row=0, column=1, sticky="nsew", padx=6, pady=10)
         self.workspace_preview_frame = preview
-        preview.grid_rowconfigure(1, weight=1)
+        preview.grid_rowconfigure(1, weight=0)
+        preview.grid_rowconfigure(2, weight=1)
         preview.grid_columnconfigure(0, weight=1)
         preview.grid_columnconfigure(1, weight=1)
 
@@ -1219,6 +1225,14 @@ class UnifiedScanApp(ctk.CTk):
             command=self._on_preview_mode_change,
         )
         self.preview_mode_selector.pack(side=ctk.RIGHT)
+        self.pipeline_strip = ctk.CTkScrollableFrame(
+            preview,
+            height=110,
+            orientation="horizontal",
+            label_text="Pipeline",
+        )
+        self.pipeline_strip.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(6, 0))
+        render_pipeline_strip(self.pipeline_strip, ())
 
         self.page_preview_before_frame = ctk.CTkFrame(preview)
         self.page_preview_before_frame.grid_rowconfigure(1, weight=1)
@@ -3660,6 +3674,48 @@ class UnifiedScanApp(ctk.CTk):
         self._sync_controls_from_single_committed_page()
         self.update_page_preview()
 
+    def _refresh_pipeline_strip(self) -> None:
+        frame = self.__dict__.get("pipeline_strip")
+        if frame is None:
+            return
+        selected = self.page_listbox.curselection()
+        if len(selected) != 1:
+            placeholder = (
+                "Select one page to inspect the pipeline"
+                if not selected
+                else "Select exactly one page to inspect the pipeline"
+            )
+            render_pipeline_strip(frame, (), placeholder=placeholder)
+            return
+        index = selected[0]
+        if index < 0 or index >= len(self.session.entries):
+            render_pipeline_strip(frame, (), placeholder="Select one page to inspect the pipeline")
+            return
+        entry = self.session.entries[index]
+        pending_request = None
+        pending_diagnostics = None
+        pending_error = None
+        context = self.__dict__.get("review_preview_context")
+        if context is not None and context[0] == self.review_preview_generation:
+            _, entry_id, request, split_ratio = context
+            if entry_id == entry.entry_id:
+                is_candidate = (
+                    split_ratio is not None
+                    or _entry_has_crop_proposal(entry)
+                    or not _preview_matches_committed(entry, request)
+                )
+                if is_candidate:
+                    pending_request = request
+                    pending_diagnostics = self.__dict__.get("review_preview_diagnostics")
+                    pending_error = self.__dict__.get("review_preview_error")
+        cards = build_pipeline_cards(
+            entry,
+            pending_request=pending_request,
+            pending_diagnostics=pending_diagnostics,
+            pending_error=pending_error,
+        )
+        render_pipeline_strip(frame, cards)
+
     def _update_crop_warning(self) -> None:
         entries = list(self.session.entries)
         review_count = sum(
@@ -3893,14 +3949,14 @@ class UnifiedScanApp(ctk.CTk):
         self.page_preview_after_frame.grid_forget()
         if mode == "Compare":
             self.page_preview_before_frame.grid(
-                row=1,
+                row=2,
                 column=0,
                 sticky="nsew",
                 padx=(8, 4),
                 pady=8,
             )
             self.page_preview_after_frame.grid(
-                row=1,
+                row=2,
                 column=1,
                 sticky="nsew",
                 padx=(4, 8),
@@ -3908,7 +3964,7 @@ class UnifiedScanApp(ctk.CTk):
             )
         elif mode == "Original":
             self.page_preview_before_frame.grid(
-                row=1,
+                row=2,
                 column=0,
                 columnspan=2,
                 sticky="nsew",
@@ -3917,7 +3973,7 @@ class UnifiedScanApp(ctk.CTk):
             )
         else:
             self.page_preview_after_frame.grid(
-                row=1,
+                row=2,
                 column=0,
                 columnspan=2,
                 sticky="nsew",
@@ -3926,7 +3982,7 @@ class UnifiedScanApp(ctk.CTk):
             )
 
     def update_page_preview(self) -> None:
-        self._cancel_review_page_preview()
+        self._cancel_review_page_preview(refresh_pipeline=False)
         selected = self.page_listbox.curselection()
         if len(selected) != 1:
             self._clear_preview_label(self.page_preview_before_label)
@@ -3937,6 +3993,7 @@ class UnifiedScanApp(ctk.CTk):
             self.page_preview_after_image = None
             self.page_preview_after_title.configure(text="Preview")
             self._set_preview_result_state("No candidate")
+            self._refresh_pipeline_strip()
             return
 
         index = selected[0]
@@ -3949,6 +4006,7 @@ class UnifiedScanApp(ctk.CTk):
             self.page_preview_after_image = None
             self.page_preview_after_title.configure(text="Preview")
             self._set_preview_result_state("No candidate")
+            self._refresh_pipeline_strip()
             return
 
         entry = self.session.entries[index]
@@ -3975,6 +4033,7 @@ class UnifiedScanApp(ctk.CTk):
             self.page_preview_after_image = None
             self._set_preview_result_state("Preview failed", kind="error")
             self._set_status(message)
+            self._refresh_pipeline_strip()
             return
 
         if mode in {"Original", "Compare"}:
@@ -4000,9 +4059,13 @@ class UnifiedScanApp(ctk.CTk):
                 self.page_preview_after_photo = None
                 self._set_preview_result_state("Preview failed", kind="error")
                 self._set_status(message)
+                self._refresh_pipeline_strip()
                 return
             generation = self.review_preview_generation
             self.review_preview_context = (generation, entry.entry_id, request, split_ratio)
+            self.review_preview_diagnostics = None
+            self.review_preview_error = None
+            self._refresh_pipeline_strip()
             self._update_export_readiness()
             cancel_event = self.review_preview_cancel_event
             mode_label = "fast preview (approximate)" if fast_preview else "full-resolution"
@@ -4024,6 +4087,7 @@ class UnifiedScanApp(ctk.CTk):
         else:
             self.page_preview_after_photo = None
             self.page_preview_after_image = None
+            self._refresh_pipeline_strip()
 
     def _on_review_preview_resize(self, _event=None) -> None:
         """Resize cached preview pixels after layout settles, without reprocessing the page."""
@@ -4065,9 +4129,13 @@ class UnifiedScanApp(ctk.CTk):
             self.page_preview_after_label.configure(image=photo, text="")
             self.page_preview_after_photo = photo
 
-    def _cancel_review_page_preview(self) -> None:
+    def _cancel_review_page_preview(self, *, refresh_pipeline: bool = True) -> None:
         self.review_preview_generation = getattr(self, "review_preview_generation", 0) + 1
         self.review_preview_context = None
+        self.review_preview_diagnostics = None
+        self.review_preview_error = None
+        if refresh_pipeline:
+            self._refresh_pipeline_strip()
         self._update_export_readiness()
         event = getattr(self, "review_preview_cancel_event", None)
         if event is not None:
@@ -4156,6 +4224,9 @@ class UnifiedScanApp(ctk.CTk):
             thread for thread in self.review_preview_threads if thread.is_alive()
         ]
         if error is not None or image is None:
+            self.review_preview_diagnostics = None
+            self.review_preview_error = error or "no image was produced"
+            self._refresh_pipeline_strip()
             message = f"Preview failed: {error or 'no image was produced'}"
             self._set_preview_message(self.page_preview_after_label, message)
             self.page_preview_after_photo = None
@@ -4167,6 +4238,7 @@ class UnifiedScanApp(ctk.CTk):
         self.page_preview_after_photo = after_photo
         self.page_preview_after_image = image
         context = self.__dict__.get("review_preview_context")
+        is_candidate = False
         if context is not None and context[0] == generation:
             _, entry_id, request, split_ratio = context
             entry = next(
@@ -4183,6 +4255,9 @@ class UnifiedScanApp(ctk.CTk):
                     self._set_preview_result_state("Candidate — not exported", kind="candidate")
                 else:
                     self._set_preview_result_state("Committed — export ready", kind="committed")
+        self.review_preview_diagnostics = diagnostics if is_candidate else None
+        self.review_preview_error = None
+        self._refresh_pipeline_strip()
         if diagnostics is not None:
             dewarp = diagnostics.dewarp
             if dewarp.applied:

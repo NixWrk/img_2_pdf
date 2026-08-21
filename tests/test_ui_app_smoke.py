@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+import tkinter as tk
 from types import SimpleNamespace
 
 import numpy as np
@@ -28,6 +29,19 @@ def _pump_until(app, predicate, *, timeout: float = 5.0) -> None:
             return
         time.sleep(0.01)
     raise AssertionError("Timed out waiting for GUI background work.")
+
+
+def _widget_texts(widget) -> list[str]:
+    texts: list[str] = []
+    try:
+        text = widget.cget("text")
+    except (AttributeError, TypeError, ValueError, tk.TclError):
+        text = None
+    if text:
+        texts.append(str(text))
+    for child in widget.winfo_children():
+        texts.extend(_widget_texts(child))
+    return texts
 
 
 def _assert_round_magnifier_at(canvas, x_pos: int, y_pos: int) -> None:
@@ -66,6 +80,8 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.preview_mode_var.get() == "Preview"
         assert app.crop_warning_var.get() == ""
         assert app.export_readiness_var.get() == "No pages to export"
+        assert app.pipeline_strip is not None
+        assert len(app.pipeline_strip.winfo_children()) == 1
         assert app.page_preview_after_frame.winfo_manager() == "grid"
         assert app.page_preview_before_frame.winfo_manager() == ""
         assert app.tabs._name_list == [app.tab_review_name, app.tab_camera_name]
@@ -109,6 +125,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         second_entry = app.session.add_image(name="second.png", image=second)
         app.refresh_page_list(keep_index=1)
         app.update()
+        assert len(app.pipeline_strip.winfo_children()) == 7
         assert app.page_count_var.get() == "2 pages"
         assert app.crop_warning_var.get() == "⚠ 2 pages need crop review"
         assert app.export_readiness_var.get() == "Export: 0 ready · 0 warnings · 2 blocked"
@@ -414,12 +431,14 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.page_preview_after_frame.winfo_manager() == "grid"
         assert app.geometry_summary_var.get() != "Wave preview: pending"
         assert app.page_preview_after_state.cget("text") == "Committed — export ready"
+        assert "Committed result is ready for export." in _widget_texts(app.pipeline_strip)
         app.postprocess_var.set("Black and White")
         app.update_page_preview()
         _pump_until(
             app,
             lambda: app.page_preview_after_state.cget("text") == "Candidate — not exported",
         )
+        assert "Result has a manual edit." in _widget_texts(app.pipeline_strip)
         app._sync_controls_from_single_committed_page()
         app.deiconify()
         app.geometry("1100x720")

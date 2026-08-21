@@ -173,6 +173,32 @@ def test_pending_request_without_diagnostics_is_running_not_applied() -> None:
     assert cards[-1].reason.summary == "Checking result…"
 
 
+def test_failed_candidate_preserves_committed_evidence_and_marks_result_error() -> None:
+    committed = SimpleNamespace(
+        recipe=_recipe(),
+        diagnostics={
+            "dewarp": {
+                "applied": False,
+                "method": "auto",
+                "reason": "curvature_below_threshold",
+            }
+        },
+    )
+
+    cards = build_pipeline_cards(
+        _entry(committed=committed),
+        pending_request=_recipe(),
+        pending_error="worker failed",
+    )
+
+    assert cards[1].state.status is StageStatus.NOT_NEEDED
+    assert cards[1].reason.summary == "No wave correction was needed."
+    assert cards[-1].state.status is StageStatus.ERROR
+    assert cards[-1].state.committed_revision == 4
+    assert cards[-1].state.candidate_revision == 5
+    assert cards[-1].reason.summary == "Automatic processing could not finish."
+
+
 def test_adapter_accepts_real_committed_recipe_and_diagnostics() -> None:
     image = np.full((24, 32, 3), 180, dtype=np.uint8)
     request = PageProcessingRequest(

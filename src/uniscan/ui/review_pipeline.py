@@ -198,6 +198,7 @@ def build_pipeline_cards(
     *,
     pending_request: object | None = None,
     pending_diagnostics: object | None = None,
+    pending_error: str | None = None,
 ) -> tuple[PipelineCard, ...]:
     """Build seven Review cards from committed evidence and an optional candidate."""
 
@@ -214,12 +215,16 @@ def build_pipeline_cards(
         or input_revision < 0
     ):
         raise ValueError("entry revision must be a non-negative integer")
-    pending = pending_request is not None or pending_diagnostics is not None
+    pending = (
+        pending_request is not None or pending_diagnostics is not None or pending_error is not None
+    )
     candidate_revision = input_revision + 1 if pending else (input_revision if committed else None)
     committed_revision = input_revision if committed else None
     diagnostics = (
         _mapping(pending_diagnostics)
         if pending_diagnostics is not None
+        else committed_payload
+        if pending_error is not None
         else ({} if pending_request is not None else committed_payload)
     )
 
@@ -275,7 +280,7 @@ def build_pipeline_cards(
             input_revision=input_revision,
             candidate_revision=candidate_revision,
             committed_revision=committed_revision,
-            pending=pending and not payload,
+            pending=pending and pending_error is None and not payload,
         )
         cards.append(
             PipelineCard(stage, _TITLES[stage], state, _reason_for(stage, state), _CONTROLS[stage])
@@ -304,7 +309,9 @@ def build_pipeline_cards(
     )
     candidate_has_manual_edit = any(card.state.status is StageStatus.EDITED for card in cards)
     result_status = (
-        StageStatus.RUNNING
+        StageStatus.ERROR
+        if pending_error is not None
+        else StageStatus.RUNNING
         if pending and pending_diagnostics is None
         else StageStatus.EDITED
         if pending and candidate_has_manual_edit
@@ -328,7 +335,7 @@ def build_pipeline_cards(
     )
     result_state = StageState(
         status=result_status,
-        reason_code=None,
+        reason_code="model_failed" if pending_error is not None else None,
         input_revision=input_revision,
         candidate_revision=result_candidate_revision,
         committed_revision=result_committed_revision,
