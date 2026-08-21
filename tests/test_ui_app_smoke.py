@@ -77,6 +77,9 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.deskew_reset_button.cget("text") == "Reset to automatic"
         assert app.deskew_restore_button.cget("text") == "Restore committed"
         assert app.deskew_restore_button.cget("state") == "disabled"
+        assert app.lighting_reset_button.cget("text") == "Reset to automatic"
+        assert app.lighting_restore_button.cget("text") == "Restore committed"
+        assert app.lighting_restore_button.cget("state") == "disabled"
         assert app.binarization_method_var.get() == "None"
         assert app.despeckle_strength_var.get() == "None"
         assert app.page_layout_var.get() == "Keep source page"
@@ -210,6 +213,8 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         app.open_manual_corners_editor()
         app.update()
         assert app.corner_editor_window is not None
+        assert app.corner_restore_button.cget("text") == "Restore committed"
+        assert app.corner_restore_button.cget("state") in {"normal", "disabled"}
         assert app.inline_editor_host.winfo_manager() == "grid"
         assert app.workspace_preview_frame.winfo_manager() == ""
         assert app.corner_source_canvas.winfo_exists()
@@ -444,6 +449,10 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         app.open_review_processing_dialog()
         app.update()
         assert app.review_processing_window is not None
+        assert app.cleanup_reset_button.cget("text") == "Reset cleanup"
+        assert app.cleanup_restore_button.cget("text") == "Restore committed cleanup"
+        assert app.layout_reset_button.cget("text") == "Reset layout"
+        assert app.layout_restore_button.cget("text") == "Restore committed layout"
         assert app.inline_editor_host.winfo_manager() == "grid"
         app.review_processing_close_button.invoke()
         assert app.inline_editor_host.winfo_manager() == ""

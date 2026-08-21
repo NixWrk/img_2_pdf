@@ -643,6 +643,7 @@ class UnifiedScanApp(ctk.CTk):
         self.corner_prev_button: ctk.CTkButton | None = None
         self.corner_apply_button: ctk.CTkButton | None = None
         self.corner_next_button: ctk.CTkButton | None = None
+        self.corner_restore_button: ctk.CTkButton | None = None
         self.corner_editor_state: dict[str, object] | None = None
         self.corner_resize_job: str | None = None
         self.split_editor_window: ctk.CTkFrame | None = None
@@ -658,6 +659,12 @@ class UnifiedScanApp(ctk.CTk):
         self.dewarp_restore_button: ctk.CTkButton | None = None
         self.deskew_reset_button: ctk.CTkButton | None = None
         self.deskew_restore_button: ctk.CTkButton | None = None
+        self.lighting_reset_button: ctk.CTkButton | None = None
+        self.lighting_restore_button: ctk.CTkButton | None = None
+        self.cleanup_reset_button: ctk.CTkButton | None = None
+        self.cleanup_restore_button: ctk.CTkButton | None = None
+        self.layout_reset_button: ctk.CTkButton | None = None
+        self.layout_restore_button: ctk.CTkButton | None = None
         self.dewarp_resize_job: str | None = None
         self.page_drag_state: dict[str, object] | None = None
         self.live_detector = LiveContourDetector(backend=DEFAULT_LIVE_BACKEND)
@@ -1504,7 +1511,24 @@ class UnifiedScanApp(ctk.CTk):
             values=list(SHADOW_UI_METHODS),
             variable=self.shadow_method_var,
             command=lambda _value: self.update_page_preview(),
-        ).pack(fill=ctk.X, padx=6, pady=(0, 10))
+        ).pack(fill=ctk.X, padx=6, pady=(0, 4))
+        lighting_actions = ctk.CTkFrame(processing, fg_color="transparent")
+        lighting_actions.pack(fill=ctk.X, padx=6, pady=(0, 10))
+        self.lighting_reset_button = ctk.CTkButton(
+            lighting_actions,
+            text="Reset to automatic",
+            command=self._reset_lighting_controls,
+        )
+        self.lighting_reset_button.pack(side=ctk.LEFT, expand=True, fill=ctk.X, padx=(0, 3))
+        self.lighting_restore_button = ctk.CTkButton(
+            lighting_actions,
+            text="Restore committed",
+            fg_color="transparent",
+            border_width=1,
+            command=self._restore_lighting_controls,
+            state=tk.NORMAL if self._lighting_restore_available() else tk.DISABLED,
+        )
+        self.lighting_restore_button.pack(side=ctk.LEFT, expand=True, fill=ctk.X, padx=(3, 0))
 
         ctk.CTkLabel(processing, text="Binarization", anchor="w").pack(
             fill=ctk.X, padx=6, pady=(0, 2)
@@ -1924,6 +1948,114 @@ class UnifiedScanApp(ctk.CTk):
         self.preprocess_denoise_var.set(int(preset.denoise))
         self.preprocess_threshold_var.set(int(preset.threshold))
         return True
+
+    def _reset_lighting_controls(self) -> None:
+        self.shadow_method_var.set("Automatic (validated)")
+        self.update_page_preview()
+        self._set_status("Lighting reset to automatic as a draft.")
+
+    def _lighting_restore_available(self) -> bool:
+        try:
+            _index, entry = self._single_selected_entry()
+        except (AttributeError, tk.TclError):
+            return False
+        return entry is not None and entry.committed_processing is not None
+
+    def _restore_lighting_controls(self) -> None:
+        _index, entry = self._single_selected_entry()
+        if entry is None or entry.committed_processing is None:
+            self._set_status("Restore committed lighting requires one committed page.")
+            return
+        request = entry.committed_processing.recipe.to_request()
+        self.shadow_method_var.set(
+            self._ui_name_for_method(SHADOW_UI_METHODS, request.shadow_method, "None")
+        )
+        self.update_page_preview()
+        self._set_status("Restored committed lighting as a draft.")
+
+    def _reset_cleanup_controls(self) -> None:
+        preset = PREPROCESS_PRESETS["Document"]
+        self.preprocess_preset_var.set("Document")
+        self.preprocess_contrast_var.set(float(preset.contrast))
+        self.preprocess_brightness_var.set(int(preset.brightness))
+        self.preprocess_denoise_var.set(int(preset.denoise))
+        self.preprocess_threshold_var.set(int(preset.threshold))
+        self.binarization_method_var.set("None")
+        self.binarization_window_var.set(31)
+        self.binarization_k_var.set(0.2)
+        self._binarization_k_custom = False
+        self.despeckle_strength_var.set("None")
+        self.postprocess_var.set("None")
+        self.update_page_preview()
+        self._set_status("Cleanup reset to the Document baseline as a draft.")
+
+    def _cleanup_restore_available(self) -> bool:
+        try:
+            _index, entry = self._single_selected_entry()
+        except (AttributeError, tk.TclError):
+            return False
+        return entry is not None and entry.committed_processing is not None
+
+    def _restore_cleanup_controls(self) -> None:
+        _index, entry = self._single_selected_entry()
+        if entry is None or entry.committed_processing is None:
+            self._set_status("Restore committed cleanup requires one committed page.")
+            return
+        request = entry.committed_processing.recipe.to_request()
+        settings = request.preprocess_settings or PREPROCESS_PRESETS["Custom"]
+        self.preprocess_preset_var.set("Custom")
+        self.preprocess_contrast_var.set(float(settings.contrast))
+        self.preprocess_brightness_var.set(int(settings.brightness))
+        self.preprocess_denoise_var.set(int(settings.denoise))
+        self.preprocess_threshold_var.set(int(settings.threshold))
+        self.binarization_method_var.set(
+            self._ui_name_for_method(BINARIZATION_UI_METHODS, settings.binarization_method, "None")
+        )
+        self.binarization_window_var.set(int(settings.binarization_window))
+        self.binarization_k_var.set(
+            float(settings.binarization_k if settings.binarization_k is not None else 0.2)
+        )
+        self._binarization_k_custom = settings.binarization_k is not None
+        self.despeckle_strength_var.set(
+            self._ui_name_for_method(DESPECKLE_UI_STRENGTHS, settings.despeckle_strength, "None")
+        )
+        self.postprocess_var.set(request.postprocess_name)
+        self.update_page_preview()
+        self._set_status("Restored committed cleanup controls as a draft.")
+
+    def _reset_layout_controls(self) -> None:
+        self.page_layout_var.set("Keep source page")
+        self.page_margin_mm_var.set(10.0)
+        self.page_align_x_var.set("center")
+        self.page_align_y_var.set("center")
+        self.export_pdf_dpi_var.set(300)
+        self.update_page_preview()
+        self._set_status("Layout reset to source-page defaults as a draft.")
+
+    def _layout_restore_available(self) -> bool:
+        try:
+            _index, entry = self._single_selected_entry()
+        except (AttributeError, tk.TclError):
+            return False
+        return entry is not None and entry.committed_processing is not None
+
+    def _restore_layout_controls(self) -> None:
+        _index, entry = self._single_selected_entry()
+        if entry is None or entry.committed_processing is None:
+            self._set_status("Restore committed layout requires one committed page.")
+            return
+        request = entry.committed_processing.recipe.to_request()
+        self.page_layout_var.set(
+            self._ui_name_for_method(
+                PAGE_LAYOUT_UI_METHODS, request.page_layout, "Keep source page"
+            )
+        )
+        self.page_margin_mm_var.set(float(request.page_margin_mm))
+        self.page_align_x_var.set(request.horizontal_alignment)
+        self.page_align_y_var.set(request.vertical_alignment)
+        self.export_pdf_dpi_var.set(int(request.page_dpi))
+        self.update_page_preview()
+        self._set_status("Restored committed layout controls as a draft.")
 
     def on_preprocess_preset_change(self, preset_name: str) -> None:
         if not self._apply_preprocess_preset_values(preset_name):
@@ -3864,6 +3996,18 @@ class UnifiedScanApp(ctk.CTk):
                 "deskew_restore_button",
                 tk.NORMAL if self._deskew_restore_available() else tk.DISABLED,
             ),
+            (
+                "lighting_restore_button",
+                tk.NORMAL if self._lighting_restore_available() else tk.DISABLED,
+            ),
+            (
+                "cleanup_restore_button",
+                tk.NORMAL if self._cleanup_restore_available() else tk.DISABLED,
+            ),
+            (
+                "layout_restore_button",
+                tk.NORMAL if self._layout_restore_available() else tk.DISABLED,
+            ),
         )
         for name, state in states:
             button = getattr(self, name, None)
@@ -4741,6 +4885,35 @@ class UnifiedScanApp(ctk.CTk):
         self.workspace_processing_frame.grid()
         self.update_page_preview()
 
+    @staticmethod
+    def _perspective_restore_points(entry, source_image, *, from_current_geometry: bool):
+        """Return a durable contour only when its pixel coordinate space is proven."""
+        candidates = []
+        if not from_current_geometry and _entry_crop_state(entry) == CROP_STATE_APPLIED:
+            candidates.append(getattr(entry, "detected_contour", None))
+        committed = getattr(entry, "committed_processing", None)
+        if committed is not None:
+            candidates.append(getattr(committed.recipe, "perspective_points", None))
+        if source_image is None or getattr(source_image, "ndim", 0) < 2:
+            return None
+        height, width = source_image.shape[:2]
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            try:
+                points = np.asarray(candidate, dtype=np.float32).reshape(4, 2)
+            except (TypeError, ValueError):
+                continue
+            if (
+                np.isfinite(points).all()
+                and (points[:, 0] >= 0).all()
+                and (points[:, 0] < width).all()
+                and (points[:, 1] >= 0).all()
+                and (points[:, 1] < height).all()
+            ):
+                return points.copy()
+        return None
+
     def _open_corner_editor_dialog(
         self,
         indices: list[int],
@@ -4771,6 +4944,14 @@ class UnifiedScanApp(ctk.CTk):
         source_images_by_entry = {
             entry.entry_id: _perspective_source_image(
                 entry,
+                from_current_geometry=from_current_geometry,
+            )
+            for entry in entries
+        }
+        restore_points_by_entry = {
+            entry.entry_id: self._perspective_restore_points(
+                entry,
+                source_images_by_entry[entry.entry_id],
                 from_current_geometry=from_current_geometry,
             )
             for entry in entries
@@ -5024,6 +5205,12 @@ class UnifiedScanApp(ctk.CTk):
                 self.corner_next_button.configure(
                     state=tk.NORMAL if state["index"] < len(entries) - 1 else tk.DISABLED
                 )
+            if self.corner_restore_button is not None:
+                self.corner_restore_button.configure(
+                    state=tk.NORMAL
+                    if restore_points_by_entry.get(entry.entry_id) is not None
+                    else tk.DISABLED
+                )
             _redraw()
             _render_corrected_preview()
 
@@ -5105,6 +5292,21 @@ class UnifiedScanApp(ctk.CTk):
             dirty_entry_ids.add(entry.entry_id)
             _redraw()
             _render_corrected_preview()
+            self._set_status("Perspective reset to full page as a draft.")
+
+        def _restore_committed():
+            _entry_index, entry = _current_entry()
+            baseline = restore_points_by_entry.get(entry.entry_id)
+            if baseline is None:
+                self._set_status("Restore committed perspective requires a durable contour.")
+                return
+            view_state["points"] = baseline.copy()
+            points_by_entry[entry.entry_id] = view_state["points"]
+            backend_by_entry[entry.entry_id] = "manual"
+            dirty_entry_ids.add(entry.entry_id)
+            _redraw()
+            _render_corrected_preview()
+            self._set_status("Restored committed perspective as a draft.")
 
         def _auto_detect_current():
             entry_index, entry = _current_entry()
@@ -5212,7 +5414,21 @@ class UnifiedScanApp(ctk.CTk):
             command=_apply_current,
         )
         self.corner_apply_button.pack(side=ctk.LEFT, padx=6)
-        ctk.CTkButton(controls, text="Reset", width=90, command=_reset).pack(side=ctk.LEFT, padx=6)
+        ctk.CTkButton(controls, text="Reset to full page", width=130, command=_reset).pack(
+            side=ctk.LEFT, padx=6
+        )
+        self.corner_restore_button = ctk.CTkButton(
+            controls,
+            text="Restore committed",
+            fg_color="transparent",
+            border_width=1,
+            width=140,
+            command=_restore_committed,
+            state=tk.NORMAL
+            if restore_points_by_entry.get(entries[state["index"]].entry_id) is not None
+            else tk.DISABLED,
+        )
+        self.corner_restore_button.pack(side=ctk.LEFT, padx=6)
         if auto_detect:
             ctk.CTkButton(
                 controls,
@@ -5232,6 +5448,7 @@ class UnifiedScanApp(ctk.CTk):
             self.corner_prev_button = None
             self.corner_apply_button = None
             self.corner_next_button = None
+            self.corner_restore_button = None
             self.corner_editor_state = None
             self.inline_editor_close_callback = None
             win.destroy()
@@ -6847,6 +7064,10 @@ class UnifiedScanApp(ctk.CTk):
         def _on_close() -> None:
             self.review_processing_window = None
             self.inline_editor_close_callback = None
+            self.cleanup_reset_button = None
+            self.cleanup_restore_button = None
+            self.layout_reset_button = None
+            self.layout_restore_button = None
             window.destroy()
             self._hide_inline_geometry_editor()
 
@@ -6866,6 +7087,40 @@ class UnifiedScanApp(ctk.CTk):
             border_width=1,
             width=100,
         ).pack(side=ctk.LEFT, padx=(8, 0))
+        self.cleanup_reset_button = ctk.CTkButton(
+            actions,
+            text="Reset cleanup",
+            command=self._reset_cleanup_controls,
+            width=110,
+        )
+        self.cleanup_reset_button.pack(side=ctk.LEFT, padx=(8, 0))
+        self.cleanup_restore_button = ctk.CTkButton(
+            actions,
+            text="Restore committed cleanup",
+            command=self._restore_cleanup_controls,
+            fg_color="transparent",
+            border_width=1,
+            width=160,
+            state=tk.NORMAL if self._cleanup_restore_available() else tk.DISABLED,
+        )
+        self.cleanup_restore_button.pack(side=ctk.LEFT, padx=(8, 0))
+        self.layout_reset_button = ctk.CTkButton(
+            actions,
+            text="Reset layout",
+            command=self._reset_layout_controls,
+            width=100,
+        )
+        self.layout_reset_button.pack(side=ctk.LEFT, padx=(8, 0))
+        self.layout_restore_button = ctk.CTkButton(
+            actions,
+            text="Restore committed layout",
+            command=self._restore_layout_controls,
+            fg_color="transparent",
+            border_width=1,
+            width=145,
+            state=tk.NORMAL if self._layout_restore_available() else tk.DISABLED,
+        )
+        self.layout_restore_button.pack(side=ctk.LEFT, padx=(8, 0))
         self.review_processing_close_button = ctk.CTkButton(
             actions,
             text="Close",
