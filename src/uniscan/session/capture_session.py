@@ -452,6 +452,16 @@ class CaptureEntry:
         self.dewarp_control_curves = None
 
 
+@dataclass(slots=True, frozen=True)
+class _PageDeletion:
+    """One recoverable page deletion kept until undo or finalization."""
+
+    entries: tuple[CaptureEntry, ...]
+    entry_order: tuple[str, ...]
+    document_order: tuple[str, ...]
+    selected_ids: frozenset[str]
+
+
 class CaptureSession:
     """Ordered page session with disk-backed image storage."""
 
@@ -460,6 +470,7 @@ class CaptureSession:
         self._entries: list[CaptureEntry] = []
         self._quarantined_entries: list[dict[str, object]] = []
         self._document_order: list[str] = []
+        self._pending_deletion: _PageDeletion | None = None
         self.restore_warnings: list[str] = []
 
     @property
@@ -480,13 +491,18 @@ class CaptureSession:
     @property
     def has_recoverable_state(self) -> bool:
         """Whether autosave must retain live or quarantined page assets."""
-        return bool(self._entries or self._quarantined_entries)
+        return bool(self._entries or self._quarantined_entries or self._pending_deletion)
+
+    @property
+    def can_undo_deletion(self) -> bool:
+        return self._pending_deletion is not None
 
     def clear(self) -> None:
         # Keep assets until the next manifest checkpoint.  If the process dies
         # before that checkpoint, the previous manifest remains fully restorable.
         removed_ids = {entry.entry_id for entry in self._entries}
         self._entries.clear()
+        self._pending_deletion = None
         self._document_order = [
             entry_id for entry_id in self._document_order if entry_id not in removed_ids
         ]
@@ -662,14 +678,81 @@ class CaptureSession:
                 kept.append(entry)
             else:
                 removed_ids.append(entry.entry_id)
+        if not removed_ids:
+            return 0
+        self.finalize_pending_deletion()
         self._entries = kept
         self._remove_from_document_order(removed_ids)
         return before - len(self._entries)
+
+    def remove_selected_for_undo(self) -> int:
+        """Delete selected pages while retaining one recoverable in-memory snapshot."""
+        removed = tuple(entry for entry in self._entries if entry.selected)
+        if not removed:
+            return 0
+        self.finalize_pending_deletion()
+        self._pending_deletion = _PageDeletion(
+            entries=removed,
+            entry_order=tuple(entry.entry_id for entry in self._entries),
+            document_order=tuple(self._document_order),
+            selected_ids=frozenset(entry.entry_id for entry in self._entries if entry.selected),
+        )
+        removed_ids = {entry.entry_id for entry in removed}
+        self._entries = [entry for entry in self._entries if entry.entry_id not in removed_ids]
+        self._remove_from_document_order(removed_ids)
+        return len(removed)
+
+    def undo_last_deletion(self) -> tuple[str, ...]:
+        """Restore the last deleted pages, their order, and their prior selection."""
+        deletion = self._pending_deletion
+        if deletion is None:
+            return ()
+
+        active_by_id = {entry.entry_id: entry for entry in self._entries}
+        removed_by_id = {entry.entry_id: entry for entry in deletion.entries}
+        restored_entries: list[CaptureEntry] = []
+        restored_ids: set[str] = set()
+        for entry_id in deletion.entry_order:
+            entry = active_by_id.get(entry_id) or removed_by_id.get(entry_id)
+            if entry is None:
+                continue
+            entry.selected = entry_id in deletion.selected_ids
+            restored_entries.append(entry)
+            restored_ids.add(entry_id)
+        # Pages imported after the deletion stay at the end and keep their selection.
+        restored_entries.extend(
+            entry for entry in self._entries if entry.entry_id not in restored_ids
+        )
+        self._entries = restored_entries
+
+        known_ids = {
+            *[entry.entry_id for entry in self._entries],
+            *self.quarantined_entry_ids,
+        }
+        restored_order = [
+            entry_id for entry_id in deletion.document_order if entry_id in known_ids
+        ]
+        restored_order.extend(
+            entry_id
+            for entry_id in self._document_order
+            if entry_id in known_ids and entry_id not in restored_order
+        )
+        self._document_order = restored_order
+        restored = tuple(entry.entry_id for entry in deletion.entries)
+        self._pending_deletion = None
+        return restored
+
+    def finalize_pending_deletion(self) -> bool:
+        """Drop the one-step undo snapshot; the next manifest save prunes its assets."""
+        had_pending = self._pending_deletion is not None
+        self._pending_deletion = None
+        return had_pending
 
     def remove_entry(self, entry_id: str) -> bool:
         index = self._find_index(entry_id)
         if index is None:
             return False
+        self.finalize_pending_deletion()
         self._remove_from_document_order((entry_id,))
         del self._entries[index]
         return True
@@ -830,6 +913,11 @@ class CaptureSession:
         protected_ids = {
             *[entry.entry_id for entry in self._entries],
             *self.quarantined_entry_ids,
+            *(
+                [entry.entry_id for entry in self._pending_deletion.entries]
+                if self._pending_deletion is not None
+                else []
+            ),
         }
         self.store.prune_pages(protected_ids)
         return manifest_path

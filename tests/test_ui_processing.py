@@ -1693,6 +1693,51 @@ def test_background_job_stays_busy_until_queued_completion_is_consumed(monkeypat
     assert warnings == [("Busy", "Another background job is already running.")]
 
 
+def test_delete_selected_pages_requires_confirmation_and_reports_count(monkeypatch) -> None:
+    app = object.__new__(UnifiedScanApp)
+    app._selected_entry_indices = lambda: [0, 1]
+    app._sync_page_selection_to_session = lambda: None
+    app._update_page_action_states = lambda: None
+    app._set_status = lambda _text: None
+    removed: list[bool] = []
+    app.session = SimpleNamespace(
+        entries=[SimpleNamespace(), SimpleNamespace()],
+        remove_selected_for_undo=lambda: removed.append(True) or 2,
+    )
+    prompts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "uniscan.ui.app.messagebox.askyesno",
+        lambda title, text: prompts.append((title, text)) or False,
+    )
+
+    app.delete_selected_pages()
+
+    assert removed == []
+    assert prompts[0][0] == "Delete pages"
+    assert "2 selected pages" in prompts[0][1]
+
+
+def test_undo_page_deletion_reselects_restored_pages() -> None:
+    class _UndoSession:
+        def undo_last_deletion(self) -> tuple[str, ...]:
+            return ("page-b", "page-c")
+
+        def __len__(self) -> int:
+            return 3
+
+    app = object.__new__(UnifiedScanApp)
+    app.session = _UndoSession()
+    refreshed: list[tuple[str, ...]] = []
+    statuses: list[str] = []
+    app.refresh_page_list = lambda **kwargs: refreshed.append(tuple(kwargs["keep_entry_ids"]))
+    app._set_status = statuses.append
+
+    app.undo_last_page_deletion()
+
+    assert refreshed == [("page-b", "page-c")]
+    assert statuses == ["Restored 2 page(s). Session pages: 3"]
+
+
 def test_background_completion_releases_slot_before_callback() -> None:
     app = object.__new__(UnifiedScanApp)
     app._closing = False

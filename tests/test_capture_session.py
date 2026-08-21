@@ -29,6 +29,64 @@ def test_session_add_move_select_remove(tmp_path) -> None:
     session.close()
 
 
+def test_page_deletion_undo_restores_order_selection_and_assets(tmp_path) -> None:
+    session = CaptureSession(store=PageStore(root_dir=tmp_path))
+    entries = [session.add_image(name=name, image=_img(index)) for index, name in enumerate("abcd")]
+    entries[1].selected = True
+    entries[2].selected = True
+    deleted_paths = (entries[1].original_path, entries[2].original_path)
+    manifest_path = tmp_path / "session.json"
+
+    assert session.remove_selected_for_undo() == 2
+    assert session.can_undo_deletion is True
+    assert [entry.name for entry in session.entries] == ["a", "d"]
+    assert session.remove_selected_for_undo() == 0
+    assert session.remove_entry("0" * 32) is False
+    assert session.can_undo_deletion is True
+    session.save_manifest(manifest_path)
+    assert all(path.exists() for path in deleted_paths)
+
+    session.add_image(name="e", image=_img(5))
+    restored_ids = session.undo_last_deletion()
+
+    assert restored_ids == (entries[1].entry_id, entries[2].entry_id)
+    assert [entry.name for entry in session.entries] == ["a", "b", "c", "d", "e"]
+    assert [entry.name for entry in session.selected_entries()] == ["b", "c"]
+    assert session.can_undo_deletion is False
+    session.close()
+
+
+def test_finalized_page_deletion_is_pruned_after_manifest_save(tmp_path) -> None:
+    session = CaptureSession(store=PageStore(root_dir=tmp_path))
+    entry = session.add_image(name="delete-me", image=_img(1))
+    entry.selected = True
+    page_dir = entry.original_path.parent
+    manifest_path = tmp_path / "session.json"
+
+    assert session.remove_selected_for_undo() == 1
+    session.save_manifest(manifest_path)
+    assert page_dir.exists()
+    assert session.finalize_pending_deletion() is True
+    session.save_manifest(manifest_path)
+    assert not page_dir.exists()
+    assert session.undo_last_deletion() == ()
+    session.close()
+
+
+def test_second_page_deletion_replaces_the_undo_snapshot(tmp_path) -> None:
+    session = CaptureSession(store=PageStore(root_dir=tmp_path))
+    entries = [session.add_image(name=name, image=_img(index)) for index, name in enumerate("abc")]
+    entries[1].selected = True
+    assert session.remove_selected_for_undo() == 1
+
+    entries[2].selected = True
+    assert session.remove_selected_for_undo() == 1
+    assert session.undo_last_deletion() == (entries[2].entry_id,)
+    assert [entry.name for entry in session.entries] == ["a", "c"]
+    assert session.undo_last_deletion() == ()
+    session.close()
+
+
 def test_session_moves_and_reorders_multiple_pages_as_a_stable_block(tmp_path) -> None:
     session = CaptureSession(store=PageStore(root_dir=tmp_path))
     entries = [session.add_image(name=name, image=_img(index)) for index, name in enumerate("abcd")]

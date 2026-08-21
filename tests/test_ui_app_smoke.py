@@ -81,7 +81,9 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.move_pages_up_button.cget("state") == "disabled"
         assert app.move_pages_down_button.cget("state") == "disabled"
         assert app.delete_pages_button.cget("state") == "disabled"
+        assert app.undo_delete_button.cget("state") == "disabled"
         assert app.page_listbox.bind("<Delete>")
+        assert app.page_listbox.bind("<Control-z>")
         assert app.page_listbox.bind("<Control-Right>")
         assert app.page_listbox.bind("<B1-Motion>")
         assert app.page_listbox.bind("<Button-3>")
@@ -492,9 +494,16 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert not any(entry.selected for entry in app.session.entries)
         assert app.delete_pages_button.cget("state") == "disabled"
         app.select_all_pages()
+        monkeypatch.setattr("uniscan.ui.app.messagebox.askyesno", lambda *_args: True)
         app.delete_selected_pages()
         assert len(app.session) == 0
         assert app.page_count_var.get() == "0 pages"
+        assert app.undo_delete_button.cget("state") == "normal"
+        app.undo_last_page_deletion()
+        assert len(app.session) == 2
+        assert all(entry.selected for entry in app.session.entries)
+        app.delete_selected_pages()
+        assert len(app.session) == 0
 
         started = threading.Event()
         seen_shapes: list[tuple[int, ...]] = []

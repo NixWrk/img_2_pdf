@@ -1111,11 +1111,27 @@ class UnifiedScanApp(ctk.CTk):
         )
         self.delete_pages_button.pack(side=ctk.LEFT)
 
+        history_actions = ctk.CTkFrame(left, fg_color="transparent")
+        history_actions.pack(fill=ctk.X, padx=10, pady=(0, 4))
+        self.undo_delete_button = ctk.CTkButton(
+            history_actions,
+            text="Undo delete",
+            fg_color="transparent",
+            border_width=1,
+            command=self.undo_last_page_deletion,
+            state=tk.DISABLED,
+        )
+        self.undo_delete_button.pack(fill=ctk.X)
+
         self.page_context_menu = tk.Menu(self, tearoff=False)
         self.page_context_menu.add_command(label="Move up", command=self.move_selected_up)
         self.page_context_menu.add_command(label="Move down", command=self.move_selected_down)
         self.page_context_menu.add_separator()
         self.page_context_menu.add_command(label="Delete", command=self.delete_selected_pages)
+        self.page_context_menu.add_separator()
+        self.page_context_menu.add_command(
+            label="Undo delete", command=self.undo_last_page_deletion, state=tk.DISABLED
+        )
 
         edit_actions = ctk.CTkFrame(left, fg_color="transparent")
         edit_actions.pack(fill=ctk.X, padx=10, pady=(0, 4))
@@ -1523,6 +1539,10 @@ class UnifiedScanApp(ctk.CTk):
             "<Control-a>",
             lambda _event: self._run_shortcut(self.select_all_pages),
         )
+        self.page_listbox.bind(
+            "<Control-z>",
+            lambda _event: self._run_shortcut(self.undo_last_page_deletion),
+        )
 
     @staticmethod
     def _run_shortcut(command) -> str:
@@ -1602,6 +1622,7 @@ class UnifiedScanApp(ctk.CTk):
         # even if an uncooperative third-party call has not returned yet.
         self._close_wait_job = None
         try:
+            self.session.finalize_pending_deletion()
             if self.session.has_recoverable_state:
                 self.session.save_manifest(self.autosave_path)
                 self.session.close(preserve=True)
@@ -3616,6 +3637,7 @@ class UnifiedScanApp(ctk.CTk):
 
     def _update_page_action_states(self) -> None:
         selected = set(self._selected_entry_indices())
+        can_undo_deletion = bool(getattr(self.session, "can_undo_deletion", False))
         can_move_up = any(index > 0 and index - 1 not in selected for index in selected)
         can_move_down = any(
             index + 1 < len(self.session.entries) and index + 1 not in selected
@@ -3625,6 +3647,10 @@ class UnifiedScanApp(ctk.CTk):
             ("move_pages_up_button", tk.NORMAL if can_move_up else tk.DISABLED),
             ("move_pages_down_button", tk.NORMAL if can_move_down else tk.DISABLED),
             ("delete_pages_button", tk.NORMAL if selected else tk.DISABLED),
+            (
+                "undo_delete_button",
+                tk.NORMAL if can_undo_deletion else tk.DISABLED,
+            ),
         )
         for name, state in states:
             button = getattr(self, name, None)
@@ -3646,6 +3672,9 @@ class UnifiedScanApp(ctk.CTk):
             menu.entryconfigure(0, state=tk.NORMAL if can_move_up else tk.DISABLED)
             menu.entryconfigure(1, state=tk.NORMAL if can_move_down else tk.DISABLED)
             menu.entryconfigure(3, state=tk.NORMAL if selected else tk.DISABLED)
+            menu.entryconfigure(
+                5, state=tk.NORMAL if can_undo_deletion else tk.DISABLED
+            )
 
     def _page_index_at_y(self, y: int, *, clamp: bool = False) -> int | None:
         if self.page_listbox.size() == 0:
@@ -4109,8 +4138,20 @@ class UnifiedScanApp(ctk.CTk):
 
     def delete_selected_pages(self) -> None:
         indices = self._selected_entry_indices()
+        if not indices:
+            self._set_status("No selected pages to delete")
+            self._update_page_action_states()
+            return
+        count = len(indices)
+        noun = "page" if count == 1 else "pages"
+        if not messagebox.askyesno(
+            "Delete pages",
+            f"Delete {count} selected {noun}?\n\n"
+            "You can undo this action until another deletion or closing UniScan.",
+        ):
+            return
         self._sync_page_selection_to_session()
-        removed = self.session.remove_selected()
+        removed = self.session.remove_selected_for_undo()
         if removed <= 0:
             self._set_status("No selected pages to delete")
             self._update_page_action_states()
@@ -4119,7 +4160,20 @@ class UnifiedScanApp(ctk.CTk):
             min(indices[0], len(self.session.entries) - 1) if self.session.entries else None
         )
         self.refresh_page_list(keep_index=keep_index)
-        self._set_status(f"Deleted {removed} page(s). Session pages: {len(self.session)}")
+        self._set_status(
+            f"Deleted {removed} page(s). Undo available. Session pages: {len(self.session)}"
+        )
+
+    def undo_last_page_deletion(self) -> None:
+        restored_ids = self.session.undo_last_deletion()
+        if not restored_ids:
+            self._set_status("No page deletion to undo")
+            self._update_page_action_states()
+            return
+        self.refresh_page_list(keep_entry_ids=restored_ids)
+        self._set_status(
+            f"Restored {len(restored_ids)} page(s). Session pages: {len(self.session)}"
+        )
 
     def replace_selected_page_from_file(self) -> None:
         index, entry = self._single_selected_entry()
