@@ -39,6 +39,7 @@ from uniscan.core.dewarp import (
     estimate_textline_dewarp_model,
     interpolate_control_curve,
     normalize_control_curves,
+    normalize_control_points,
 )
 from uniscan.core.pipeline import PageResult, PipelineOptions, process_loaded_items
 from uniscan.core.processing import PageProcessingRequest, process_document_page
@@ -653,6 +654,10 @@ class UnifiedScanApp(ctk.CTk):
         self.dewarp_source_canvas: tk.Canvas | None = None
         self.dewarp_preview_canvas: tk.Canvas | None = None
         self.dewarp_apply_points_button: ctk.CTkButton | None = None
+        self.dewarp_reset_button: ctk.CTkButton | None = None
+        self.dewarp_restore_button: ctk.CTkButton | None = None
+        self.deskew_reset_button: ctk.CTkButton | None = None
+        self.deskew_restore_button: ctk.CTkButton | None = None
         self.dewarp_resize_job: str | None = None
         self.page_drag_state: dict[str, object] | None = None
         self.live_detector = LiveContourDetector(backend=DEFAULT_LIVE_BACKEND)
@@ -1456,6 +1461,23 @@ class UnifiedScanApp(ctk.CTk):
             anchor="w",
             text_color=("#60646c", "#a0a4ab"),
         ).pack(fill=ctk.X, padx=6, pady=(0, 8))
+        deskew_actions = ctk.CTkFrame(processing, fg_color="transparent")
+        deskew_actions.pack(fill=ctk.X, padx=6, pady=(0, 8))
+        self.deskew_reset_button = ctk.CTkButton(
+            deskew_actions,
+            text="Reset to automatic",
+            command=self._reset_deskew_controls,
+        )
+        self.deskew_reset_button.pack(side=ctk.LEFT, expand=True, fill=ctk.X, padx=(0, 3))
+        self.deskew_restore_button = ctk.CTkButton(
+            deskew_actions,
+            text="Restore committed",
+            fg_color="transparent",
+            border_width=1,
+            command=self._restore_deskew_controls,
+            state=tk.NORMAL if self._deskew_restore_available() else tk.DISABLED,
+        )
+        self.deskew_restore_button.pack(side=ctk.LEFT, expand=True, fill=ctk.X, padx=(3, 0))
         ctk.CTkLabel(processing, text="Remove page waves", anchor="w").pack(
             fill=ctk.X, padx=6, pady=(0, 2)
         )
@@ -2517,6 +2539,39 @@ class UnifiedScanApp(ctk.CTk):
             return
         self.deskew_method_var.set("Manual angle")
         self.update_page_preview()
+
+    def _reset_deskew_controls(self) -> None:
+        self.deskew_method_var.set("Hybrid (recommended)")
+        self.manual_deskew_angle_var.set(0.0)
+        self.manual_deskew_summary_var.set("Manual deskew: +0.0 degrees")
+        self.update_page_preview()
+        self._set_status("Deskew controls reset to automatic as a draft.")
+
+    def _deskew_restore_available(self) -> bool:
+        try:
+            _index, entry = self._single_selected_entry()
+        except (AttributeError, tk.TclError):
+            return False
+        return entry is not None and entry.committed_processing is not None
+
+    def _restore_deskew_controls(self) -> None:
+        _index, entry = self._single_selected_entry()
+        if entry is None or entry.committed_processing is None:
+            self._set_status("Restore committed deskew requires one committed page.")
+            return
+        try:
+            request = entry.committed_processing.recipe.to_request()
+        except (AttributeError, TypeError, ValueError) as exc:
+            self._set_status(f"Committed deskew controls unavailable: {exc}")
+            return
+        self.deskew_method_var.set(
+            self._ui_name_for_method(DESKEW_UI_METHODS, request.deskew_method, "Off")
+        )
+        angle = float(request.deskew_angle_degrees or 0.0)
+        self.manual_deskew_angle_var.set(angle)
+        self.manual_deskew_summary_var.set(f"Manual deskew: {angle:+.1f} degrees")
+        self.update_page_preview()
+        self._set_status("Restored committed deskew controls as a draft.")
 
     @staticmethod
     def _ui_name_for_method(mapping: dict[str, str], method: str, fallback: str) -> str:
@@ -3804,6 +3859,10 @@ class UnifiedScanApp(ctk.CTk):
             (
                 "undo_delete_button",
                 tk.NORMAL if can_undo_deletion else tk.DISABLED,
+            ),
+            (
+                "deskew_restore_button",
+                tk.NORMAL if self._deskew_restore_available() else tk.DISABLED,
             ),
         )
         for name, state in states:
@@ -5842,6 +5901,49 @@ class UnifiedScanApp(ctk.CTk):
             f"{uncertain} left unchanged as uncertain."
         )
 
+    @staticmethod
+    def _saved_dewarp_curves(entry):
+        """Return durable Waves controls, without inventing a new model."""
+
+        committed = entry.committed_processing
+        if committed is None:
+            return None
+
+        def normalize(curves):
+            if curves is None:
+                return None
+            try:
+                normalized = normalize_control_curves(curves)
+            except (TypeError, ValueError):
+                return None
+            return normalized or None
+
+        saved = normalize(entry.dewarp_control_curves)
+        if saved is not None:
+            return saved
+        if entry.dewarp_control_points is not None:
+            try:
+                points = normalize_control_points(entry.dewarp_control_points)
+            except (TypeError, ValueError):
+                return None
+            return tuple((anchor, points) for anchor in (0.25, 0.5, 0.75))
+        model = getattr(getattr(committed, "recipe", None), "dewarp_model", None)
+        model_curves = normalize(getattr(model, "control_curves", None))
+        if model_curves is None and isinstance(model, dict):
+            model_curves = normalize(model.get("control_curves"))
+        if model_curves is not None:
+            return model_curves
+        points = getattr(model, "control_points", None)
+        if points is None and isinstance(model, dict):
+            points = model.get("control_points")
+        if points is None:
+            return None
+        try:
+            normalized_points = normalize_control_points(points)
+        except (TypeError, ValueError):
+            return None
+        return tuple((anchor, normalized_points) for anchor in (0.25, 0.5, 0.75))
+
     def open_dewarp_points_editor(self) -> None:
         index, entry = self._single_selected_entry()
         if entry is None or index is None:
@@ -5859,6 +5961,7 @@ class UnifiedScanApp(ctk.CTk):
             self.inline_editor_close_callback()
 
         transaction = StageEditTransaction.begin((entry,))
+        restore_curves = self._saved_dewarp_curves(entry)
         authoritative_source = entry.original_image
         previous_committed = entry.committed_processing
         committed_dewarp_method = DEWARP_UI_METHODS.get(
@@ -5914,18 +6017,11 @@ class UnifiedScanApp(ctk.CTk):
         source = process_document_page(authoritative_source, model_input_request).image
         source_height, source_width = source.shape[:2]
 
-        if entry.dewarp_control_curves is not None:
+        if restore_curves is not None:
             initial_curves = [
-                {"anchor": anchor, "points": list(points)}
-                for anchor, points in entry.dewarp_control_curves
+                {"anchor": anchor, "points": list(points)} for anchor, points in restore_curves
             ]
-            initial_message = "Loaded three saved page-correction curves."
-        elif entry.dewarp_control_points is not None:
-            initial_points = list(entry.dewarp_control_points)
-            initial_curves = [
-                {"anchor": anchor, "points": list(initial_points)} for anchor in (0.25, 0.5, 0.75)
-            ]
-            initial_message = "Expanded the saved legacy curve across three page regions."
+            initial_message = "Loaded saved page-correction controls."
         else:
             automatic_model, automatic_diagnostics = estimate_textline_dewarp_model(source)
             if automatic_model is not None:
@@ -5989,6 +6085,7 @@ class UnifiedScanApp(ctk.CTk):
         active_curve = min(1, len(initial_curves) - 1)
         state = {
             "curves": initial_curves,
+            "restore_curves": restore_curves,
             "active_curve": active_curve,
             "points": initial_curves[active_curve]["points"],
             "active": None,
@@ -6354,7 +6451,7 @@ class UnifiedScanApp(ctk.CTk):
                 remove_selected_point()
             return "break"
 
-        def use_automatic() -> None:
+        def reset_to_automatic() -> None:
             model, diagnostics = estimate_textline_dewarp_model(source)
             if model is None:
                 status.set(f"Automatic model unavailable: {diagnostics.reason}.")
@@ -6366,6 +6463,21 @@ class UnifiedScanApp(ctk.CTk):
             draw_overlay()
             render_corrected()
             status.set(f"Automatic model restored from {diagnostics.line_count} supporting lines.")
+
+        def restore_committed() -> None:
+            baseline = state["restore_curves"]
+            if baseline is None:
+                status.set("No committed Waves controls are available to restore.")
+                return
+            state["curves"] = [
+                {"anchor": float(anchor), "points": list(points)} for anchor, points in baseline
+            ]
+            state["active_curve"] = min(int(state["active_curve"]), len(state["curves"]) - 1)
+            select_curve(int(state["active_curve"]))
+            state["selected"] = None
+            draw_overlay()
+            render_corrected()
+            status.set("Restored committed Waves controls as a draft.")
 
         def use_neutral() -> None:
             neutral = [(float(x), 0.0) for x in np.linspace(0.0, 1.0, 9, dtype=np.float32)]
@@ -6419,6 +6531,8 @@ class UnifiedScanApp(ctk.CTk):
             self.dewarp_editor_state = None
             self.dewarp_status_var = None
             self.dewarp_apply_points_button = None
+            self.dewarp_reset_button = None
+            self.dewarp_restore_button = None
             self.inline_editor_close_callback = None
             window.destroy()
             self._hide_inline_geometry_editor()
@@ -6433,7 +6547,21 @@ class UnifiedScanApp(ctk.CTk):
         ctk.CTkLabel(window, textvariable=status, anchor="w").pack(fill=ctk.X, padx=16, pady=(0, 8))
         actions = ctk.CTkFrame(window, fg_color="transparent")
         actions.pack(fill=ctk.X, padx=16, pady=(0, 14))
-        ctk.CTkButton(actions, text="Use automatic", command=use_automatic).pack(side=ctk.LEFT)
+        self.dewarp_reset_button = ctk.CTkButton(
+            actions,
+            text="Reset to automatic",
+            command=reset_to_automatic,
+        )
+        self.dewarp_reset_button.pack(side=ctk.LEFT)
+        self.dewarp_restore_button = ctk.CTkButton(
+            actions,
+            text="Restore committed",
+            fg_color="transparent",
+            border_width=1,
+            command=restore_committed,
+            state=tk.NORMAL if state["restore_curves"] is not None else tk.DISABLED,
+        )
+        self.dewarp_restore_button.pack(side=ctk.LEFT, padx=8)
         ctk.CTkButton(
             actions,
             text="Neutral curve",

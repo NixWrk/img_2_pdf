@@ -74,6 +74,9 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.geometry_summary_var.get() == "Wave preview: pending"
         assert app.apply_processing_button.cget("text") == "Apply candidate for export"
         assert app.deskew_method_var.get() == "Hybrid (recommended)"
+        assert app.deskew_reset_button.cget("text") == "Reset to automatic"
+        assert app.deskew_restore_button.cget("text") == "Restore committed"
+        assert app.deskew_restore_button.cget("state") == "disabled"
         assert app.binarization_method_var.get() == "None"
         assert app.despeckle_strength_var.get() == "None"
         assert app.page_layout_var.get() == "Keep source page"
@@ -315,6 +318,9 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         app.open_dewarp_points_editor()
         app.update()
         assert app.dewarp_editor_window is not None
+        assert app.dewarp_reset_button.cget("text") == "Reset to automatic"
+        assert app.dewarp_restore_button.cget("text") == "Restore committed"
+        assert app.dewarp_restore_button.cget("state") == "disabled"
         assert app.inline_editor_host.winfo_manager() == "grid"
         _pump_until(app, lambda: app.dewarp_resize_job is None)
         initial_dewarp_bounds = app.dewarp_source_canvas.bbox("dewarp-source")
@@ -414,6 +420,26 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
             for curve in app.dewarp_editor_state["curves"]
         )
         assert reopened_curves == saved_curves
+        app.dewarp_editor_state["curves"][0]["points"][1] = (0.125, 0.08)
+        draft_curves = tuple(
+            (float(curve["anchor"]), tuple(curve["points"]))
+            for curve in app.dewarp_editor_state["curves"]
+        )
+        assert draft_curves != saved_curves
+        restore_revision = second_entry.revision
+        restore_pixels = second_entry.current_image
+        restore_committed = second_entry.committed_processing
+        app.dewarp_restore_button.invoke()
+        assert (
+            tuple(
+                (float(curve["anchor"]), tuple(curve["points"]))
+                for curve in app.dewarp_editor_state["curves"]
+            )
+            == saved_curves
+        )
+        assert second_entry.revision == restore_revision
+        np.testing.assert_array_equal(second_entry.current_image, restore_pixels)
+        assert second_entry.committed_processing is restore_committed
         app.dewarp_close_button.invoke()
         app.open_review_processing_dialog()
         app.update()
