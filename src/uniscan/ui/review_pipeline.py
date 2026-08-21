@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, is_dataclass
 from typing import Mapping
 
 from .stage_reasons import StageReason, describe_stage_reason
-from .stage_state import PipelineStage, StageMode, StageState, StageStatus
+from .stage_state import PipelineStage, StageMode, StageState, StageStatus, downstream_stages
 
 
 _TITLES = {
@@ -193,6 +193,73 @@ def _cleanup_mode(recipe: object, payload: Mapping[str, object]) -> StageMode:
     return StageMode.OFF
 
 
+def _semantic_value(value: object):
+    if is_dataclass(value):
+        return _semantic_value(asdict(value))
+    if isinstance(value, Mapping):
+        return tuple(sorted((str(key), _semantic_value(item)) for key, item in value.items()))
+    if isinstance(value, (tuple, list)):
+        return tuple(_semantic_value(item) for item in value)
+    return value
+
+
+def _pending_changed_stage(
+    committed_recipe: object | None,
+    request: object | None,
+    *,
+    perspective_candidate: bool,
+) -> PipelineStage | None:
+    """Find the earliest stage changed by an uncommitted candidate.
+
+    This is UI-only invalidation: full-pipeline commits publish a fresh recipe,
+    so no durable stale flag is retained on the page entry.
+    """
+    if request is None or committed_recipe is None:
+        return None
+    if perspective_candidate:
+        return PipelineStage.PERSPECTIVE
+    fields = (
+        (
+            PipelineStage.WAVES,
+            (
+                "dewarp_method",
+                "dewarp_model",
+                "dewarp_already_applied",
+                "auto_dewarp_uvdoc",
+                "auto_dewarp_uvdoc_grid",
+            ),
+        ),
+        (PipelineStage.DESKEW, ("deskew_method", "deskew_angle_degrees")),
+        (PipelineStage.LIGHTING, ("shadow_method",)),
+        (PipelineStage.CLEANUP, ("postprocess_name", "preprocess_settings")),
+        (
+            PipelineStage.LAYOUT,
+            (
+                "page_layout",
+                "page_margin_mm",
+                "horizontal_alignment",
+                "vertical_alignment",
+                "page_dpi",
+            ),
+        ),
+    )
+    if _semantic_value(getattr(request, "orientation_method", None)) != _semantic_value(
+        getattr(committed_recipe, "orientation_method", None)
+    ) or _semantic_value(getattr(request, "perspective_points", None)) != _semantic_value(
+        getattr(committed_recipe, "perspective_points", None)
+    ):
+        return PipelineStage.PERSPECTIVE
+    for stage, names in fields:
+        for name in names:
+            requested = getattr(request, name, None)
+            committed = getattr(committed_recipe, name, None)
+            if name == "page_dpi" and requested == 100:
+                continue
+            if _semantic_value(requested) != _semantic_value(committed):
+                return stage
+    return None
+
+
 def build_pipeline_cards(
     entry: object,
     *,
@@ -232,6 +299,14 @@ def build_pipeline_cards(
     contour = getattr(entry, "detected_contour", None)
     review_reasons = tuple(getattr(entry, "review_reasons", ()) or ())
     backend = getattr(entry, "detected_backend", None)
+    changed_stage = _pending_changed_stage(
+        committed_recipe,
+        pending_request,
+        perspective_candidate=crop_state == "proposed" and contour is not None,
+    )
+    committed_cards = {}
+    if changed_stage is not None and pending and pending_diagnostics is None:
+        committed_cards = {card.stage: card for card in build_pipeline_cards(entry)}
     if crop_state == "proposed" and contour is not None:
         perspective_status = StageStatus.APPLIED
         perspective_reason = review_reasons[0] if review_reasons else "applied_by_detection_backend"
@@ -273,6 +348,16 @@ def build_pipeline_cards(
     ]
 
     def add(stage: PipelineStage, payload: Mapping[str, object], *, mode: StageMode) -> None:
+        if (
+            changed_stage is not None
+            and pending_diagnostics is None
+            and stage is not changed_stage
+            and stage not in downstream_stages(changed_stage)
+        ):
+            committed_card = committed_cards.get(stage)
+            if committed_card is not None:
+                cards.append(committed_card)
+                return
         state = _state_from_diagnostic(
             stage,
             payload,
@@ -282,6 +367,28 @@ def build_pipeline_cards(
             committed_revision=committed_revision,
             pending=pending and pending_error is None and not payload,
         )
+        if changed_stage is stage and pending_diagnostics is None and pending_error is None:
+            state = StageState(
+                mode=state.mode,
+                status=StageStatus.RUNNING,
+                input_revision=state.input_revision,
+                candidate_revision=state.candidate_revision,
+                committed_revision=state.committed_revision,
+            )
+        if (
+            changed_stage is not None
+            and stage in downstream_stages(changed_stage)
+            and pending_diagnostics is None
+        ):
+            state = StageState(
+                mode=state.mode,
+                status=StageStatus.STALE,
+                reason_code="upstream_changed",
+                metrics=state.metrics,
+                input_revision=state.input_revision,
+                candidate_revision=state.candidate_revision,
+                committed_revision=state.committed_revision,
+            )
         cards.append(
             PipelineCard(stage, _TITLES[stage], state, _reason_for(stage, state), _CONTROLS[stage])
         )
@@ -311,6 +418,8 @@ def build_pipeline_cards(
     result_status = (
         StageStatus.ERROR
         if pending_error is not None
+        else StageStatus.STALE
+        if changed_stage is not None and pending and pending_diagnostics is None
         else StageStatus.RUNNING
         if pending and pending_diagnostics is None
         else StageStatus.EDITED

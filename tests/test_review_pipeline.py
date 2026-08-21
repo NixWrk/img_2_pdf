@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
 
+from uniscan.core.dewarp import DewarpModel
 from uniscan.core.processing import PageProcessingRequest, process_document_page
+from uniscan.core.preprocess import PreprocessSettings
 from uniscan.session import CommittedPageProcessing
-from uniscan.ui.review_pipeline import build_pipeline_cards
+from uniscan.ui.review_pipeline import build_pipeline_cards, _pending_changed_stage
 from uniscan.ui.stage_state import PipelineStage, StageMode, StageStatus
 
 
@@ -27,7 +30,7 @@ def _recipe():
         deskew_method="hybrid",
         shadow_method="auto",
         postprocess_name="None",
-        preprocess_settings=object(),
+        preprocess_settings=PreprocessSettings(contrast=1.25, brightness=10, denoise=4),
         page_layout="a4",
     )
 
@@ -223,3 +226,94 @@ def test_adapter_accepts_real_committed_recipe_and_diagnostics() -> None:
     assert cards[2].state.mode is StageMode.OFF
     assert cards[3].state.mode is StageMode.OFF
     assert cards[-1].reason.summary == "Committed result is ready for export."
+
+
+def test_pending_invalidation_marks_only_downstream_until_full_recompute() -> None:
+    committed = SimpleNamespace(recipe=_recipe(), diagnostics={})
+    pending = _recipe()
+    pending.deskew_method = "manual"
+    cards = build_pipeline_cards(
+        _entry(committed=committed),
+        pending_request=pending,
+    )
+    assert cards[1].state.status is StageStatus.IDLE
+    assert cards[2].state.status is StageStatus.RUNNING
+    assert cards[3].state.status is StageStatus.STALE
+    assert cards[3].reason.summary == "This stage needs to be rerun after an earlier edit."
+    assert cards[4].state.status is StageStatus.STALE
+    assert cards[5].state.status is StageStatus.STALE
+    assert cards[-1].state.status is StageStatus.STALE
+
+
+def test_pending_changed_stage_mapping_ignores_preview_dpi_and_covers_geometry_inputs() -> None:
+    committed = SimpleNamespace(
+        orientation_method="none",
+        perspective_points=None,
+        dewarp_method="auto",
+        dewarp_model=None,
+        dewarp_already_applied=False,
+        auto_dewarp_uvdoc=False,
+        auto_dewarp_uvdoc_grid=True,
+        deskew_method="hybrid",
+        deskew_angle_degrees=None,
+        shadow_method="auto",
+        postprocess_name="None",
+        preprocess_settings=SimpleNamespace(contrast=1.0),
+        page_layout="a4",
+        page_margin_mm=10.0,
+        horizontal_alignment="center",
+        vertical_alignment="center",
+        page_dpi=300,
+    )
+    preview_values = vars(committed).copy()
+    preview_values["page_dpi"] = 100
+    preview = SimpleNamespace(**preview_values)
+    assert _pending_changed_stage(committed, preview, perspective_candidate=False) is None
+    committed.dewarp_model = {
+        "method": "auto",
+        "control_points": ((0.0, 0.0), (0.5, 0.0), (1.0, 0.0)),
+        "source": "automatic",
+        "line_count": 0,
+        "control_curves": None,
+    }
+    model_values = vars(preview).copy()
+    model_values["dewarp_model"] = DewarpModel(
+        method="auto",
+        control_points=((0.0, 0.0), (0.5, 0.0), (1.0, 0.0)),
+    )
+    model_preview = SimpleNamespace(**model_values)
+    assert _pending_changed_stage(committed, model_preview, perspective_candidate=False) is None
+
+    orientation_values = vars(preview).copy()
+    orientation_values["orientation_method"] = "90"
+    orientation = SimpleNamespace(**orientation_values)
+    assert (
+        _pending_changed_stage(committed, orientation, perspective_candidate=False)
+        is PipelineStage.PERSPECTIVE
+    )
+    uvdoc_values = vars(preview).copy()
+    uvdoc_values["auto_dewarp_uvdoc"] = True
+    uvdoc = SimpleNamespace(**uvdoc_values)
+    assert (
+        _pending_changed_stage(committed, uvdoc, perspective_candidate=False) is PipelineStage.WAVES
+    )
+    assert (
+        _pending_changed_stage(committed, preview, perspective_candidate=True)
+        is PipelineStage.PERSPECTIVE
+    )
+
+
+def test_preprocess_semantics_map_equal_values_to_none_and_edits_to_cleanup() -> None:
+    committed = _recipe()
+    assert _pending_changed_stage(committed, _recipe(), perspective_candidate=False) is None
+    for changed in (
+        replace(committed.preprocess_settings, contrast=1.4),
+        replace(committed.preprocess_settings, binarization_method="sauvola"),
+        replace(committed.preprocess_settings, despeckle_strength="normal"),
+    ):
+        pending = _recipe()
+        pending.preprocess_settings = changed
+        assert (
+            _pending_changed_stage(committed, pending, perspective_candidate=False)
+            is PipelineStage.CLEANUP
+        )
