@@ -38,6 +38,7 @@ from uniscan.core.dewarp import (
     DewarpModel,
     estimate_textline_dewarp_model,
     interpolate_control_curve,
+    normalize_control_curves,
 )
 from uniscan.core.pipeline import PageResult, PipelineOptions, process_loaded_items
 from uniscan.core.processing import PageProcessingRequest, process_document_page
@@ -94,6 +95,7 @@ from uniscan.session import (
     load_or_create_session,
 )
 from uniscan.storage import ProcessingStageCache
+from uniscan.ui.stage_transaction import StageEditTransaction, StageTransactionClosedError
 from uniscan.ui.camera_health import camera_health_state
 from uniscan.ui.export_preflight import ExportPreflight, build_export_preflight
 from uniscan.ui.import_sources import (
@@ -5228,6 +5230,33 @@ class UnifiedScanApp(ctk.CTk):
         request = self._processing_request(entry=entry, preview=False)
         return self._commit_processing_request(entry, request)
 
+    def _compute_processing_candidate(self, entry, request: PageProcessingRequest):
+        """Compute a committed candidate without mutating the entry."""
+        result = process_document_page(entry.original_image, request)
+        committed = CommittedPageProcessing.from_result(
+            request,
+            result.diagnostics,
+            result.image,
+        )
+        return result.image, committed, result.diagnostics
+
+    def _commit_dewarp_candidate(self, entry, transaction, curves, request):
+        """Stage and publish a complete Waves candidate through its CAS."""
+        pixels, committed, diagnostics = self._compute_processing_candidate(entry, request)
+        normalized_curves = normalize_control_curves(curves)
+        transaction.stage(
+            entry.entry_id,
+            pixels=pixels,
+            committed_processing=committed,
+            metadata={
+                "dewarp_control_curves": normalized_curves,
+                "dewarp_control_points": normalized_curves[min(1, len(normalized_curves) - 1)][1],
+            },
+        )
+        transaction.commit()
+        self._last_processing_cache_hits = diagnostics.cache_hits
+        return diagnostics.dewarp
+
     def _commit_processing_request(self, entry, request: PageProcessingRequest):
         result = process_document_page(entry.original_image, request)
         committed = CommittedPageProcessing.from_result(
@@ -5737,25 +5766,35 @@ class UnifiedScanApp(ctk.CTk):
         )
         if method in {DESKEW_METHOD_NONE, DESKEW_METHOD_MANUAL}:
             method = DESKEW_METHOD_HYBRID
-        for idx in indices:
-            entry = self.session.entries[idx]
-            previous_committed = entry.committed_processing
-            request = (
-                previous_committed.recipe.to_request()
-                if previous_committed is not None
-                else self._processing_request(entry=entry, preview=False)
-            )
-            request = replace(
-                request,
-                deskew_method=method,
-                deskew_angle_degrees=None,
-                stage_cache=self.processing_cache,
-                source_fingerprint=None,
-                cancel_cb=None,
-            )
-            self._commit_processing_request(entry, request)
-            assert entry.committed_processing is not None
-            angles.append(float(entry.committed_processing.diagnostics["deskew_angle_degrees"]))
+        entries = tuple(self.session.entries[idx] for idx in indices)
+        transaction = StageEditTransaction.begin(entries, metadata_fields=())
+        try:
+            for entry in entries:
+                previous_committed = entry.committed_processing
+                request = (
+                    previous_committed.recipe.to_request()
+                    if previous_committed is not None
+                    else self._processing_request(entry=entry, preview=False)
+                )
+                request = replace(
+                    request,
+                    deskew_method=method,
+                    deskew_angle_degrees=None,
+                    stage_cache=self.processing_cache,
+                    source_fingerprint=None,
+                    cancel_cb=None,
+                )
+                pixels, committed, diagnostics = self._compute_processing_candidate(entry, request)
+                transaction.stage(entry.entry_id, pixels=pixels, committed_processing=committed)
+                angles.append(float(diagnostics.deskew_angle_degrees))
+            transaction.commit()
+            self._last_processing_cache_hits = diagnostics.cache_hits
+        except Exception:
+            try:
+                transaction.discard()
+            except StageTransactionClosedError:
+                pass
+            raise
 
         self.refresh_page_list(keep_entry_ids=entry_ids)
         mean_angle = sum(angles) / max(1, len(angles))
@@ -5819,6 +5858,7 @@ class UnifiedScanApp(ctk.CTk):
         if self.inline_editor_close_callback is not None:
             self.inline_editor_close_callback()
 
+        transaction = StageEditTransaction.begin((entry,))
         authoritative_source = entry.original_image
         previous_committed = entry.committed_processing
         committed_dewarp_method = DEWARP_UI_METHODS.get(
@@ -6339,8 +6379,14 @@ class UnifiedScanApp(ctk.CTk):
 
         def apply_points() -> None:
             try:
-                entry.set_dewarp_control_curves(
-                    [(float(curve["anchor"]), curve["points"]) for curve in state["curves"]]
+                curves = tuple(
+                    (float(curve["anchor"]), tuple(curve["points"])) for curve in state["curves"]
+                )
+                diagnostics = self._commit_dewarp_candidate(
+                    entry,
+                    transaction,
+                    curves,
+                    adjusted_request(),
                 )
                 method_label = next(
                     (
@@ -6351,7 +6397,6 @@ class UnifiedScanApp(ctk.CTk):
                     self.dewarp_method_var.get(),
                 )
                 self.dewarp_method_var.set(method_label)
-                diagnostics = self._commit_processing_request(entry, adjusted_request())
                 self.refresh_page_list(keep_entry_ids=(entry.entry_id,))
                 self._set_status(
                     f"Saved 3 dewarp curves; "

@@ -401,6 +401,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert resized_dewarp_bounds[3] - resized_dewarp_bounds[1] > initial_dewarp_size[1]
         preview_pixels = app.dewarp_editor_state["last_corrected"].copy()
         app.dewarp_apply_points_button.invoke()
+        assert app.dewarp_editor_window is None
         np.testing.assert_array_equal(second_entry.current_image, preview_pixels)
         assert second_entry.dewarp_control_curves is not None
         assert len(second_entry.dewarp_control_curves) == 3
