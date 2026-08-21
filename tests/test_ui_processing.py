@@ -32,6 +32,7 @@ from uniscan.ui.app import (
     _compose_split_preview,
     _detection_summary,
     _entry_has_crop_proposal,
+    _preview_matches_committed,
     _load_import_preferences,
     _save_import_preferences,
     _entry_needs_crop_review,
@@ -375,6 +376,34 @@ def test_fast_preview_request_is_lightweight_but_export_stays_full_dpi() -> None
     assert app._processing_request(preview=False).page_dpi == 360
 
 
+def test_preview_match_ignores_display_dpi_but_detects_pending_controls(tmp_path) -> None:
+    app = _app_for_processing()
+    app.export_pdf_dpi_var.set(360)
+    session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
+    entry = session.add_image(
+        name="page",
+        image=np.full((20, 30, 3), 180, dtype=np.uint8),
+    )
+    committed_request = app._processing_request(entry=entry, preview=False)
+    result = process_document_page(entry.original_image, committed_request)
+    entry.committed_processing = CommittedPageProcessing.from_result(
+        committed_request,
+        result.diagnostics,
+        result.image,
+    )
+
+    assert _preview_matches_committed(
+        entry,
+        app._processing_request(entry=entry, preview=True),
+    )
+
+    app.postprocess_var.set("Black and White")
+    assert not _preview_matches_committed(
+        entry,
+        app._processing_request(entry=entry, preview=True),
+    )
+
+
 def test_processing_request_keeps_automatic_stages_and_one_manual_override() -> None:
     app = _app_for_processing()
     app.orientation_method_var.set("Automatic (conservative)")
@@ -681,6 +710,7 @@ def test_page_list_distinguishes_automatic_needs_review_flag() -> None:
 
     app.page_listbox = _Listbox()
     app.page_count_var = _Var("")
+    app.crop_warning_var = _Var("")
     app.toolbar_export_pdf_button = None
     app.toolbar_export_options_button = None
     app._sync_page_selection_to_session = lambda: None
@@ -692,6 +722,30 @@ def test_page_list_distinguishes_automatic_needs_review_flag() -> None:
 
     assert app.page_listbox.items[0].endswith("page 8 [L]  [Needs review]")
     assert app.page_listbox.items[1].endswith("page 8 [R]  ⚠")
+    assert app.crop_warning_var.get() == "⚠ 2 pages need crop review"
+
+
+def test_crop_warning_is_empty_for_zero_pages() -> None:
+    app = object.__new__(UnifiedScanApp)
+    app.session = SimpleNamespace(entries=[])
+    app.page_listbox = SimpleNamespace(
+        delete=lambda *_args: None,
+        curselection=lambda: (),
+        selection_set=lambda _index: None,
+    )
+    app.page_count_var = _Var("stale")
+    app.crop_warning_var = _Var("stale")
+    app.toolbar_export_pdf_button = None
+    app.toolbar_export_options_button = None
+    app._sync_page_selection_to_session = lambda: None
+    app._update_page_action_states = lambda: None
+    app._sync_controls_from_single_committed_page = lambda: None
+    app.update_page_preview = lambda: None
+
+    app.refresh_page_list()
+
+    assert app.page_count_var.get() == "0 pages"
+    assert app.crop_warning_var.get() == ""
 
 
 def test_preview_error_is_explicit_and_stale_generation_is_ignored() -> None:

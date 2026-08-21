@@ -85,6 +85,7 @@ from uniscan.session import (
     CROP_STATE_NONE,
     CROP_STATE_PROPOSED,
     CommittedPageProcessing,
+    ProcessingRecipe,
     SessionInUseError,
     UnsafeSessionLockError,
     acquire_autosave_lock,
@@ -455,6 +456,20 @@ def _entry_needs_crop_review(entry) -> bool:
     )
 
 
+def _preview_matches_committed(entry, request: PageProcessingRequest) -> bool:
+    """Whether a display-DPI preview represents the durable export recipe."""
+    committed = getattr(entry, "committed_processing", None)
+    if committed is None:
+        return False
+    preview_recipe = ProcessingRecipe.from_request(request)
+    normalized_preview = replace(
+        preview_recipe,
+        page_dpi=committed.recipe.page_dpi,
+        lighting_diagnostics=committed.recipe.lighting_diagnostics,
+    )
+    return normalized_preview == committed.recipe
+
+
 IMPORT_PREFERENCES_SCHEMA = 1
 DEFAULT_IMPORT_PDF_DPI = 300
 
@@ -605,6 +620,9 @@ class UnifiedScanApp(ctk.CTk):
         self.review_preview_threads: list[threading.Thread] = []
         self.review_preview_cancel_event = threading.Event()
         self.review_preview_generation = 0
+        self.review_preview_context: tuple[int, str, PageProcessingRequest, float | None] | None = (
+            None
+        )
         self.review_processing_window: ctk.CTkFrame | None = None
         self.export_dialog_window: ctk.CTkToplevel | None = None
         self.inline_editor_host: ctk.CTkFrame | None = None
@@ -647,7 +665,8 @@ class UnifiedScanApp(ctk.CTk):
         self.camera_resolution = self._default_camera_resolution()
         self.apply_changes_to_all_var = tk.BooleanVar(value=False)
         self.lightweight_preview_var = tk.BooleanVar(value=True)
-        self.preview_mode_var = tk.StringVar(value="Processed")
+        self.preview_mode_var = tk.StringVar(value="Preview")
+        self.crop_warning_var = tk.StringVar(value="")
         self.postprocess_var = tk.StringVar(value="None")
         self.lens_mode_var = tk.StringVar(value="Document")
         self.preprocess_preset_var = tk.StringVar(value="Document")
@@ -1053,13 +1072,13 @@ class UnifiedScanApp(ctk.CTk):
             textvariable=self.page_count_var,
             text_color=("#60646c", "#a0a4ab"),
         ).pack(side=ctk.RIGHT)
-        ctk.CTkLabel(
+        self.crop_warning_label = ctk.CTkLabel(
             left,
-            text="⚠  automatic crop not found",
+            textvariable=self.crop_warning_var,
             anchor="w",
             text_color=("#8a5a00", "#d6a84b"),
             font=ctk.CTkFont(size=11),
-        ).pack(fill=ctk.X, padx=10, pady=(0, 5))
+        )
         self.page_listbox = tk.Listbox(
             left,
             selectmode=tk.EXTENDED,
@@ -1187,7 +1206,7 @@ class UnifiedScanApp(ctk.CTk):
         ).pack(side=ctk.LEFT)
         self.preview_mode_selector = ctk.CTkSegmentedButton(
             preview_toolbar,
-            values=["Processed", "Original", "Compare"],
+            values=["Preview", "Original", "Compare"],
             variable=self.preview_mode_var,
             command=self._on_preview_mode_change,
         )
@@ -1209,15 +1228,22 @@ class UnifiedScanApp(ctk.CTk):
         self.page_preview_after_frame = ctk.CTkFrame(preview)
         self.page_preview_after_frame.grid_rowconfigure(1, weight=1)
         self.page_preview_after_frame.grid_columnconfigure(0, weight=1)
-        self.page_preview_after_title = ctk.CTkLabel(
-            self.page_preview_after_frame, text="Processed preview"
-        )
+        self.page_preview_after_frame.grid_columnconfigure(1, weight=0)
+        self.page_preview_after_title = ctk.CTkLabel(self.page_preview_after_frame, text="Preview")
         self.page_preview_after_title.grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
+        self.page_preview_after_state = ctk.CTkLabel(
+            self.page_preview_after_frame,
+            text="Preview pending",
+            text_color=("#60646c", "#a0a4ab"),
+        )
+        self.page_preview_after_state.grid(row=0, column=1, sticky="e", padx=8, pady=(8, 4))
         self.page_preview_after_label = ctk.CTkLabel(
             self.page_preview_after_frame,
             text="No page selected",
         )
-        self.page_preview_after_label.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self.page_preview_after_label.grid(
+            row=1, column=0, columnspan=2, sticky="nsew", padx=8, pady=(0, 8)
+        )
         self.page_preview_before_frame.bind(
             "<Configure>",
             self._on_review_preview_resize,
@@ -1497,7 +1523,7 @@ class UnifiedScanApp(ctk.CTk):
         ).pack(side=ctk.LEFT)
         self.apply_processing_button = ctk.CTkButton(
             processing,
-            text="Apply preview to pages",
+            text="Apply candidate for export",
             command=self.apply_review_changes,
         )
         self.apply_processing_button.pack(fill=ctk.X, padx=6, pady=(0, 14))
@@ -3603,6 +3629,7 @@ class UnifiedScanApp(ctk.CTk):
 
         page_count = len(self.session.entries)
         self.page_count_var.set(f"{page_count} page" if page_count == 1 else f"{page_count} pages")
+        self._update_crop_warning()
         export_state = tk.NORMAL if page_count else tk.DISABLED
         for button_name in (
             "toolbar_export_pdf_button",
@@ -3623,6 +3650,31 @@ class UnifiedScanApp(ctk.CTk):
         self._update_page_action_states()
         self._sync_controls_from_single_committed_page()
         self.update_page_preview()
+
+    def _update_crop_warning(self) -> None:
+        entries = list(self.session.entries)
+        review_count = sum(
+            _entry_needs_crop_review(entry) or _entry_has_crop_proposal(entry) for entry in entries
+        )
+        text = ""
+        if review_count:
+            suffix = "" if review_count == 1 else "s"
+            text = f"⚠ {review_count} page{suffix} need crop review"
+        self.crop_warning_var.set(text)
+
+        label = self.__dict__.get("crop_warning_label")
+        if label is None:
+            return
+        if text:
+            if not label.winfo_manager():
+                label.pack(
+                    fill=ctk.X,
+                    padx=10,
+                    pady=(0, 5),
+                    before=self.page_listbox,
+                )
+        elif label.winfo_manager():
+            label.pack_forget()
 
     def _sync_page_selection_to_session(self) -> None:
         selected = set(self.page_listbox.curselection())
@@ -3672,9 +3724,7 @@ class UnifiedScanApp(ctk.CTk):
             menu.entryconfigure(0, state=tk.NORMAL if can_move_up else tk.DISABLED)
             menu.entryconfigure(1, state=tk.NORMAL if can_move_down else tk.DISABLED)
             menu.entryconfigure(3, state=tk.NORMAL if selected else tk.DISABLED)
-            menu.entryconfigure(
-                5, state=tk.NORMAL if can_undo_deletion else tk.DISABLED
-            )
+            menu.entryconfigure(5, state=tk.NORMAL if can_undo_deletion else tk.DISABLED)
 
     def _page_index_at_y(self, y: int, *, clamp: bool = False) -> int | None:
         if self.page_listbox.size() == 0:
@@ -3776,11 +3826,23 @@ class UnifiedScanApp(ctk.CTk):
         self.update_idletasks()
         self.update_page_preview()
 
+    def _set_preview_result_state(self, text: str, *, kind: str = "pending") -> None:
+        label = self.__dict__.get("page_preview_after_state")
+        if label is None:
+            return
+        colors = {
+            "pending": ("#60646c", "#a0a4ab"),
+            "candidate": ("#8a5a00", "#d6a84b"),
+            "committed": ("#157347", "#59d98e"),
+            "error": ("#b42318", "#ff7b72"),
+        }
+        label.configure(text=text, text_color=colors[kind])
+
     def _layout_page_previews(self) -> None:
         """Give a single preview the full center area and split it only for Compare."""
         mode = self.preview_mode_var.get()
-        if mode not in {"Processed", "Original", "Compare"}:
-            mode = "Processed"
+        if mode not in {"Preview", "Original", "Compare"}:
+            mode = "Preview"
             self.preview_mode_var.set(mode)
 
         self.page_preview_before_frame.grid_forget()
@@ -3829,6 +3891,8 @@ class UnifiedScanApp(ctk.CTk):
             self.page_preview_after_photo = None
             self.page_preview_before_image = None
             self.page_preview_after_image = None
+            self.page_preview_after_title.configure(text="Preview")
+            self._set_preview_result_state("No candidate")
             return
 
         index = selected[0]
@@ -3839,6 +3903,8 @@ class UnifiedScanApp(ctk.CTk):
             self.page_preview_after_photo = None
             self.page_preview_before_image = None
             self.page_preview_after_image = None
+            self.page_preview_after_title.configure(text="Preview")
+            self._set_preview_result_state("No candidate")
             return
 
         entry = self.session.entries[index]
@@ -3850,14 +3916,9 @@ class UnifiedScanApp(ctk.CTk):
             else None
         )
         self.page_preview_after_title.configure(
-            text=(
-                "Processed preview · 2 output pages"
-                if split_ratio is not None
-                else "Crop proposal — not exported"
-                if _entry_has_crop_proposal(entry)
-                else "Processed preview"
-            )
+            text="Preview · 2 output pages" if split_ratio is not None else "Preview"
         )
+        self._set_preview_result_state("Checking…")
         try:
             before = self._review_before_image(entry)
         except Exception as exc:
@@ -3868,6 +3929,7 @@ class UnifiedScanApp(ctk.CTk):
             self.page_preview_after_photo = None
             self.page_preview_before_image = None
             self.page_preview_after_image = None
+            self._set_preview_result_state("Preview failed", kind="error")
             self._set_status(message)
             return
 
@@ -3880,7 +3942,7 @@ class UnifiedScanApp(ctk.CTk):
             self.page_preview_before_photo = None
             self.page_preview_before_image = None
 
-        if mode in {"Processed", "Compare"}:
+        if mode in {"Preview", "Compare"}:
             self.page_preview_after_image = None
             fast_preview = bool(self.lightweight_preview_var.get())
             # Reading one committed generation on Tk is quick; all expensive
@@ -3892,9 +3954,11 @@ class UnifiedScanApp(ctk.CTk):
                 message = f"Preview failed: {exc}"
                 self._set_preview_message(self.page_preview_after_label, message)
                 self.page_preview_after_photo = None
+                self._set_preview_result_state("Preview failed", kind="error")
                 self._set_status(message)
                 return
             generation = self.review_preview_generation
+            self.review_preview_context = (generation, entry.entry_id, request, split_ratio)
             cancel_event = self.review_preview_cancel_event
             mode_label = "fast preview (approximate)" if fast_preview else "full-resolution"
             self._set_preview_message(
@@ -3948,7 +4012,7 @@ class UnifiedScanApp(ctk.CTk):
             )
             self.page_preview_before_label.configure(image=photo, text="")
             self.page_preview_before_photo = photo
-        if mode in {"Processed", "Compare"} and self.page_preview_after_image is not None:
+        if mode in {"Preview", "Compare"} and self.page_preview_after_image is not None:
             photo = self._to_ctk_photo_for_label(
                 self.page_preview_after_image,
                 self.page_preview_after_label,
@@ -3958,6 +4022,7 @@ class UnifiedScanApp(ctk.CTk):
 
     def _cancel_review_page_preview(self) -> None:
         self.review_preview_generation = getattr(self, "review_preview_generation", 0) + 1
+        self.review_preview_context = None
         event = getattr(self, "review_preview_cancel_event", None)
         if event is not None:
             event.set()
@@ -4048,12 +4113,30 @@ class UnifiedScanApp(ctk.CTk):
             message = f"Preview failed: {error or 'no image was produced'}"
             self._set_preview_message(self.page_preview_after_label, message)
             self.page_preview_after_photo = None
+            self._set_preview_result_state("Preview failed", kind="error")
             self._set_status(message)
             return
         after_photo = self._to_ctk_photo_for_label(image, self.page_preview_after_label)
         self.page_preview_after_label.configure(image=after_photo, text="")
         self.page_preview_after_photo = after_photo
         self.page_preview_after_image = image
+        context = self.__dict__.get("review_preview_context")
+        if context is not None and context[0] == generation:
+            _, entry_id, request, split_ratio = context
+            entry = next(
+                (item for item in self.session.entries if item.entry_id == entry_id),
+                None,
+            )
+            if entry is not None:
+                is_candidate = (
+                    split_ratio is not None
+                    or _entry_has_crop_proposal(entry)
+                    or not _preview_matches_committed(entry, request)
+                )
+                if is_candidate:
+                    self._set_preview_result_state("Candidate — not exported", kind="candidate")
+                else:
+                    self._set_preview_result_state("Committed — export ready", kind="committed")
         if diagnostics is not None:
             dewarp = diagnostics.dewarp
             if dewarp.applied:
@@ -5164,7 +5247,10 @@ class UnifiedScanApp(ctk.CTk):
             button.configure(state=tk.DISABLED)
         title = getattr(self, "page_preview_after_title", None)
         if title is not None:
-            title.configure(text="Processed preview")
+            title.configure(text="Preview")
+        state = getattr(self, "page_preview_after_state", None)
+        if state is not None:
+            state.configure(text="Preview pending")
 
     def _activate_split_preview(self, entry, ratio: float) -> None:
         ratio = float(np.clip(ratio, 0.05, 0.95))
@@ -5506,7 +5592,7 @@ class UnifiedScanApp(ctk.CTk):
         try:
             right_entry = self._commit_entry_split(index, entry, self.pending_split_ratio)
             self._clear_pending_split_preview()
-            self.preview_mode_var.set("Processed")
+            self.preview_mode_var.set("Preview")
             self._layout_page_previews()
             self.refresh_page_list(keep_entry_ids=(entry.entry_id,))
             self._set_status(
@@ -6533,7 +6619,9 @@ class UnifiedScanApp(ctk.CTk):
                 else:
                     self.refresh_page_list(keep_index=keep_index)
                 cache_note = f" Stage cache hits: {cache_hit_count}." if cache_hit_count else ""
-                self._set_status(f"Reprocessed {len(target_entries)} {scope}.{cache_note}")
+                self._set_status(
+                    f"Committed {len(target_entries)} {scope}; ready for export.{cache_note}"
+                )
             finally:
                 snapshot_dir.cleanup()
 

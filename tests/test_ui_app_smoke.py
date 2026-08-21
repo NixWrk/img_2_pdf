@@ -58,12 +58,13 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.preprocess_preset_var.get() == "Document"
         assert app.dewarp_method_var.get() == "Automatic (validated)"
         assert app.geometry_summary_var.get() == "Wave preview: pending"
-        assert app.apply_processing_button.cget("text") == "Apply preview to pages"
+        assert app.apply_processing_button.cget("text") == "Apply candidate for export"
         assert app.deskew_method_var.get() == "Hybrid (recommended)"
         assert app.binarization_method_var.get() == "None"
         assert app.despeckle_strength_var.get() == "None"
         assert app.page_layout_var.get() == "Keep source page"
-        assert app.preview_mode_var.get() == "Processed"
+        assert app.preview_mode_var.get() == "Preview"
+        assert app.crop_warning_var.get() == ""
         assert app.page_preview_after_frame.winfo_manager() == "grid"
         assert app.page_preview_before_frame.winfo_manager() == ""
         assert app.tabs._name_list == [app.tab_review_name, app.tab_camera_name]
@@ -108,6 +109,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         app.refresh_page_list(keep_index=1)
         app.update()
         assert app.page_count_var.get() == "2 pages"
+        assert app.crop_warning_var.get() == "⚠ 2 pages need crop review"
         assert app.toolbar_export_pdf_button.cget("state") == "normal"
         assert app.toolbar_export_options_button.cget("state") == "normal"
         export_calls: list[tuple[str, str, int | str]] = []
@@ -392,6 +394,14 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.page_preview_before_frame.winfo_manager() == "grid"
         assert app.page_preview_after_frame.winfo_manager() == "grid"
         assert app.geometry_summary_var.get() != "Wave preview: pending"
+        assert app.page_preview_after_state.cget("text") == "Committed — export ready"
+        app.postprocess_var.set("Black and White")
+        app.update_page_preview()
+        _pump_until(
+            app,
+            lambda: app.page_preview_after_state.cget("text") == "Candidate — not exported",
+        )
+        app._sync_controls_from_single_committed_page()
         app.deiconify()
         app.geometry("1100x720")
         app.update()
@@ -649,7 +659,7 @@ def test_split_workflow_previews_two_pages_before_mutating_session(tmp_path, mon
         assert [entry.name for entry in app.session.entries] == ["spread [L]", "spread [R]"]
         assert app.page_listbox.curselection() == (0,)
         assert app.apply_split_button.cget("state") == "disabled"
-        assert app.preview_mode_var.get() == "Processed"
+        assert app.preview_mode_var.get() == "Preview"
     finally:
         app._on_close()
         _pump_until(app, lambda: app._close_wait_job is None)
