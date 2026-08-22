@@ -73,6 +73,7 @@ def test_auto_deskew_processing_failure_on_second_page_keeps_real_batch_unchange
         assert entry.revision == revision
         assert entry.committed_processing is committed
     assert app.stage_history.undo_depth == 0
+    assert list(app.stage_history.root.iterdir()) == []
 
 
 def test_auto_deskew_store_failure_on_second_page_rolls_back_real_batch(
@@ -102,6 +103,7 @@ def test_auto_deskew_store_failure_on_second_page_rolls_back_real_batch(
         assert entry.revision == 0
         assert entry.committed_processing is None
     assert app.stage_history.undo_depth == 0
+    assert list(app.stage_history.root.iterdir()) == []
 
 
 def test_auto_deskew_success_is_one_batch_history_record(tmp_path, monkeypatch) -> None:

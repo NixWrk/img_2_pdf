@@ -663,6 +663,7 @@ def test_crop_apply_all_rolls_back_every_page_when_later_commit_fails(
         assert entry.review_reasons == review_reasons
         assert entry.revision == revision
     assert app.stage_history.undo_depth == 0
+    assert list(app.stage_history.root.iterdir()) == []
 
 
 def test_failed_detection_does_not_leave_success_backend_status(tmp_path) -> None:
@@ -1606,6 +1607,8 @@ def test_run_app_reports_unsafe_lock_without_traceback(monkeypatch, capsys) -> N
 
 def test_staged_apply_rejects_stale_page_without_mutation(tmp_path) -> None:
     app = _app_for_processing()
+    app.stage_history = StageHistory(tmp_path / "history")
+    app._pending_stage_history_notice = None
     app.session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
     entry = app.session.add_image(name="page", image=np.full((8, 9, 3), 30, np.uint8))
     previous = tmp_path / "previous.png"
@@ -1631,6 +1634,8 @@ def test_staged_apply_rejects_stale_page_without_mutation(tmp_path) -> None:
     with pytest.raises(RuntimeError, match="Page changed while processing"):
         app._commit_staged_apply([snapshot], [staged])
     np.testing.assert_array_equal(entry.current_image, before)
+    assert app.stage_history.undo_depth == 0
+    assert list(app.stage_history.root.iterdir()) == []
 
 
 def test_staged_apply_rolls_back_prior_pages_on_commit_failure(tmp_path) -> None:
@@ -1680,6 +1685,7 @@ def test_staged_apply_rolls_back_prior_pages_on_commit_failure(tmp_path) -> None
         assert entry.committed_processing is None
         assert entry.revision == 0
     assert app.stage_history.undo_depth == 0
+    assert list(app.stage_history.root.iterdir()) == []
 
 
 def test_staged_apply_success_is_undoable_as_one_batch(tmp_path) -> None:

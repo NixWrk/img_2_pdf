@@ -69,6 +69,7 @@ def test_waves_processing_failure_after_draft_controls_keeps_real_entry_unchange
     assert entry.committed_processing is None
     assert entry.revision == 0
     assert app.stage_history.undo_depth == 0
+    assert list(app.stage_history.root.iterdir()) == []
 
 
 def test_waves_stale_revision_rejects_draft_without_publishing_controls(
@@ -100,6 +101,7 @@ def test_waves_stale_revision_rejects_draft_without_publishing_controls(
     assert entry.committed_processing is None
     assert entry.revision == 1
     assert app.stage_history.undo_depth == 0
+    assert list(app.stage_history.root.iterdir()) == []
 
 
 def test_waves_success_returns_stage_diagnostics_and_publishes_normalized_controls(

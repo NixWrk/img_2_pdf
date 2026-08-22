@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from uniscan.session import CaptureSession
 from uniscan.storage import PageStore
@@ -45,9 +46,15 @@ def test_stage_undo_redo_refreshes_and_respects_busy_and_editor_guards(tmp_path)
     app.refresh_page_list = lambda *, keep_entry_ids: refreshed.append(tuple(keep_entry_ids))
 
     before = entry.current_image.copy()
+    original = entry.original_image.copy()
+    contour = np.array([[0, 0], [6, 0], [6, 4], [0, 4]], np.float32)
+    entry.detected_contour = contour.copy()
+    entry.detected_backend = "detector"
+    entry.committed_processing = {"generation": "before"}
     capture = app.stage_history.capture((entry,), action="Edit waves", stage="Waves")
     after = np.full_like(before, (241, 89, 7))
     entry.current_image = after
+    entry.committed_processing = {"generation": "after"}
     app.stage_history.record(capture, (entry,))
 
     app.job_thread = object()
@@ -64,13 +71,21 @@ def test_stage_undo_redo_refreshes_and_respects_busy_and_editor_guards(tmp_path)
     assert refreshed == []
 
     app.inline_editor_close_callback = None
-    app.undo_stage_edit()
+    assert app._run_shortcut(app.undo_stage_edit) == "break"
     np.testing.assert_array_equal(entry.current_image, before)
+    assert entry.committed_processing == {"generation": "before"}
+    np.testing.assert_array_equal(entry.original_image, original)
+    np.testing.assert_array_equal(entry.detected_contour, contour)
+    assert entry.detected_backend == "detector"
     assert refreshed == [(entry.entry_id,)]
     assert app.stage_history.can_redo
 
-    app.redo_stage_edit()
+    assert app._run_shortcut(app.redo_stage_edit) == "break"
     np.testing.assert_array_equal(entry.current_image, after)
+    assert entry.committed_processing == {"generation": "after"}
+    np.testing.assert_array_equal(entry.original_image, original)
+    np.testing.assert_array_equal(entry.detected_contour, contour)
+    assert entry.detected_backend == "detector"
     assert refreshed[-1] == (entry.entry_id,)
     assert app.stage_history.can_undo
 
@@ -102,6 +117,50 @@ def test_history_record_failure_does_not_turn_durable_edit_into_failure() -> Non
     assert app.status_var.get().startswith("Applied processing candidate.")
     assert "Undo is unavailable" in app.status_var.get()
     assert app._pending_stage_history_notice is None
+
+
+def test_record_snapshot_failure_keeps_durable_edit_and_deletes_capture(
+    tmp_path, monkeypatch
+) -> None:
+    app = object.__new__(UnifiedScanApp)
+    app._pending_stage_history_notice = None
+    app.status_var = _Var()
+    app.session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
+    entry = app.session.add_image(name="page", image=np.full((5, 7, 3), 20, dtype=np.uint8))
+    app.stage_history = StageHistory(tmp_path / "history")
+    capture = app.stage_history.capture((entry,), action="Edit", stage="Cleanup")
+    after = np.full_like(entry.current_image, 155)
+    entry.current_image = after
+    monkeypatch.setattr(
+        app.stage_history,
+        "record",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("snapshot disk unavailable")),
+    )
+
+    app._stage_history_record(capture, (entry,))
+
+    np.testing.assert_array_equal(entry.current_image, after)
+    assert capture.closed is True
+    assert app.stage_history.undo_depth == 0
+    assert list(app.stage_history.root.iterdir()) == []
+    app._set_status("Applied processing candidate.")
+    assert "Undo is unavailable" in app.status_var.get()
+
+
+def test_constructor_failure_after_history_init_closes_owned_root(tmp_path, monkeypatch) -> None:
+    history = StageHistory(tmp_path / "history")
+    root = history.root
+
+    def fail_after_history(self) -> None:
+        self.stage_history = history
+        raise RuntimeError("failure after history init")
+
+    monkeypatch.setattr(UnifiedScanApp, "_initialize", fail_after_history)
+    with pytest.raises(RuntimeError, match="after history init"):
+        UnifiedScanApp()
+
+    assert not root.exists()
+    history.close()
 
 
 def test_stage_history_buttons_follow_their_own_stack() -> None:
