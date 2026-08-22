@@ -107,6 +107,9 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.toolbar_export_pdf_button.cget("state") == "disabled"
         assert app.toolbar_export_options_button.cget("state") == "disabled"
         assert app.cancel_task_button.cget("state") == "disabled"
+        assert app.retry_task_button.cget("state") == "disabled"
+        assert app.job_progress_bar.cget("mode") == "determinate"
+        assert app.job_progress_bar.get() == pytest.approx(0.0)
         assert app.move_pages_up_button.cget("state") == "disabled"
         assert app.move_pages_down_button.cget("state") == "disabled"
         assert app.delete_pages_button.cget("state") == "disabled"
@@ -204,6 +207,10 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert selected_entry.current_image.shape[:2] == (1169, 827)
         assert app.processing_cache.stats.writes >= 1
         app.analyze_selected_page_lighting()
+        _pump_until(
+            app,
+            lambda: app.lighting_summary_var.get().startswith("Shadow "),
+        )
         assert app.lighting_summary_var.get().startswith("Shadow ")
         app.binarization_method_var.set("None")
         app.despeckle_strength_var.set("None")

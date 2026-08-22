@@ -748,6 +748,13 @@ class UnifiedScanApp(ctk.CTk):
         self.job_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.job_cancel_event = threading.Event()
         self.job_thread: threading.Thread | None = None
+        self._job_state = "idle"
+        self._job_name: str | None = None
+        self._job_cancel_supported = False
+        self._job_cancel_before_commit = False
+        self._job_progress_value: int | None = None
+        self._job_generation = 0
+        self._job_retry_callback = None
         self._closing = False
         self._close_wait_job: str | None = None
         self._close_deadline: float | None = None
@@ -870,6 +877,14 @@ class UnifiedScanApp(ctk.CTk):
         self.status_frame.pack(side=ctk.BOTTOM, fill=ctk.X, padx=12, pady=(0, 12))
         status_label = ctk.CTkLabel(self.status_frame, textvariable=self.status_var, anchor="w")
         status_label.pack(side=ctk.LEFT, fill=ctk.X, expand=True, padx=10, pady=7)
+        self.job_progress_bar = ctk.CTkProgressBar(
+            self.status_frame,
+            width=140,
+            height=8,
+            mode="determinate",
+        )
+        self.job_progress_bar.set(0)
+        self.job_progress_bar.pack(side=ctk.RIGHT, padx=(8, 0), pady=8)
         self.cancel_task_button = ctk.CTkButton(
             self.status_frame,
             text="Cancel task",
@@ -881,6 +896,17 @@ class UnifiedScanApp(ctk.CTk):
             state=tk.DISABLED,
         )
         self.cancel_task_button.pack(side=ctk.RIGHT, padx=8, pady=5)
+        self.retry_task_button = ctk.CTkButton(
+            self.status_frame,
+            text="Retry",
+            width=70,
+            height=26,
+            fg_color="transparent",
+            border_width=1,
+            command=self.retry_last_job,
+            state=tk.DISABLED,
+        )
+        self.retry_task_button.pack(side=ctk.RIGHT, padx=(0, 4), pady=5)
 
         self.tabs = ctk.CTkTabview(container, command=self._sync_camera_to_active_tab)
         self.tabs.pack(fill=ctk.BOTH, expand=True, padx=12, pady=(4, 8))
@@ -1760,6 +1786,7 @@ class UnifiedScanApp(ctk.CTk):
         # After the bounded grace period it is therefore safe to finalize assets
         # even if an uncooperative third-party call has not returned yet.
         self._close_wait_job = None
+        self._drain_closing_job_events()
         try:
             self.session.finalize_pending_deletion()
             if self.session.has_recoverable_state:
@@ -2226,67 +2253,228 @@ class UnifiedScanApp(ctk.CTk):
         if progress is not None:
             p = max(0, min(100, int(progress)))
             parts.append(f"{p}%")
+            self._job_progress_value = p
         if parts:
             self._set_status(" | ".join(parts))
 
-    def _start_background_job(self, name: str, worker, on_done, *, on_error=None) -> bool:
+        bar = self.__dict__.get("job_progress_bar")
+        if bar is not None:
+            if progress is None:
+                bar.configure(mode="indeterminate")
+                bar.start()
+            else:
+                bar.stop()
+                bar.configure(mode="determinate")
+                bar.set(max(0, min(100, int(progress))) / 100.0)
+
+    def _set_job_terminal(self, state: str, name: str) -> None:
+        self._job_state = state
+        self._job_name = name
+        self._job_cancel_supported = False
+        self._job_cancel_before_commit = False
+        self._job_progress_value = 100 if state == "success" else 0
+        bar = self.__dict__.get("job_progress_bar")
+        if bar is not None:
+            bar.stop()
+            bar.configure(mode="determinate")
+            bar.set(1.0 if state == "success" else 0.0)
+        button = self.__dict__.get("cancel_task_button")
+        if button is not None:
+            button.configure(state=tk.DISABLED, text="Cancel task")
+        retry_button = self.__dict__.get("retry_task_button")
+        if state == "success" or self.__dict__.get("_job_commit_completed", False):
+            self._job_retry_callback = None
+        if retry_button is not None:
+            retry_button.configure(
+                state=(
+                    tk.NORMAL
+                    if state in {"cancelled", "error"}
+                    and self.__dict__.get("_job_retry_callback") is not None
+                    else tk.DISABLED
+                )
+            )
+
+    def _background_job_start_blocked(self, action: str) -> bool:
+        if self.__dict__.get("job_thread") is None:
+            return False
+        current = self.__dict__.get("_job_name") or "the current task"
+        self._set_status(f"Busy: wait for {current} before {action}.")
+        return True
+
+    def _validate_job_entries(self, entries, *, action: str) -> None:
+        missing = [
+            entry.entry_id
+            for entry in entries
+            if self._stage_history_lookup(entry.entry_id) is not entry
+        ]
+        if missing:
+            raise RuntimeError(
+                f"Page set changed while {action}; no staged results were committed."
+            )
+
+    @staticmethod
+    def _job_failure_status(name: str, error: object) -> str:
+        text = str(error)
+        lowered = text.lower()
+        if "rollback" in lowered and "incomplete" in lowered:
+            return f"{name} failed: rollback incomplete; keep the app open and retry or recover."
+        if getattr(error, "__dict__", {}).get("_job_commit_completed", False):
+            return (
+                f"{name} committed changes, but finalization failed: {text}; "
+                "verify the page list before retrying."
+            )
+        return f"{name} failed: {text}; previous committed pages were preserved."
+
+    def _start_background_job(
+        self,
+        name: str,
+        worker,
+        on_done,
+        *,
+        on_error=None,
+        cancel_supported: bool = True,
+        cancel_before_commit: bool = False,
+        retry=None,
+    ) -> bool:
         if self.job_thread is not None:
             messagebox.showwarning("Busy", "Another background job is already running.")
             return False
 
         self.job_cancel_event.clear()
-        self.cancel_task_button.configure(state=tk.NORMAL)
+        self._job_generation = int(self.__dict__.get("_job_generation", 0)) + 1
+        job_id = self._job_generation
+        self._job_state = "running"
+        self._job_name = name
+        self._job_cancel_supported = bool(cancel_supported)
+        self._job_cancel_before_commit = bool(cancel_before_commit)
+        self._job_retry_callback = retry
+        self._job_commit_completed = False
+        self.cancel_task_button.configure(
+            state=tk.NORMAL if cancel_supported else tk.DISABLED
+        )
+        retry_button = self.__dict__.get("retry_task_button")
+        if retry_button is not None:
+            retry_button.configure(state=tk.DISABLED)
         self._set_job_display(stage=name, current="Starting...", progress=0)
 
         def emit(
             stage: str | None = None, current: str | None = None, progress: int | None = None
         ) -> None:
-            self.job_queue.put(("progress", (stage, current, progress)))
+            self.job_queue.put(("progress", (job_id, stage, current, progress)))
 
         def run() -> None:
             try:
                 result = worker(emit, self.job_cancel_event.is_set)
-                self.job_queue.put(("done", (on_done, result, name)))
+                self.job_queue.put(("done", (job_id, on_done, result, name, on_error)))
             except Exception as exc:
-                self.job_queue.put(("error", (name, str(exc), on_error)))
+                self.job_queue.put(("error", (job_id, name, str(exc), on_error)))
 
         self.job_thread = threading.Thread(target=run, daemon=True)
         self.job_thread.start()
         return True
+
+    @staticmethod
+    def _closing_job_cleanup(kind: str, payload) -> None:
+        callback = None
+        if kind == "done" and len(payload) == 5:
+            callback = payload[4]
+        elif kind == "error":
+            callback = payload[3] if len(payload) == 4 else payload[2]
+        if callback is not None:
+            try:
+                callback()
+            except Exception:
+                pass
+
+    def _drain_closing_job_events(self) -> None:
+        while True:
+            try:
+                kind, payload = self.job_queue.get_nowait()
+            except queue.Empty:
+                return
+            self._closing_job_cleanup(kind, payload)
 
     def _poll_job_queue(self) -> None:
         try:
             for _ in range(6):
                 kind, payload = self.job_queue.get_nowait()
                 if self._closing:
+                    self._closing_job_cleanup(kind, payload)
                     continue
                 if kind == "progress":
-                    stage, current, progress = payload
-                    self._set_job_display(stage=stage, current=current, progress=progress)
+                    if len(payload) == 4:
+                        job_id, stage, current, progress = payload
+                        if job_id != self.__dict__.get("_job_generation", job_id):
+                            continue
+                    else:
+                        stage, current, progress = payload
+                    if self._job_state != "cancelling":
+                        self._set_job_display(stage=stage, current=current, progress=progress)
                 elif kind == "done":
-                    on_done, result, name = payload
+                    if len(payload) == 5:
+                        job_id, on_done, result, name, on_error = payload
+                        if job_id != self.__dict__.get("_job_generation", job_id):
+                            continue
+                    else:
+                        on_done, result, name = payload
+                        on_error = None
                     self.job_thread = None
+                    self._job_state = "finalizing"
+                    self._job_cancel_supported = False
+                    self.cancel_task_button.configure(state=tk.DISABLED, text="Finalizing...")
                     try:
+                        if (
+                            self.__dict__.get("_job_cancel_before_commit", False)
+                            and self.job_cancel_event.is_set()
+                        ):
+                            if on_error is not None:
+                                on_error()
+                            raise RuntimeError("Cancelled by user.")
                         on_done(result)
                     except Exception as exc:
-                        self._set_status(f"{name} failed: {exc}")
-                        messagebox.showerror(f"{name} Error", str(exc))
+                        if "Cancelled by user." in str(exc):
+                            self._set_job_terminal("cancelled", name)
+                            self._set_status(
+                                f"{name} cancelled; previous committed pages were preserved."
+                            )
+                        else:
+                            self._set_job_terminal("error", name)
+                            setattr(
+                                exc,
+                                "_job_commit_completed",
+                                self.__dict__.get("_job_commit_completed", False),
+                            )
+                            self._set_status(self._job_failure_status(name, exc))
+                            messagebox.showerror(f"{name} Error", str(exc))
+                    else:
+                        self._set_job_terminal("success", name)
                     finally:
                         self.cancel_task_button.configure(state=tk.DISABLED)
                 elif kind == "error":
-                    self.cancel_task_button.configure(state=tk.DISABLED)
+                    if len(payload) == 4:
+                        job_id, name, text, on_error = payload
+                        if job_id != self.__dict__.get("_job_generation", job_id):
+                            continue
+                    else:
+                        name, text, on_error = payload
                     self.job_thread = None
-                    name, text, on_error = payload
-                    if on_error is not None:
-                        on_error()
+                    try:
+                        if on_error is not None:
+                            on_error()
+                    except Exception as cleanup_exc:
+                        text = f"{text} Cleanup failed: {cleanup_exc}"
                     if "Cancelled by user." in text:
+                        self._set_job_terminal("cancelled", name)
                         self._set_job_display(stage=f"{name}: cancelled", current=text, progress=0)
-                        self._set_status(f"{name} cancelled")
+                        self._set_status(
+                            f"{name} cancelled; previous committed pages were preserved."
+                        )
                         if name == "Import":
                             self.refresh_page_list(keep_index=len(self.session) - 1)
                     else:
+                        self._set_job_terminal("error", name)
                         self._set_job_display(stage=f"{name}: error", current=text, progress=0)
-                        self._set_status(f"{name} failed")
+                        self._set_status(self._job_failure_status(name, text))
                         messagebox.showerror(f"{name} Error", text)
                 elif kind == "diagnostics":
                     report = payload
@@ -2314,12 +2502,56 @@ class UnifiedScanApp(ctk.CTk):
         threading.Thread(target=run, daemon=True, name="uniscan-diagnostics").start()
 
     def cancel_current_job(self) -> None:
-        if self.job_thread is None or not self.job_thread.is_alive():
+        if self._job_state == "cancelling":
+            self._set_status("Cancellation already requested.")
+            return
+        precommit_pending = bool(self.__dict__.get("_job_cancel_before_commit", False))
+        thread_alive = (
+            self.job_thread is not None
+            and getattr(self.job_thread, "is_alive", lambda: True)()
+        )
+        if self.job_thread is None or (
+            not thread_alive and not precommit_pending
+        ):
             self._set_status("No running job.")
             return
+        if not self.__dict__.get("_job_cancel_supported", False):
+            self._set_status("Cancellation is unavailable for this operation.")
+            return
         self.job_cancel_event.set()
-        self._set_job_display(current="Cancellation requested...")
+        self._job_state = "cancelling"
+        self.cancel_task_button.configure(state=tk.DISABLED, text="Cancelling...")
+        self._set_job_display(
+            current="Cancellation requested...",
+            progress=self._job_progress_value,
+        )
         self._set_status("Cancellation requested")
+
+    def retry_last_job(self) -> None:
+        callback = self.__dict__.get("_job_retry_callback")
+        if callback is None:
+            self._set_status("No failed or cancelled task is available to retry.")
+            return
+        if self.__dict__.get("job_thread") is not None:
+            self._set_status("Wait for the current task before retrying.")
+            return
+        retry_button = self.__dict__.get("retry_task_button")
+        if retry_button is not None:
+            retry_button.configure(state=tk.DISABLED)
+        try:
+            callback()
+        except Exception as exc:
+            if retry_button is not None:
+                retry_button.configure(state=tk.NORMAL)
+            self._set_status(f"Retry could not start: {exc}")
+            messagebox.showerror("Retry Error", str(exc))
+            return
+        if self.__dict__.get("job_thread") is None and self._job_state in {
+            "cancelled",
+            "error",
+        }:
+            if retry_button is not None:
+                retry_button.configure(state=tk.NORMAL)
 
     @staticmethod
     def _default_camera_resolution() -> tuple[int, int]:
@@ -3428,7 +3660,14 @@ class UnifiedScanApp(ctk.CTk):
                 finally:
                     finish_burst()
 
-            if not self._start_background_job(job_name, worker, on_done, on_error=finish_burst):
+            if not self._start_background_job(
+                job_name,
+                worker,
+                on_done,
+                on_error=finish_burst,
+                cancel_before_commit=True,
+                retry=lambda: self._start_capture_job(shots=shots, delay_sec=delay_sec),
+            ):
                 finish_burst()
         except Exception as exc:
             if burst_reserved:
@@ -3890,7 +4129,16 @@ class UnifiedScanApp(ctk.CTk):
                     pdf_dpi=pdf_dpi,
                     cancel_cb=is_cancelled,
                 )
+                loaded_page = 0
                 for loaded_item in loaded_items:
+                    loaded_page += 1
+                    emit(
+                        stage="Import loading",
+                        current=f"{file_index}/{total_paths}: {path.name} · page {loaded_page}",
+                        progress=None if path.suffix.lower() in PDF_EXTS else int(
+                            ((file_index - 1) / total_paths) * 30
+                        ),
+                    )
                     if is_cancelled():
                         raise RuntimeError("Cancelled by user.")
                     results = process_loaded_items(
@@ -3954,6 +4202,8 @@ class UnifiedScanApp(ctk.CTk):
             worker,
             on_done,
             on_error=staging_dir.cleanup,
+            cancel_before_commit=True,
+            retry=lambda: self._import_paths(paths=list(paths)),
         ):
             staging_dir.cleanup()
 
@@ -5761,6 +6011,8 @@ class UnifiedScanApp(ctk.CTk):
         return self._commit_processing_request(entry, request)
 
     def analyze_selected_page_lighting(self) -> None:
+        if self._background_job_start_blocked("analyzing lighting"):
+            return
         _index, entry = self._single_selected_entry()
         if entry is None:
             self._set_status("Select exactly one page to analyze lighting.")
@@ -5770,16 +6022,43 @@ class UnifiedScanApp(ctk.CTk):
             preview=False,
             lighting_diagnostics=True,
         )
-        lighting = process_document_page(entry.original_image, request).diagnostics.lighting
-        if lighting is None:
-            raise RuntimeError("Lighting diagnostics were not produced.")
-        warnings = ", ".join(lighting.warnings) if lighting.warnings else "none"
-        self.lighting_summary_var.set(
-            f"Shadow {lighting.shadow_fraction:.1%} | glare {lighting.glare_fraction:.1%}\n"
-            f"Clipped {lighting.clipped_pixel_fraction:.1%} | warnings: {warnings}"
-        )
-        self._set_status(
-            f"Lighting analyzed: unevenness {lighting.unevenness:.2f}; warnings {warnings}."
+
+        expected_entry_id = entry.entry_id
+        expected_revision = entry.revision
+
+        def worker(emit, is_cancelled):
+            emit(stage="Analyze lighting", current=entry.name, progress=0)
+            if is_cancelled():
+                raise RuntimeError("Cancelled by user.")
+            result = process_document_page(
+                entry.original_image,
+                replace(request, cancel_cb=is_cancelled),
+            )
+            emit(stage="Analyze lighting", current=entry.name, progress=100)
+            return result.diagnostics.lighting
+
+        def on_done(lighting):
+            if self._stage_history_lookup(expected_entry_id) is not entry:
+                raise RuntimeError("Page changed while analyzing lighting; retry.")
+            if entry.revision != expected_revision:
+                raise RuntimeError("Page changed while analyzing lighting; retry.")
+            if lighting is None:
+                raise RuntimeError("Lighting diagnostics were not produced.")
+            warnings = ", ".join(lighting.warnings) if lighting.warnings else "none"
+            self.lighting_summary_var.set(
+                f"Shadow {lighting.shadow_fraction:.1%} | glare {lighting.glare_fraction:.1%}\n"
+                f"Clipped {lighting.clipped_pixel_fraction:.1%} | warnings: {warnings}"
+            )
+            self._set_status(
+                f"Lighting analyzed: unevenness {lighting.unevenness:.2f}; warnings {warnings}."
+            )
+
+        self._start_background_job(
+            "Analyze lighting",
+            worker,
+            on_done,
+            cancel_before_commit=True,
+            retry=self.analyze_selected_page_lighting,
         )
 
     def _selected_entry_indices(self) -> list[int]:
@@ -6191,12 +6470,13 @@ class UnifiedScanApp(ctk.CTk):
             self._set_status("Split spread failed")
 
     def auto_deskew_selected(self) -> None:
+        if self._background_job_start_blocked("auto deskew"):
+            return
         indices = self._selected_entry_indices()
         if not indices:
             self._set_status("Select page(s) to deskew.")
             return
 
-        angles: list[float] = []
         entry_ids = tuple(self.session.entries[idx].entry_id for idx in indices)
         method = DESKEW_UI_METHODS.get(
             self.deskew_method_var.get(),
@@ -6206,16 +6486,16 @@ class UnifiedScanApp(ctk.CTk):
             method = DESKEW_METHOD_HYBRID
         entries = tuple(self.session.entries[idx] for idx in indices)
         transaction = StageEditTransaction.begin(entries, metadata_fields=())
-        history_capture = None
-        try:
-            for entry in entries:
-                previous_committed = entry.committed_processing
-                request = (
-                    previous_committed.recipe.to_request()
-                    if previous_committed is not None
-                    else self._processing_request(entry=entry, preview=False)
-                )
-                request = replace(
+        requests = []
+        for entry in entries:
+            previous_committed = entry.committed_processing
+            request = (
+                previous_committed.recipe.to_request()
+                if previous_committed is not None
+                else self._processing_request(entry=entry, preview=False)
+            )
+            requests.append(
+                replace(
                     request,
                     deskew_method=method,
                     deskew_angle_degrees=None,
@@ -6223,40 +6503,90 @@ class UnifiedScanApp(ctk.CTk):
                     source_fingerprint=None,
                     cancel_cb=None,
                 )
-                pixels, committed, diagnostics = self._compute_processing_candidate(entry, request)
-                transaction.stage(entry.entry_id, pixels=pixels, committed_processing=committed)
-                angles.append(float(diagnostics.deskew_angle_degrees))
-            history_capture = self._stage_history_capture(
-                entries,
-                action="Auto deskew",
-                stage="Deskew",
             )
-            transaction.commit()
-            self._last_processing_cache_hits = diagnostics.cache_hits
-        except Exception:
-            if history_capture is not None:
-                self._discard_stage_history_capture(history_capture)
+
+        def worker(emit, is_cancelled):
+            candidates = []
+            total = len(entries)
+            for position, (entry, request) in enumerate(zip(entries, requests), start=1):
+                if is_cancelled():
+                    raise RuntimeError("Cancelled by user.")
+                candidate_request = replace(request, cancel_cb=is_cancelled)
+                pixels, committed, diagnostics = self._compute_processing_candidate(
+                    entry, candidate_request
+                )
+                candidates.append((pixels, committed, diagnostics))
+                emit(
+                    stage="Auto deskew",
+                    current=f"{position}/{total}: {entry.name}",
+                    progress=int(position / total * 90),
+                )
+            return candidates
+
+        def on_done(candidates):
+            history_capture = None
+            angles = []
+            try:
+                self._validate_job_entries(entries, action="auto deskewing")
+                for entry, (pixels, committed, diagnostics) in zip(entries, candidates):
+                    transaction.stage(
+                        entry.entry_id,
+                        pixels=pixels,
+                        committed_processing=committed,
+                    )
+                    angles.append(float(diagnostics.deskew_angle_degrees))
+                history_capture = self._stage_history_capture(
+                    entries,
+                    action="Auto deskew",
+                    stage="Deskew",
+                )
+                transaction.commit()
+                self._job_commit_completed = True
+                self._last_processing_cache_hits = diagnostics.cache_hits
+            except Exception:
+                if history_capture is not None:
+                    self._discard_stage_history_capture(history_capture)
+                try:
+                    transaction.discard()
+                except StageTransactionClosedError:
+                    pass
+                raise
+            self._stage_history_record(history_capture, entries)
+            self.refresh_page_list(keep_entry_ids=entry_ids)
+            mean_angle = sum(angles) / max(1, len(angles))
+            self._set_status(
+                f"Deskewed {len(indices)} page(s), avg angle {mean_angle:.1f} deg."
+            )
+
+        def on_error():
             try:
                 transaction.discard()
             except StageTransactionClosedError:
                 pass
-            raise
-        self._stage_history_record(history_capture, entries)
 
-        self.refresh_page_list(keep_entry_ids=entry_ids)
-        mean_angle = sum(angles) / max(1, len(angles))
-        self._set_status(f"Deskewed {len(indices)} page(s), avg angle {mean_angle:.1f} deg.")
+        if not self._start_background_job(
+            "Auto deskew",
+            worker,
+            on_done,
+            on_error=on_error,
+            cancel_before_commit=True,
+            retry=self.auto_deskew_selected,
+        ):
+            on_error()
 
     def auto_orient_selected(self) -> None:
+        if self._background_job_start_blocked("auto orientation"):
+            return
         indices = self._selected_entry_indices()
         if not indices:
             self._set_status("Select page(s) to orient.")
             return
 
-        diagnostics = []
         entry_ids = tuple(self.session.entries[idx].entry_id for idx in indices)
-        for idx in indices:
-            entry = self.session.entries[idx]
+        entries = tuple(self.session.entries[idx] for idx in indices)
+        transaction = StageEditTransaction.begin(entries, metadata_fields=())
+        requests = []
+        for entry in entries:
             previous_committed = entry.committed_processing
             request = (
                 previous_committed.recipe.to_request()
@@ -6270,24 +6600,83 @@ class UnifiedScanApp(ctk.CTk):
                 source_fingerprint=None,
                 cancel_cb=None,
             )
-            result = process_document_page(entry.original_image, request)
-            item = result.diagnostics.orientation
-            committed = CommittedPageProcessing.from_result(
-                request,
-                result.diagnostics,
-                result.image,
-            )
-            entry.current_image = result.image
-            entry.committed_processing = committed
-            diagnostics.append(item)
+            requests.append(request)
 
-        self.refresh_page_list(keep_entry_ids=entry_ids)
-        applied = sum(item.applied for item in diagnostics)
-        uncertain = sum(item.reason not in {None, "already_upright"} for item in diagnostics)
-        self._set_status(
-            f"Auto-oriented {applied}/{len(indices)} page(s); "
-            f"{uncertain} left unchanged as uncertain."
-        )
+        def worker(emit, is_cancelled):
+            results = []
+            total = len(entries)
+            for position, (entry, request) in enumerate(zip(entries, requests), start=1):
+                if is_cancelled():
+                    raise RuntimeError("Cancelled by user.")
+                result = process_document_page(
+                    entry.original_image,
+                    replace(request, cancel_cb=is_cancelled),
+                )
+                results.append(result)
+                emit(
+                    stage="Auto orient",
+                    current=f"{position}/{total}: {entry.name}",
+                    progress=int(position / total * 90),
+                )
+            return results
+
+        def on_done(results):
+            history_capture = None
+            diagnostics = []
+            try:
+                self._validate_job_entries(entries, action="auto orientation")
+                for entry, request, result in zip(entries, requests, results):
+                    committed = CommittedPageProcessing.from_result(
+                        request,
+                        result.diagnostics,
+                        result.image,
+                    )
+                    transaction.stage(
+                        entry.entry_id,
+                        pixels=result.image,
+                        committed_processing=committed,
+                    )
+                    diagnostics.append(result.diagnostics.orientation)
+                history_capture = self._stage_history_capture(
+                    entries,
+                    action="Auto orient",
+                    stage="Orientation",
+                )
+                transaction.commit()
+                self._job_commit_completed = True
+                self._last_processing_cache_hits = result.diagnostics.cache_hits
+            except Exception:
+                if history_capture is not None:
+                    self._discard_stage_history_capture(history_capture)
+                try:
+                    transaction.discard()
+                except StageTransactionClosedError:
+                    pass
+                raise
+            self._stage_history_record(history_capture, entries)
+            self.refresh_page_list(keep_entry_ids=entry_ids)
+            applied = sum(item.applied for item in diagnostics)
+            uncertain = sum(item.reason not in {None, "already_upright"} for item in diagnostics)
+            self._set_status(
+                f"Auto-oriented {applied}/{len(indices)} page(s); "
+                f"{uncertain} left unchanged as uncertain."
+            )
+
+        def on_error():
+            try:
+                transaction.discard()
+            except StageTransactionClosedError:
+                pass
+
+        if not self._start_background_job(
+            "Auto orient",
+            worker,
+            on_done,
+            on_error=on_error,
+            cancel_before_commit=True,
+            retry=self.auto_orient_selected,
+        ):
+            on_error()
 
     @staticmethod
     def _saved_dewarp_curves(entry):
@@ -7342,6 +7731,7 @@ class UnifiedScanApp(ctk.CTk):
         def on_done(staged):
             try:
                 cache_hit_count = self._commit_staged_apply(snapshots, staged)
+                self._job_commit_completed = True
                 if selected_entry_ids:
                     self.refresh_page_list(keep_entry_ids=selected_entry_ids)
                 else:
@@ -7358,6 +7748,8 @@ class UnifiedScanApp(ctk.CTk):
             worker,
             on_done,
             on_error=snapshot_dir.cleanup,
+            cancel_before_commit=True,
+            retry=self.apply_review_changes,
         ):
             snapshot_dir.cleanup()
 
@@ -7540,7 +7932,12 @@ class UnifiedScanApp(ctk.CTk):
             def on_done(out_path):
                 self._set_status(f"Exported {len(entries)} page(s) to PDF: {out_path}")
 
-            if not self._start_background_job("Export PDF", worker, on_done):
+            if not self._start_background_job(
+                "Export PDF",
+                worker,
+                on_done,
+                retry=self.export_to_pdf,
+            ):
                 snapshot_dir.cleanup()
         except Exception as exc:
             messagebox.showerror("Export PDF Error", str(exc))
@@ -7594,7 +7991,12 @@ class UnifiedScanApp(ctk.CTk):
             def on_done(out_paths):
                 self._set_status(f"Exported {len(out_paths)} file(s) to: {Path(path_raw)}")
 
-            if not self._start_background_job("Export files", worker, on_done):
+            if not self._start_background_job(
+                "Export files",
+                worker,
+                on_done,
+                retry=self.export_to_files,
+            ):
                 snapshot_dir.cleanup()
         except Exception as exc:
             messagebox.showerror("Export Files Error", str(exc))

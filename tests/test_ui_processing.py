@@ -1153,7 +1153,7 @@ def test_burst_releases_existing_handle_and_commits_staged_raw_frames(
 
     app._process_capture_frame = process_frame
 
-    def run_job(_name, worker, on_done, *, on_error=None):
+    def run_job(_name, worker, on_done, *, on_error=None, **_job_options):
         try:
             payload = worker(lambda **_kwargs: None, lambda: False)
             on_done(payload)
@@ -1259,7 +1259,7 @@ def test_burst_reuses_streaming_camera_and_keeps_preview(tmp_path) -> None:
 
     app._process_capture_frame = process_frame
 
-    def run_job(_name, worker, on_done, *, on_error=None):
+    def run_job(_name, worker, on_done, *, on_error=None, **_job_options):
         try:
             payload = worker(lambda **_kwargs: None, lambda: False)
             on_done(payload)
@@ -1752,7 +1752,7 @@ def test_gui_import_consumes_pdf_pages_lazily_and_stages_to_disk(tmp_path, monke
         name, image = items[0]
         return [PageResult(name, image, image, image, None, "cv_hybrid", True, None)]
 
-    def run_job(_name, worker, on_done, *, on_error):
+    def run_job(_name, worker, on_done, *, on_error, **_job_options):
         try:
             result = worker(lambda **_kwargs: None, lambda: False)
             on_done(result)
@@ -1802,7 +1802,7 @@ def test_gui_import_honors_cancellation_after_final_staging_encode(tmp_path, mon
             cancelled = True
         return written
 
-    def run_job(_name, worker, _on_done, *, on_error):
+    def run_job(_name, worker, _on_done, *, on_error, **_job_options):
         try:
             worker(lambda **_kwargs: None, lambda: cancelled)
         except RuntimeError as exc:
