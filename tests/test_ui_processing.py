@@ -756,8 +756,8 @@ def test_page_list_distinguishes_automatic_needs_review_flag() -> None:
 
     app.refresh_page_list()
 
-    assert app.page_listbox.items[0].endswith("page 8 [L]  [Needs review]")
-    assert app.page_listbox.items[1].endswith("page 8 [R]  ⚠")
+    assert app.page_listbox.items[0].endswith("page 8 [L]  ? Needs review")
+    assert app.page_listbox.items[1].endswith("page 8 [R]  ? Needs review")
     assert app.crop_warning_var.get() == "⚠ 2 pages need crop review"
 
 

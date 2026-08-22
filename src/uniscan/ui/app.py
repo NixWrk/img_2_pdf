@@ -556,6 +556,84 @@ def _entry_needs_crop_review(entry) -> bool:
     )
 
 
+PAGE_FILTER_ALL = "All"
+PAGE_FILTER_NEEDS_REVIEW = "Needs review"
+PAGE_FILTER_EDITED = "Edited"
+PAGE_FILTER_ERRORS = "Errors"
+PAGE_FILTERS = (
+    PAGE_FILTER_ALL,
+    PAGE_FILTER_NEEDS_REVIEW,
+    PAGE_FILTER_EDITED,
+    PAGE_FILTER_ERRORS,
+)
+
+
+def _entry_error_text(entry) -> str | None:
+    """Read an error only from existing entry/job facts; never create UI state."""
+    for attribute in ("processing_error", "last_error", "error"):
+        value = getattr(entry, attribute, None)
+        if value:
+            return str(value)
+    return None
+
+
+def page_status(entry, *, candidate: bool = False, error: bool = False) -> tuple[str, str]:
+    """Return the compact status marker and label shown beside a page row."""
+    if error or _entry_error_text(entry):
+        return "!", "Error"
+    if _entry_has_crop_proposal(entry) or _entry_needs_crop_review(entry):
+        return "?", "Needs review"
+    if candidate:
+        return "~", "Candidate"
+    if getattr(entry, "committed_processing", None) is not None or int(
+        getattr(entry, "revision", 0) or 0
+    ) > 0:
+        return "~", "Edited"
+    return "✓", "Ready"
+
+
+def page_matches_filter(
+    entry,
+    page_filter: str,
+    *,
+    candidate: bool = False,
+    error: bool = False,
+) -> bool:
+    """Pure filter predicate built from the entry's durable/readiness facts."""
+    if page_filter == PAGE_FILTER_ALL:
+        return True
+    _marker, label = page_status(entry, candidate=candidate, error=error)
+    if page_filter == PAGE_FILTER_NEEDS_REVIEW:
+        return label == PAGE_FILTER_NEEDS_REVIEW
+    if page_filter == PAGE_FILTER_EDITED:
+        return label in {PAGE_FILTER_EDITED, "Candidate"}
+    if page_filter == PAGE_FILTER_ERRORS:
+        return label == "Error"
+    return True
+
+
+def visible_session_indices(
+    entries: Iterable[object],
+    page_filter: str,
+    *,
+    candidate_entry_ids: Iterable[str] = (),
+    error_entry_ids: Iterable[str] = (),
+) -> tuple[int, ...]:
+    """Map displayed row indexes to stable session indexes for a filtered list."""
+    candidate_ids = set(candidate_entry_ids)
+    error_ids = set(error_entry_ids)
+    return tuple(
+        index
+        for index, entry in enumerate(entries)
+        if page_matches_filter(
+            entry,
+            page_filter,
+            candidate=getattr(entry, "entry_id", None) in candidate_ids,
+            error=getattr(entry, "entry_id", None) in error_ids,
+        )
+    )
+
+
 def _preview_matches_committed(entry, request: PageProcessingRequest) -> bool:
     """Whether a display-DPI preview represents the durable export recipe."""
     committed = getattr(entry, "committed_processing", None)
@@ -785,6 +863,11 @@ class UnifiedScanApp(ctk.CTk):
             initial_status = f"Autosave restore skipped: {self._restore_error}"
         self.status_var = tk.StringVar(value=initial_status)
         self.page_count_var = tk.StringVar(value="0 pages")
+        self.page_filter_var = tk.StringVar(value=PAGE_FILTER_ALL)
+        self.page_selection_scope_var = tk.StringVar(value="No pages selected")
+        self._visible_session_indices: tuple[int, ...] = ()
+        self.page_filter_buttons: dict[str, ctk.CTkButton] = {}
+        self._page_filter_counts: dict[str, int] = {name: 0 for name in PAGE_FILTERS}
         self.camera_health_var = tk.StringVar(value="Camera: Closed")
         self.camera_index_var = tk.IntVar(value=0)
         self.camera_shots_var = tk.IntVar(value=1)
@@ -1256,6 +1339,26 @@ class UnifiedScanApp(ctk.CTk):
             textvariable=self.page_count_var,
             text_color=COLORS["text.secondary"],
         ).pack(side=ctk.RIGHT)
+        filter_bar = ctk.CTkFrame(left, fg_color="transparent")
+        filter_bar.pack(fill=ctk.X, padx=10, pady=(0, 4))
+        filter_bar.grid_columnconfigure((0, 1), weight=1, uniform="page-filter")
+        for filter_index, page_filter in enumerate(PAGE_FILTERS):
+            button = ctk.CTkButton(
+                filter_bar,
+                text=page_filter,
+                width=1,
+                height=26,
+                command=lambda value=page_filter: self._set_page_filter(value),
+                **component_style("secondary_button"),
+            )
+            button.grid(
+                row=filter_index // 2,
+                column=filter_index % 2,
+                sticky="ew",
+                padx=(0, 3) if filter_index % 2 == 0 else (0, 0),
+                pady=(0, 3) if filter_index < 2 else (0, 0),
+            )
+            self.page_filter_buttons[page_filter] = button
         self.crop_warning_label = ctk.CTkLabel(
             left,
             textvariable=self.crop_warning_var,
@@ -1287,6 +1390,13 @@ class UnifiedScanApp(ctk.CTk):
         self.page_listbox.bind("<B1-Motion>", self._on_page_drag_motion, add="+")
         self.page_listbox.bind("<ButtonRelease-1>", self._on_page_drag_end, add="+")
         self.page_listbox.bind("<Button-3>", self._show_page_context_menu)
+        ctk.CTkLabel(
+            left,
+            textvariable=self.page_selection_scope_var,
+            anchor="w",
+            text_color=COLORS["text.secondary"],
+            font=ctk.CTkFont(size=10),
+        ).pack(fill=ctk.X, padx=10, pady=(0, 4))
 
         page_actions = ctk.CTkFrame(left, fg_color="transparent")
         page_actions.pack(fill=ctk.X, padx=10, pady=(0, 4))
@@ -3290,8 +3400,8 @@ class UnifiedScanApp(ctk.CTk):
 
     def _sync_controls_from_single_committed_page(self) -> None:
         """Load one page's durable recipe so editing one stage preserves all others."""
-        selected = self.page_listbox.curselection()
-        if len(selected) != 1 or not 0 <= selected[0] < len(self.session.entries):
+        selected = self._selected_entry_indices()
+        if len(selected) != 1:
             self.stage_settings_var.set("Stage settings: document defaults / mixed selection")
             return
         entry = self.session.entries[selected[0]]
@@ -4442,22 +4552,57 @@ class UnifiedScanApp(ctk.CTk):
         keep_index: int | None = None,
         *,
         keep_entry_ids: Iterable[str] | None = None,
+        update_preview: bool = True,
     ) -> None:
-        selected_entry_ids = set(keep_entry_ids or ())
+        selected_entry_ids = (
+            set(keep_entry_ids) if keep_entry_ids is not None else self._selected_entry_ids()
+        )
+        candidate_ids, error_ids = self._page_status_entry_ids()
+        page_filter_var = self.__dict__.get("page_filter_var")
+        page_filter = page_filter_var.get() if page_filter_var is not None else PAGE_FILTER_ALL
+        self._visible_session_indices = visible_session_indices(
+            self.session.entries,
+            page_filter,
+            candidate_entry_ids=candidate_ids,
+            error_entry_ids=error_ids,
+        )
         self.page_listbox.delete(0, tk.END)
-        for idx, entry in enumerate(self.session.entries, start=1):
-            if _entry_has_crop_proposal(entry):
-                tag = "  [crop proposal]"
-            elif bool(getattr(entry, "needs_review", False)):
-                tag = "  [Needs review]"
-            elif _entry_needs_crop_review(entry):
-                tag = "  ⚠"
-            else:
-                tag = ""
-            self.page_listbox.insert(tk.END, f"{idx:03d}  {entry.name}{tag}")
+        for visible_index, session_index in enumerate(self._visible_session_indices):
+            entry = self.session.entries[session_index]
+            marker, status = page_status(
+                entry,
+                candidate=entry.entry_id in candidate_ids,
+                error=entry.entry_id in error_ids,
+            )
+            status_suffix = f"  {marker} {status}"
+            self.page_listbox.insert(
+                tk.END,
+                f"{session_index + 1:03d}  {entry.name}{status_suffix}",
+            )
+            itemconfig = getattr(self.page_listbox, "itemconfigure", None)
+            if itemconfig is None:
+                itemconfig = getattr(self.page_listbox, "itemconfig", None)
+            if itemconfig is not None:
+                itemconfig(
+                    visible_index,
+                    foreground=self._page_status_color(status),
+                )
 
         page_count = len(self.session.entries)
         self.page_count_var.set(f"{page_count} page" if page_count == 1 else f"{page_count} pages")
+        counts = {
+            name: len(
+                visible_session_indices(
+                    self.session.entries,
+                    name,
+                    candidate_entry_ids=candidate_ids,
+                    error_entry_ids=error_ids,
+                )
+            )
+            for name in PAGE_FILTERS
+        }
+        self._page_filter_counts = counts
+        self._style_page_filter_buttons()
         self._update_crop_warning()
         self._update_export_readiness()
         export_state = tk.NORMAL if page_count else tk.DISABLED
@@ -4470,22 +4615,100 @@ class UnifiedScanApp(ctk.CTk):
                 button.configure(state=export_state)
 
         if selected_entry_ids:
-            for index, entry in enumerate(self.session.entries):
-                if entry.entry_id in selected_entry_ids:
-                    self.page_listbox.selection_set(index)
-        elif keep_index is not None and len(self.session.entries) > 0:
+            for visible_index, session_index in enumerate(self._visible_session_indices):
+                if self.session.entries[session_index].entry_id in selected_entry_ids:
+                    self.page_listbox.selection_set(visible_index)
+        elif keep_index is not None and self._visible_session_indices:
             keep_index = max(0, min(keep_index, len(self.session.entries) - 1))
-            self.page_listbox.selection_set(keep_index)
+            if keep_index in self._visible_session_indices:
+                self.page_listbox.selection_set(self._visible_session_indices.index(keep_index))
         self._sync_page_selection_to_session()
         self._update_page_action_states()
-        self._sync_controls_from_single_committed_page()
-        self.update_page_preview()
+        if update_preview:
+            self._sync_controls_from_single_committed_page()
+            self.update_page_preview()
+
+    def refresh_page_rows(self, *, keep_entry_ids: Iterable[str] | None = None) -> None:
+        """Refresh only row status/filter state; never schedule or re-run preview work."""
+        self.refresh_page_list(keep_entry_ids=keep_entry_ids, update_preview=False)
+
+    def _refresh_page_status_rows(self) -> None:
+        """Best-effort status update for asynchronous preview results."""
+        if "page_listbox" not in self.__dict__:
+            return
+        try:
+            self.refresh_page_rows()
+        except (AttributeError, tk.TclError):
+            # Lightweight controller doubles may not build the Pages tab.
+            return
+
+    @staticmethod
+    def _page_status_color(status: str) -> str:
+        if status == "Error":
+            return resolve_pair("danger")
+        if status in {"Needs review", "Candidate"}:
+            return resolve_pair("warning")
+        if status == "Edited":
+            return resolve_pair("edited")
+        if status == "Ready":
+            return resolve_pair("success")
+        return resolve_pair("text.secondary")
+
+    def _page_status_entry_ids(self) -> tuple[set[str], set[str]]:
+        candidate_ids: set[str] = set()
+        error_ids: set[str] = set()
+        context = self.__dict__.get("review_preview_context")
+        if context is not None and context[0] == getattr(self, "review_preview_generation", None):
+            entry_id = context[1]
+            entry = next((item for item in self.session.entries if item.entry_id == entry_id), None)
+            if entry is not None:
+                request = context[2]
+                if context[3] is not None or _entry_has_crop_proposal(entry) or not _preview_matches_committed(entry, request):
+                    candidate_ids.add(entry_id)
+                if self.__dict__.get("review_preview_error") is not None:
+                    error_ids.add(entry_id)
+        for entry in self.session.entries:
+            if _entry_error_text(entry):
+                error_ids.add(entry.entry_id)
+        return candidate_ids, error_ids
+
+    def _set_page_filter(self, page_filter: str) -> None:
+        if page_filter not in PAGE_FILTERS:
+            return
+        selected_entry_ids = self._selected_entry_ids()
+        self.page_filter_var.set(page_filter)
+        self.refresh_page_rows(keep_entry_ids=selected_entry_ids)
+        visible_count = len(self._visible_session_indices)
+        if visible_count:
+            self._set_status(f"Showing {visible_count} page(s): {page_filter}")
+        else:
+            self._set_status(f"No pages match {page_filter}; selection is preserved.")
+
+    def _style_page_filter_buttons(self) -> None:
+        buttons = self.__dict__.get("page_filter_buttons", {})
+        if not buttons:
+            return
+        active = self.page_filter_var.get()
+        for name, button in self.page_filter_buttons.items():
+            button.configure(text=f"{name} {self._page_filter_counts.get(name, 0)}")
+            if name == active:
+                button.configure(
+                    fg_color=COLORS["action.primary"],
+                    hover_color=COLORS["action.hover"],
+                    text_color=COLORS["action.text"],
+                )
+            else:
+                button.configure(
+                    fg_color=COLORS["surface.raised"],
+                    hover_color=COLORS["tint.neutral"],
+                    text_color=COLORS["text.primary"],
+                )
 
     def _refresh_pipeline_strip(self) -> None:
         frame = self.__dict__.get("pipeline_strip")
         if frame is None:
             return
-        selected = self.page_listbox.curselection()
+        selected = self._selected_entry_indices()
         if len(selected) != 1:
             placeholder = (
                 "Select one page to inspect the pipeline"
@@ -4583,10 +4806,57 @@ class UnifiedScanApp(ctk.CTk):
         }
         label.configure(text_color=colors[kind])
 
+    def _visible_indices(self) -> tuple[int, ...]:
+        visible = self.__dict__.get("_visible_session_indices")
+        return tuple(range(len(self.session.entries))) if visible is None else tuple(visible)
+
     def _sync_page_selection_to_session(self) -> None:
-        selected = set(self.page_listbox.curselection())
-        for idx, entry in enumerate(self.session.entries):
-            entry.selected = idx in selected
+        selected_visible = set(self.page_listbox.curselection())
+        visible = self._visible_indices()
+        for visible_index, session_index in enumerate(visible):
+            self.session.entries[session_index].selected = visible_index in selected_visible
+        self._update_selection_scope_label()
+
+    def _update_selection_scope_label(self) -> None:
+        selected_ids = self._selected_entry_ids() if hasattr(self, "page_listbox") else set()
+        scope_var = self.__dict__.get("page_selection_scope_var")
+        if scope_var is None:
+            return
+        if not selected_ids:
+            scope_var.set("No pages selected")
+            return
+        visible_ids = {
+            self.session.entries[index].entry_id
+            for index in self._visible_indices()
+        }
+        hidden = len(selected_ids - visible_ids)
+        if hidden:
+            scope_var.set(
+                f"Selected: {len(selected_ids)} pages · {hidden} hidden by filter"
+            )
+        else:
+            scope_var.set(f"Selected: {len(selected_ids)} visible page(s)")
+
+    def _selected_entry_ids(self) -> set[str]:
+        visible = self._visible_indices()
+        selected_visible = set(self.page_listbox.curselection())
+        selected = {
+            entry.entry_id for entry in self.session.entries if bool(getattr(entry, "selected", False))
+        }
+        selected.update(
+            self.session.entries[session_index].entry_id
+            for visible_index, session_index in enumerate(visible)
+            if visible_index in selected_visible and 0 <= session_index < len(self.session.entries)
+        )
+        return selected
+
+    def _selected_visible_session_indices(self) -> list[int]:
+        visible = self._visible_indices()
+        return [
+            visible[visible_index]
+            for visible_index in self.page_listbox.curselection()
+            if 0 <= visible_index < len(visible)
+        ]
 
     def on_page_select(self, _event=None) -> None:
         self._sync_page_selection_to_session()
@@ -4667,6 +4937,14 @@ class UnifiedScanApp(ctk.CTk):
             return None
         return index
 
+    def _session_index_for_visible(self, visible_index: int | None) -> int | None:
+        if visible_index is None:
+            return None
+        visible = self._visible_indices()
+        if not 0 <= visible_index < len(visible):
+            return None
+        return visible[visible_index]
+
     def _page_drop_position(self, y: int) -> tuple[int, bool] | None:
         target_index = self._page_index_at_y(y, clamp=True)
         if target_index is None:
@@ -4681,7 +4959,8 @@ class UnifiedScanApp(ctk.CTk):
         return target_index, y >= bounds[1] + bounds[3] / 2
 
     def _on_page_drag_start(self, event) -> None:
-        index = self._page_index_at_y(event.y)
+        visible_index = self._page_index_at_y(event.y)
+        index = self._session_index_for_visible(visible_index)
         selected_indexes = self._selected_entry_indices()
         if index is not None and index not in selected_indexes:
             selected_indexes = [index]
@@ -4710,7 +4989,10 @@ class UnifiedScanApp(ctk.CTk):
         drop_position = self._page_drop_position(event.y)
         if drop_position is None:
             return "break"
-        target_index, place_after = drop_position
+        visible_target_index, place_after = drop_position
+        target_index = self._session_index_for_visible(visible_target_index)
+        if target_index is None:
+            return "break"
         entry_ids = tuple(state["entry_ids"])
         target_entry_id = self.session.entries[target_index].entry_id
         if self.session.reorder_entries(
@@ -4736,11 +5018,13 @@ class UnifiedScanApp(ctk.CTk):
         return "break"
 
     def _show_page_context_menu(self, event) -> str:
-        index = self._page_index_at_y(event.y)
-        if index is not None and index not in self.page_listbox.curselection():
+        visible_index = self._page_index_at_y(event.y)
+        if visible_index is not None and visible_index not in self.page_listbox.curselection():
             self.page_listbox.selection_clear(0, tk.END)
-            self.page_listbox.selection_set(index)
-            self.page_listbox.activate(index)
+            for entry in self.session.entries:
+                entry.selected = False
+            self.page_listbox.selection_set(visible_index)
+            self.page_listbox.activate(visible_index)
             self.on_page_select()
         self._update_page_action_states()
         try:
@@ -4974,7 +5258,7 @@ class UnifiedScanApp(ctk.CTk):
     def update_page_preview(self) -> None:
         self._release_preview_hold_original(render=False)
         self._cancel_review_page_preview(refresh_pipeline=False)
-        selected = self.page_listbox.curselection()
+        selected = self._selected_entry_indices()
         if len(selected) != 1:
             self.preview_view_entry_id = None
             self._reset_preview_viewport(render=False)
@@ -5062,6 +5346,7 @@ class UnifiedScanApp(ctk.CTk):
             self.review_preview_context = (generation, entry.entry_id, request, split_ratio)
             self.review_preview_diagnostics = None
             self.review_preview_error = None
+            self._refresh_page_status_rows()
             self._refresh_pipeline_strip()
             self._update_export_readiness()
             cancel_event = self.review_preview_cancel_event
@@ -5142,6 +5427,7 @@ class UnifiedScanApp(ctk.CTk):
         self.review_preview_context = None
         self.review_preview_diagnostics = None
         self.review_preview_error = None
+        self._refresh_page_status_rows()
         if refresh_pipeline:
             self._refresh_pipeline_strip()
         self._update_export_readiness()
@@ -5234,6 +5520,7 @@ class UnifiedScanApp(ctk.CTk):
         if error is not None or image is None:
             self.review_preview_diagnostics = None
             self.review_preview_error = error or "no image was produced"
+            self._refresh_page_status_rows()
             self._refresh_pipeline_strip()
             message = f"Preview failed: {error or 'no image was produced'}"
             self._set_preview_message(self.page_preview_after_label, message)
@@ -5274,6 +5561,7 @@ class UnifiedScanApp(ctk.CTk):
                     self._set_preview_result_state("Committed — export ready", kind="committed")
         self.review_preview_diagnostics = diagnostics if is_candidate else None
         self.review_preview_error = None
+        self._refresh_page_status_rows()
         self._refresh_pipeline_strip()
         if diagnostics is not None:
             dewarp = diagnostics.dewarp
@@ -5304,7 +5592,7 @@ class UnifiedScanApp(ctk.CTk):
         self._set_preview_message(label, message)
 
     def _single_selected_index(self) -> int | None:
-        selected = self.page_listbox.curselection()
+        selected = self._selected_entry_indices()
         if len(selected) != 1:
             return None
         return selected[0]
@@ -5348,11 +5636,21 @@ class UnifiedScanApp(ctk.CTk):
         self._sync_page_selection_to_session()
         self._update_page_action_states()
         self.update_page_preview()
-        self._set_status("Selected all pages")
+        selected_count = len(self._selected_entry_ids())
+        hidden_count = max(0, selected_count - len(self._visible_session_indices))
+        if hidden_count:
+            self._set_status(
+                f"Selected {selected_count} pages in scope: "
+                f"{len(self._visible_session_indices)} visible + {hidden_count} hidden"
+            )
+        else:
+            self._set_status(f"Selected all {len(self._visible_session_indices)} visible page(s)")
 
     def clear_page_selection(self) -> None:
         self.page_listbox.selection_clear(0, tk.END)
-        self._sync_page_selection_to_session()
+        for entry in self.session.entries:
+            entry.selected = False
+        self._update_selection_scope_label()
         self._update_page_action_states()
         self.update_page_preview()
         self._set_status("Selection cleared")
@@ -6481,9 +6779,12 @@ class UnifiedScanApp(ctk.CTk):
         )
 
     def _selected_entry_indices(self) -> list[int]:
-        indexes = list(self.page_listbox.curselection())
-        valid = [idx for idx in indexes if 0 <= idx < len(self.session.entries)]
-        return valid
+        selected_ids = self._selected_entry_ids()
+        return [
+            index
+            for index, entry in enumerate(self.session.entries)
+            if entry.entry_id in selected_ids
+        ]
 
     def rotate_selected_left(self) -> None:
         indices = self._selected_entry_indices()

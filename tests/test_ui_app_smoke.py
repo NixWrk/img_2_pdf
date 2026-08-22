@@ -169,6 +169,33 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.page_count_var.get() == "2 pages"
         assert app.crop_warning_var.get() == "⚠ 2 pages need crop review"
         assert app.export_readiness_var.get() == "Export: 0 ready · 0 warnings · 2 blocked"
+        assert app.page_filter_buttons["All"].cget("text") == "All 2"
+        assert app.page_filter_buttons["Needs review"].cget("text") == "Needs review 2"
+        assert app.page_filter_buttons["Edited"].cget("text") == "Edited 0"
+        assert app.page_filter_buttons["Errors"].cget("text") == "Errors 0"
+        app._cancel_review_page_preview()
+        status_generation = app.review_preview_generation
+        status_request = app._processing_request(entry=second_entry, preview=True)
+        app.review_preview_context = (
+            status_generation,
+            second_entry.entry_id,
+            status_request,
+            None,
+        )
+        app.review_preview_error = "synthetic smoke error"
+        app.refresh_page_rows()
+        assert app.review_preview_generation == status_generation
+        app._set_page_filter("Errors")
+        assert app.review_preview_generation == status_generation
+        assert app._visible_session_indices == (1,)
+        assert app.page_listbox.size() == 1
+        assert app.page_listbox.itemcget(0, "foreground") == app_module.resolve_pair("danger")
+        filtered_index, filtered_entry = app._single_selected_entry()
+        assert filtered_index == 1
+        assert filtered_entry is second_entry
+        app.review_preview_context = None
+        app.review_preview_error = None
+        app._set_page_filter("All")
         assert app.toolbar_export_pdf_button.cget("state") == "normal"
         assert app.toolbar_export_options_button.cget("state") == "normal"
         readiness_warnings: list[tuple[str, str]] = []
