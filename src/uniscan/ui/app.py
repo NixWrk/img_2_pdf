@@ -113,7 +113,7 @@ from uniscan.ui.live_detect import DEFAULT_LIVE_BACKEND, LIVE_BACKEND_CHOICES, L
 from uniscan.ui.overlays import draw_quad_overlay, scale_contour
 from uniscan.ui.pipeline_strip import render_pipeline_strip
 from uniscan.ui.review_pipeline import build_pipeline_cards
-from uniscan.ui.theme import COLORS, resolve_pair
+from uniscan.ui.theme import COLORS, bind_focus_ring, component_style, resolve_pair
 
 # Poll faster than the camera delivers: a tick without a new frame costs
 # almost nothing, while Tk's ~15 ms timer granularity on Windows would
@@ -823,61 +823,55 @@ class UnifiedScanApp(ctk.CTk):
             text="+ Add files",
             width=110,
             command=self.quick_add_files,
+            **component_style("primary_button"),
         )
         self.toolbar_add_files_button.pack(side=ctk.LEFT, padx=(8, 4), pady=8)
         self.toolbar_add_folder_button = ctk.CTkButton(
             toolbar,
             text="Add folder",
             width=105,
-            fg_color="transparent",
-            border_width=1,
             command=self.quick_add_folder,
+            **component_style("secondary_button"),
         )
         self.toolbar_add_folder_button.pack(side=ctk.LEFT, padx=4, pady=8)
         self.toolbar_paste_button = ctk.CTkButton(
             toolbar,
             text="Paste",
             width=80,
-            fg_color="transparent",
-            border_width=1,
             command=self.import_from_clipboard,
+            **component_style("secondary_button"),
         )
         self.toolbar_paste_button.pack(side=ctk.LEFT, padx=4, pady=8)
         self.toolbar_camera_button = ctk.CTkButton(
             toolbar,
             text="Camera",
             width=90,
-            fg_color="transparent",
-            border_width=1,
             command=self.go_to_camera_tab,
+            **component_style("secondary_button"),
         )
         self.toolbar_camera_button.pack(side=ctk.LEFT, padx=4, pady=8)
         self.toolbar_import_options_button = ctk.CTkButton(
             toolbar,
             text="Import options...",
             width=125,
-            fg_color="transparent",
-            border_width=1,
             command=self.open_import_options_dialog,
+            **component_style("secondary_button"),
         )
         self.toolbar_import_options_button.pack(side=ctk.LEFT, padx=4, pady=8)
         self.toolbar_export_pdf_button = ctk.CTkButton(
             toolbar,
             text="Export PDF",
             width=120,
-            fg_color=COLORS["success"],
-            hover_color=COLORS["success.hover"],
-            text_color=COLORS["success.text"],
             command=self.quick_export_pdf,
+            **component_style("success_button"),
         )
         self.toolbar_export_pdf_button.pack(side=ctk.RIGHT, padx=(4, 8), pady=8)
         self.toolbar_export_options_button = ctk.CTkButton(
             toolbar,
             text="Export options...",
             width=135,
-            fg_color="transparent",
-            border_width=1,
             command=self.open_export_dialog,
+            **component_style("secondary_button"),
         )
         self.toolbar_export_options_button.pack(side=ctk.RIGHT, padx=4, pady=8)
         self.export_readiness_label = ctk.CTkLabel(
@@ -896,6 +890,7 @@ class UnifiedScanApp(ctk.CTk):
             width=140,
             height=8,
             mode="determinate",
+            **component_style("progress"),
         )
         self.job_progress_bar.set(0)
         self.job_progress_bar.pack(side=ctk.RIGHT, padx=(8, 0), pady=8)
@@ -904,10 +899,9 @@ class UnifiedScanApp(ctk.CTk):
             text="Cancel task",
             width=90,
             height=26,
-            fg_color="transparent",
-            border_width=1,
             command=self.cancel_current_job,
             state=tk.DISABLED,
+            **component_style("secondary_button"),
         )
         self.cancel_task_button.pack(side=ctk.RIGHT, padx=8, pady=5)
         self.retry_task_button = ctk.CTkButton(
@@ -915,10 +909,9 @@ class UnifiedScanApp(ctk.CTk):
             text="Retry",
             width=70,
             height=26,
-            fg_color="transparent",
-            border_width=1,
             command=self.retry_last_job,
             state=tk.DISABLED,
+            **component_style("secondary_button"),
         )
         self.retry_task_button.pack(side=ctk.RIGHT, padx=(0, 4), pady=5)
 
@@ -931,6 +924,33 @@ class UnifiedScanApp(ctk.CTk):
         self._build_pages_tab(self.pages_tab)
         self._build_capture_tab(self.camera_tab)
         self.tabs.set(self.tab_review_name)
+        for name in (
+            "toolbar_add_files_button",
+            "toolbar_add_folder_button",
+            "toolbar_paste_button",
+            "toolbar_camera_button",
+            "toolbar_import_options_button",
+            "toolbar_export_options_button",
+            "toolbar_export_pdf_button",
+            "cancel_task_button",
+            "retry_task_button",
+            "capture_one_button",
+            "camera_identify_button",
+            "camera_detect_modes_button",
+            "move_pages_up_button",
+            "move_pages_down_button",
+            "delete_pages_button",
+            "undo_delete_button",
+            "apply_split_button",
+            "deskew_reset_button",
+            "deskew_restore_button",
+            "lighting_reset_button",
+            "lighting_restore_button",
+            "apply_processing_button",
+            "undo_stage_button",
+            "redo_stage_button",
+        ):
+            bind_focus_ring(getattr(self, name))
 
     def go_to_camera_tab(self) -> None:
         """Switch to the in-window Camera tab; the preview starts by itself."""
@@ -1044,6 +1064,7 @@ class UnifiedScanApp(ctk.CTk):
             variable=self.live_backend_var,
             command=self._on_live_backend_change,
             width=140,
+            **component_style("option_menu"),
         ).pack(side=ctk.LEFT)
         ctk.CTkLabel(live_edge_box, textvariable=self.live_status_var, anchor="w").pack(
             fill=ctk.X, padx=8, pady=(0, 6)
@@ -1062,6 +1083,7 @@ class UnifiedScanApp(ctk.CTk):
             values=self._device_menu_values(),
             command=self._on_camera_device_selected,
             width=220,
+            **component_style("option_menu"),
         )
         self.camera_index_menu.set(self._device_menu_selection())
         self.camera_index_menu.pack(side=ctk.LEFT)
@@ -1081,15 +1103,15 @@ class UnifiedScanApp(ctk.CTk):
             values=self._resolution_menu_values(),
             command=self._apply_resolution_string,
             width=190,
+            **component_style("option_menu"),
         )
         self.camera_resolution_menu.set(self._resolution_menu_selection())
         self.camera_resolution_menu.pack(side=ctk.LEFT)
         self.camera_detect_modes_button = ctk.CTkButton(
             settings_box,
             text="Detect capture modes",
-            fg_color="transparent",
-            border_width=1,
             command=self._detect_camera_modes_async,
+            **component_style("secondary_button"),
         )
         self.camera_detect_modes_button.pack(fill=ctk.X, padx=8, pady=(0, 4))
 
@@ -1112,9 +1134,8 @@ class UnifiedScanApp(ctk.CTk):
         ctk.CTkButton(
             settings_box,
             text="Reconnect camera",
-            fg_color="transparent",
-            border_width=1,
             command=self.start_preview,
+            **component_style("secondary_button"),
         ).pack(fill=ctk.X, padx=8, pady=(2, 8))
 
         preview_area = ctk.CTkFrame(tab)
@@ -1191,6 +1212,7 @@ class UnifiedScanApp(ctk.CTk):
             text="Move up",
             width=82,
             command=self.move_selected_up,
+            **component_style("secondary_button"),
         )
         self.move_pages_up_button.pack(side=ctk.LEFT, padx=(0, 4))
         self.move_pages_down_button = ctk.CTkButton(
@@ -1198,16 +1220,15 @@ class UnifiedScanApp(ctk.CTk):
             text="Move down",
             width=86,
             command=self.move_selected_down,
+            **component_style("secondary_button"),
         )
         self.move_pages_down_button.pack(side=ctk.LEFT, padx=(0, 4))
         self.delete_pages_button = ctk.CTkButton(
             page_actions,
             text="Delete",
             width=72,
-            fg_color=COLORS["danger"],
-            hover_color=COLORS["danger.hover"],
-            text_color=COLORS["danger.text"],
             command=self.delete_selected_pages,
+            **component_style("danger_button"),
         )
         self.delete_pages_button.pack(side=ctk.LEFT)
 
@@ -1216,10 +1237,9 @@ class UnifiedScanApp(ctk.CTk):
         self.undo_delete_button = ctk.CTkButton(
             history_actions,
             text="Undo delete",
-            fg_color="transparent",
-            border_width=1,
             command=self.undo_last_page_deletion,
             state=tk.DISABLED,
+            **component_style("secondary_button"),
         )
         self.undo_delete_button.pack(fill=ctk.X)
 
@@ -1239,17 +1259,15 @@ class UnifiedScanApp(ctk.CTk):
             edit_actions,
             text="Rotate left",
             width=118,
-            fg_color="transparent",
-            border_width=1,
             command=self.rotate_selected_left,
+            **component_style("secondary_button"),
         ).pack(side=ctk.LEFT, padx=(0, 4))
         ctk.CTkButton(
             edit_actions,
             text="Rotate right",
             width=118,
-            fg_color="transparent",
-            border_width=1,
             command=self.rotate_selected_right,
+            **component_style("secondary_button"),
         ).pack(side=ctk.LEFT)
 
         selection_actions = ctk.CTkFrame(left, fg_color="transparent")
@@ -1258,17 +1276,15 @@ class UnifiedScanApp(ctk.CTk):
             selection_actions,
             text="Select all",
             width=118,
-            fg_color="transparent",
-            border_width=1,
             command=self.select_all_pages,
+            **component_style("secondary_button"),
         ).pack(side=ctk.LEFT, padx=(0, 4))
         ctk.CTkButton(
             selection_actions,
             text="Clear",
             width=118,
-            fg_color="transparent",
-            border_width=1,
             command=self.clear_page_selection,
+            **component_style("secondary_button"),
         ).pack(side=ctk.LEFT)
 
         preview = ctk.CTkFrame(tab)
@@ -1291,6 +1307,7 @@ class UnifiedScanApp(ctk.CTk):
             values=["Preview", "Original", "Compare"],
             variable=self.preview_mode_var,
             command=self._on_preview_mode_change,
+            **component_style("segmented"),
         )
         self.preview_mode_selector.pack(side=ctk.RIGHT)
         self.pipeline_strip = ctk.CTkScrollableFrame(
@@ -1386,16 +1403,14 @@ class UnifiedScanApp(ctk.CTk):
         ctk.CTkButton(
             processing,
             text="3  Page perspective",
-            fg_color="transparent",
-            border_width=1,
             command=self.open_current_geometry_corners_editor,
+            **component_style("secondary_button"),
         ).pack(fill=ctk.X, padx=6, pady=(0, 4))
         ctk.CTkButton(
             processing,
             text="4  Edit page waves",
-            fg_color="transparent",
-            border_width=1,
             command=self.open_dewarp_points_editor,
+            **component_style("secondary_button"),
         ).pack(fill=ctk.X, padx=6, pady=(0, 4))
         geometry_utilities = ctk.CTkFrame(processing, fg_color="transparent")
         geometry_utilities.pack(fill=ctk.X, padx=6, pady=(0, 4))
@@ -1403,24 +1418,21 @@ class UnifiedScanApp(ctk.CTk):
             geometry_utilities,
             text="Auto orient",
             width=108,
-            fg_color="transparent",
-            border_width=1,
             command=self.auto_orient_selected,
+            **component_style("secondary_button"),
         ).pack(side=ctk.LEFT, padx=(0, 4))
         ctk.CTkButton(
             geometry_utilities,
             text="Auto deskew",
             width=108,
-            fg_color="transparent",
-            border_width=1,
             command=self.auto_deskew_selected,
+            **component_style("secondary_button"),
         ).pack(side=ctk.LEFT)
         ctk.CTkButton(
             processing,
             text="Detect page boundaries",
-            fg_color="transparent",
-            border_width=1,
             command=self.open_auto_crop_editor,
+            **component_style("secondary_button"),
         ).pack(fill=ctk.X, padx=6, pady=(0, 4))
         source_actions = ctk.CTkFrame(processing, fg_color="transparent")
         source_actions.pack(fill=ctk.X, padx=6, pady=(0, 10))
@@ -1428,17 +1440,15 @@ class UnifiedScanApp(ctk.CTk):
             source_actions,
             text="Replace...",
             width=108,
-            fg_color="transparent",
-            border_width=1,
             command=self.replace_selected_page_from_file,
+            **component_style("secondary_button"),
         ).pack(side=ctk.LEFT, padx=(0, 4))
         ctk.CTkButton(
             source_actions,
             text="Retake",
             width=108,
-            fg_color="transparent",
-            border_width=1,
             command=self.retake_selected_page_from_camera,
+            **component_style("secondary_button"),
         ).pack(side=ctk.LEFT)
 
         ctk.CTkLabel(processing, text="Document type", anchor="w").pack(
@@ -1449,6 +1459,7 @@ class UnifiedScanApp(ctk.CTk):
             values=list(LENS_MODE_VALUES),
             variable=self.lens_mode_var,
             command=self.on_lens_mode_change,
+            **component_style("option_menu"),
         ).pack(fill=ctk.X, padx=6, pady=(0, 8))
 
         ctk.CTkLabel(processing, text="Output style", anchor="w").pack(
@@ -1459,6 +1470,7 @@ class UnifiedScanApp(ctk.CTk):
             values=list(POSTPROCESSING_OPTIONS.keys()),
             variable=self.postprocess_var,
             command=self._on_postprocess_mode_change,
+            **component_style("option_menu"),
         ).pack(fill=ctk.X, padx=6, pady=(0, 8))
 
         ctk.CTkLabel(processing, text="Cleanup preset", anchor="w").pack(
@@ -1469,6 +1481,7 @@ class UnifiedScanApp(ctk.CTk):
             values=list(PREPROCESS_PRESETS.keys()),
             variable=self.preprocess_preset_var,
             command=self.on_preprocess_preset_change,
+            **component_style("option_menu"),
         ).pack(fill=ctk.X, padx=6, pady=(0, 10))
 
         ctk.CTkCheckBox(
@@ -1498,6 +1511,7 @@ class UnifiedScanApp(ctk.CTk):
             values=list(ORIENTATION_UI_METHODS),
             variable=self.orientation_method_var,
             command=lambda _value: self.update_page_preview(),
+            **component_style("option_menu"),
         ).pack(fill=ctk.X, padx=6, pady=(0, 8))
         ctk.CTkLabel(processing, text="Small-angle deskew", anchor="w").pack(
             fill=ctk.X, padx=6, pady=(0, 2)
@@ -1507,6 +1521,7 @@ class UnifiedScanApp(ctk.CTk):
             values=list(DESKEW_UI_METHODS),
             variable=self.deskew_method_var,
             command=lambda _value: self.update_page_preview(),
+            **component_style("option_menu"),
         ).pack(fill=ctk.X, padx=6, pady=(0, 4))
         ctk.CTkSlider(
             processing,
@@ -1528,15 +1543,15 @@ class UnifiedScanApp(ctk.CTk):
             deskew_actions,
             text="Reset to automatic",
             command=self._reset_deskew_controls,
+            **component_style("secondary_button"),
         )
         self.deskew_reset_button.pack(side=ctk.LEFT, expand=True, fill=ctk.X, padx=(0, 3))
         self.deskew_restore_button = ctk.CTkButton(
             deskew_actions,
             text="Restore committed",
-            fg_color="transparent",
-            border_width=1,
             command=self._restore_deskew_controls,
             state=tk.NORMAL if self._deskew_restore_available() else tk.DISABLED,
+            **component_style("secondary_button"),
         )
         self.deskew_restore_button.pack(side=ctk.LEFT, expand=True, fill=ctk.X, padx=(3, 0))
         ctk.CTkLabel(processing, text="Remove page waves", anchor="w").pack(
@@ -1547,6 +1562,7 @@ class UnifiedScanApp(ctk.CTk):
             values=list(DEWARP_UI_METHODS),
             variable=self.dewarp_method_var,
             command=self._on_dewarp_method_change,
+            **component_style("option_menu"),
         ).pack(fill=ctk.X, padx=6, pady=(0, 5))
         ctk.CTkLabel(
             processing,
@@ -1565,6 +1581,7 @@ class UnifiedScanApp(ctk.CTk):
             values=list(SHADOW_UI_METHODS),
             variable=self.shadow_method_var,
             command=lambda _value: self.update_page_preview(),
+            **component_style("option_menu"),
         ).pack(fill=ctk.X, padx=6, pady=(0, 4))
         lighting_actions = ctk.CTkFrame(processing, fg_color="transparent")
         lighting_actions.pack(fill=ctk.X, padx=6, pady=(0, 10))
@@ -1572,15 +1589,15 @@ class UnifiedScanApp(ctk.CTk):
             lighting_actions,
             text="Reset to automatic",
             command=self._reset_lighting_controls,
+            **component_style("secondary_button"),
         )
         self.lighting_reset_button.pack(side=ctk.LEFT, expand=True, fill=ctk.X, padx=(0, 3))
         self.lighting_restore_button = ctk.CTkButton(
             lighting_actions,
             text="Restore committed",
-            fg_color="transparent",
-            border_width=1,
             command=self._restore_lighting_controls,
             state=tk.NORMAL if self._lighting_restore_available() else tk.DISABLED,
+            **component_style("secondary_button"),
         )
         self.lighting_restore_button.pack(side=ctk.LEFT, expand=True, fill=ctk.X, padx=(3, 0))
 
@@ -1592,6 +1609,7 @@ class UnifiedScanApp(ctk.CTk):
             values=list(BINARIZATION_UI_METHODS),
             variable=self.binarization_method_var,
             command=self._on_binarization_method_change,
+            **component_style("option_menu"),
         ).pack(fill=ctk.X, padx=6, pady=(0, 8))
 
         ctk.CTkLabel(processing, text="Despeckle", anchor="w").pack(fill=ctk.X, padx=6, pady=(0, 2))
@@ -1600,6 +1618,7 @@ class UnifiedScanApp(ctk.CTk):
             values=list(DESPECKLE_UI_STRENGTHS),
             variable=self.despeckle_strength_var,
             command=lambda _value: self.update_page_preview(),
+            **component_style("option_menu"),
         ).pack(fill=ctk.X, padx=6, pady=(0, 8))
 
         ctk.CTkLabel(processing, text="Standard page layout", anchor="w").pack(
@@ -1610,13 +1629,13 @@ class UnifiedScanApp(ctk.CTk):
             values=list(PAGE_LAYOUT_UI_METHODS),
             variable=self.page_layout_var,
             command=lambda _value: self.update_page_preview(),
+            **component_style("option_menu"),
         ).pack(fill=ctk.X, padx=6, pady=(0, 8))
         ctk.CTkButton(
             processing,
             text="Analyze lighting",
-            fg_color="transparent",
-            border_width=1,
             command=self.analyze_selected_page_lighting,
+            **component_style("secondary_button"),
         ).pack(fill=ctk.X, padx=6, pady=(0, 4))
         ctk.CTkLabel(
             processing,
@@ -1633,22 +1652,21 @@ class UnifiedScanApp(ctk.CTk):
             processing_actions,
             text="Preview",
             width=108,
-            fg_color="transparent",
-            border_width=1,
             command=self.update_page_preview,
+            **component_style("secondary_button"),
         ).pack(side=ctk.LEFT, padx=(0, 4))
         ctk.CTkButton(
             processing_actions,
             text="Advanced processing",
             width=108,
-            fg_color="transparent",
-            border_width=1,
             command=self.open_review_processing_dialog,
+            **component_style("secondary_button"),
         ).pack(side=ctk.LEFT)
         self.apply_processing_button = ctk.CTkButton(
             processing,
             text="Apply candidate for export",
             command=self.apply_review_changes,
+            **component_style("primary_button"),
         )
         self.apply_processing_button.pack(fill=ctk.X, padx=6, pady=(0, 4))
         stage_history_actions = ctk.CTkFrame(processing, fg_color="transparent")
@@ -1657,20 +1675,18 @@ class UnifiedScanApp(ctk.CTk):
             stage_history_actions,
             text="Undo stage",
             width=108,
-            fg_color="transparent",
-            border_width=1,
             command=self.undo_stage_edit,
             state=tk.DISABLED,
+            **component_style("secondary_button"),
         )
         self.undo_stage_button.pack(side=ctk.LEFT, padx=(0, 4))
         self.redo_stage_button = ctk.CTkButton(
             stage_history_actions,
             text="Redo stage",
             width=108,
-            fg_color="transparent",
-            border_width=1,
             command=self.redo_stage_edit,
             state=tk.DISABLED,
+            **component_style("secondary_button"),
         )
         self.redo_stage_button.pack(side=ctk.LEFT)
         ctk.CTkLabel(
@@ -4004,7 +4020,12 @@ class UnifiedScanApp(ctk.CTk):
             font=ctk.CTkFont(size=18, weight="bold"),
             anchor="w",
         ).pack(fill=ctk.X, padx=16, pady=(16, 8))
-        mode_control = ctk.CTkSegmentedButton(window, values=["PDF", "Images"], variable=mode_var)
+        mode_control = ctk.CTkSegmentedButton(
+            window,
+            values=["PDF", "Images"],
+            variable=mode_var,
+            **component_style("segmented"),
+        )
         mode_control.pack(fill=ctk.X, padx=16, pady=(0, 10))
 
         scope_row = ctk.CTkFrame(window, fg_color="transparent")
@@ -4015,6 +4036,7 @@ class UnifiedScanApp(ctk.CTk):
             values=["All pages", "Selected pages"],
             variable=scope_var,
             width=180,
+            **component_style("option_menu"),
         ).pack(side=ctk.RIGHT)
 
         option_host = ctk.CTkFrame(window, fg_color="transparent")
@@ -4029,6 +4051,7 @@ class UnifiedScanApp(ctk.CTk):
             values=["png", "jpg", "webp", "tif"],
             variable=image_format_var,
             width=140,
+            **component_style("option_menu"),
         ).pack(side=ctk.RIGHT)
 
         def update_mode(_value: str | None = None) -> None:
@@ -4045,14 +4068,14 @@ class UnifiedScanApp(ctk.CTk):
         ctk.CTkButton(
             footer,
             text="Cancel",
-            fg_color="transparent",
-            border_width=1,
             command=close_dialog,
+            **component_style("secondary_button"),
         ).pack(side=ctk.RIGHT)
         self.export_custom_button = ctk.CTkButton(
             footer,
             text="Export with settings",
             command=custom_export,
+            **component_style("primary_button"),
         )
         self.export_custom_button.pack(side=ctk.RIGHT, padx=6)
 

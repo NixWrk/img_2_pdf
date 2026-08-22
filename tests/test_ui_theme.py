@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 
 from uniscan.ui.stage_state import StageStatus
-from uniscan.ui.theme import COLORS, resolve_pair, status_presentation
+from uniscan.ui.theme import (
+    COLORS,
+    bind_focus_ring,
+    component_style,
+    resolve_pair,
+    status_presentation,
+)
 
 
 def _relative_luminance(value: str) -> float:
@@ -99,3 +105,61 @@ def test_stage_status_semantics_do_not_depend_on_color_alone() -> None:
     )
     assert (applied.glyph, applied.label) == ("+", "Applied")
     assert len({status_presentation(status).glyph for status in StageStatus}) > 1
+
+
+def test_component_styles_are_local_copies_with_explicit_states() -> None:
+    secondary = component_style("secondary_button")
+    assert secondary == {
+        "fg_color": COLORS["surface.raised"],
+        "hover_color": COLORS["tint.neutral"],
+        "text_color": COLORS["text.primary"],
+        "text_color_disabled": COLORS["text.muted"],
+        "border_color": COLORS["border.default"],
+        "border_width": 1,
+    }
+    secondary["border_width"] = 99
+    assert component_style("secondary_button")["border_width"] == 1
+    assert component_style("segmented")["selected_color"] == COLORS["action.primary"]
+    assert component_style("option_menu")["dropdown_fg_color"] == COLORS["surface.panel"]
+    assert component_style("progress")["progress_color"] == COLORS["focus"]
+    with pytest.raises(ValueError, match="unknown component style"):
+        component_style("global-theme-mutation")
+
+
+@pytest.mark.parametrize("mode", (0, 1))
+def test_component_state_pairs_meet_wcag_aa(mode: int) -> None:
+    pairs = (
+        (COLORS["action.primary"], COLORS["action.text"]),
+        (COLORS["action.hover"], COLORS["action.text"]),
+        (COLORS["surface.raised"], COLORS["text.primary"]),
+        (COLORS["tint.neutral"], COLORS["text.primary"]),
+        (COLORS["surface.panel"], COLORS["text.primary"]),
+    )
+    for background, foreground in pairs:
+        assert _contrast(background[mode], foreground[mode]) >= 4.5
+
+
+def test_focus_ring_is_local_and_restores_the_component_style() -> None:
+    class Widget:
+        def __init__(self) -> None:
+            self.options = {"border_color": COLORS["border.default"], "border_width": 0}
+            self.bindings = {}
+
+        def cget(self, name: str):
+            return self.options[name]
+
+        def configure(self, **options) -> None:
+            self.options.update(options)
+
+        def bind(self, sequence: str, command, add: str) -> None:
+            assert add == "+"
+            self.bindings[sequence] = command
+
+    widget = Widget()
+    assert bind_focus_ring(widget) is widget
+    widget.bindings["<FocusIn>"]()
+    assert widget.options["border_color"] == COLORS["focus"]
+    assert widget.options["border_width"] == 1
+    widget.bindings["<FocusOut>"]()
+    assert widget.options["border_color"] == COLORS["border.default"]
+    assert widget.options["border_width"] == 0

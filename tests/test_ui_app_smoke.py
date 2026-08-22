@@ -104,11 +104,22 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.toolbar_add_folder_button.cget("text") == "Add folder"
         assert app.toolbar_paste_button.cget("text") == "Paste"
         assert app.toolbar_camera_button.cget("text") == "Camera"
+        assert app.toolbar_add_files_button.cget("fg_color") == app_module.COLORS[
+            "action.primary"
+        ]
+        assert app.toolbar_add_folder_button.cget("fg_color") == app_module.COLORS[
+            "surface.raised"
+        ]
+        assert app.toolbar_export_pdf_button.cget("fg_color") == app_module.COLORS["success"]
         assert app.toolbar_export_pdf_button.cget("state") == "disabled"
         assert app.toolbar_export_options_button.cget("state") == "disabled"
         assert app.cancel_task_button.cget("state") == "disabled"
+        assert app.cancel_task_button.cget("text_color_disabled") == app_module.COLORS[
+            "text.muted"
+        ]
         assert app.retry_task_button.cget("state") == "disabled"
         assert app.job_progress_bar.cget("mode") == "determinate"
+        assert app.job_progress_bar.cget("progress_color") == app_module.COLORS["focus"]
         assert app.job_progress_bar.get() == pytest.approx(0.0)
         assert app.move_pages_up_button.cget("state") == "disabled"
         assert app.move_pages_down_button.cget("state") == "disabled"
@@ -121,6 +132,10 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.page_listbox.bind("<Control-Right>")
         assert app.page_listbox.bind("<B1-Motion>")
         assert app.page_listbox.bind("<Button-3>")
+        assert app.preview_mode_selector.cget("selected_color") == app_module.COLORS[
+            "action.primary"
+        ]
+        assert app.camera_index_menu.cget("fg_color") == app_module.COLORS["surface.raised"]
 
         source = tmp_path / "drop.png"
         source.write_bytes(b"placeholder")

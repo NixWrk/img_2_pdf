@@ -60,6 +60,65 @@ TYPOGRAPHY: Final[Mapping[str, tuple[int, str]]] = {
     "status": (12, "bold"),
 }
 
+COMPONENT_STYLES: Final[Mapping[str, Mapping[str, object]]] = {
+    "primary_button": {
+        "fg_color": COLORS["action.primary"],
+        "hover_color": COLORS["action.hover"],
+        "text_color": COLORS["action.text"],
+        "text_color_disabled": COLORS["text.muted"],
+    },
+    "secondary_button": {
+        "fg_color": COLORS["surface.raised"],
+        "hover_color": COLORS["tint.neutral"],
+        "text_color": COLORS["text.primary"],
+        "text_color_disabled": COLORS["text.muted"],
+        "border_color": COLORS["border.default"],
+        "border_width": 1,
+    },
+    "danger_button": {
+        "fg_color": COLORS["danger"],
+        "hover_color": COLORS["danger.hover"],
+        "text_color": COLORS["danger.text"],
+        "text_color_disabled": COLORS["text.muted"],
+    },
+    "success_button": {
+        "fg_color": COLORS["success"],
+        "hover_color": COLORS["success.hover"],
+        "text_color": COLORS["success.text"],
+        "text_color_disabled": COLORS["text.muted"],
+    },
+    "segmented": {
+        "fg_color": COLORS["surface.raised"],
+        "selected_color": COLORS["action.primary"],
+        "selected_hover_color": COLORS["action.hover"],
+        "unselected_color": COLORS["surface.panel"],
+        "unselected_hover_color": COLORS["tint.neutral"],
+        "text_color": COLORS["text.primary"],
+        "text_color_disabled": COLORS["text.muted"],
+        "border_width": 1,
+    },
+    "option_menu": {
+        "fg_color": COLORS["surface.raised"],
+        "button_color": COLORS["action.primary"],
+        "button_hover_color": COLORS["action.hover"],
+        "text_color": COLORS["text.primary"],
+        "text_color_disabled": COLORS["text.muted"],
+        "dropdown_fg_color": COLORS["surface.panel"],
+        "dropdown_hover_color": COLORS["tint.neutral"],
+        "dropdown_text_color": COLORS["text.primary"],
+    },
+    "progress": {
+        "fg_color": COLORS["tint.neutral"],
+        "progress_color": COLORS["focus"],
+        "border_color": COLORS["border.default"],
+        "border_width": 1,
+    },
+    "focus_ring": {
+        "border_color": COLORS["focus"],
+        "border_width": 1,
+    },
+}
+
 
 def resolve_pair(
     pair_or_name: ColorPair | str,
@@ -97,6 +156,33 @@ def color_pair(name: str) -> ColorPair:
     """Return a named pair for CustomTkinter options."""
 
     return COLORS[name]
+
+
+def component_style(name: str) -> dict[str, object]:
+    """Return isolated kwargs for one CustomTkinter component instance."""
+
+    try:
+        return dict(COMPONENT_STYLES[name])
+    except KeyError:
+        raise ValueError(f"unknown component style: {name!r}") from None
+
+
+def bind_focus_ring(widget):
+    """Add a component-local keyboard focus ring without mutating the global theme."""
+
+    resting_color = widget.cget("border_color")
+    resting_width = widget.cget("border_width")
+    focus = component_style("focus_ring")
+
+    def show(_event=None) -> None:
+        widget.configure(**focus)
+
+    def hide(_event=None) -> None:
+        widget.configure(border_color=resting_color, border_width=resting_width)
+
+    widget.bind("<FocusIn>", show, add="+")
+    widget.bind("<FocusOut>", hide, add="+")
+    return widget
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,10 +240,13 @@ def status_presentation(status: StageStatus | str) -> StageStatusPresentation:
 
 __all__ = [
     "COLORS",
+    "COMPONENT_STYLES",
     "ColorPair",
     "StageStatusPresentation",
     "TYPOGRAPHY",
+    "bind_focus_ring",
     "color_pair",
+    "component_style",
     "resolve_pair",
     "status_presentation",
 ]
