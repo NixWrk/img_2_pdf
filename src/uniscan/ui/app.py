@@ -96,6 +96,11 @@ from uniscan.session import (
     load_or_create_session,
 )
 from uniscan.storage import ProcessingStageCache
+from uniscan.ui.stage_history import (
+    StageHistory,
+    StageHistoryBlocked,
+    StageHistoryError,
+)
 from uniscan.ui.stage_transaction import StageEditTransaction, StageTransactionClosedError
 from uniscan.ui.camera_health import camera_health_state
 from uniscan.ui.export_preflight import ExportPreflight, build_export_preflight
@@ -557,6 +562,9 @@ class UnifiedScanApp(ctk.CTk):
         try:
             self._initialize()
         except BaseException:
+            history = object.__getattribute__(self, "__dict__").get("stage_history")
+            if history is not None:
+                history.close()
             try:
                 lock = object.__getattribute__(self, "_autosave_lock")
             except (AttributeError, TypeError):
@@ -590,6 +598,8 @@ class UnifiedScanApp(ctk.CTk):
             self._restore_error = str(exc)
             self.session = create_persistent_session(self.autosave_path.parent)
             self._session_restored = False
+        self.stage_history = StageHistory(max_records=20)
+        self._pending_stage_history_notice: str | None = None
         self.camera: CameraService | None = None
         self.burst_camera: CameraService | None = None
         self._burst_capture_active = False
@@ -665,6 +675,8 @@ class UnifiedScanApp(ctk.CTk):
         self.cleanup_restore_button: ctk.CTkButton | None = None
         self.layout_reset_button: ctk.CTkButton | None = None
         self.layout_restore_button: ctk.CTkButton | None = None
+        self.undo_stage_button: ctk.CTkButton | None = None
+        self.redo_stage_button: ctk.CTkButton | None = None
         self.dewarp_resize_job: str | None = None
         self.page_drag_state: dict[str, object] | None = None
         self.live_detector = LiveContourDetector(backend=DEFAULT_LIVE_BACKEND)
@@ -1596,7 +1608,36 @@ class UnifiedScanApp(ctk.CTk):
             text="Apply candidate for export",
             command=self.apply_review_changes,
         )
-        self.apply_processing_button.pack(fill=ctk.X, padx=6, pady=(0, 14))
+        self.apply_processing_button.pack(fill=ctk.X, padx=6, pady=(0, 4))
+        stage_history_actions = ctk.CTkFrame(processing, fg_color="transparent")
+        stage_history_actions.pack(fill=ctk.X, padx=6, pady=(0, 2))
+        self.undo_stage_button = ctk.CTkButton(
+            stage_history_actions,
+            text="Undo stage",
+            width=108,
+            fg_color="transparent",
+            border_width=1,
+            command=self.undo_stage_edit,
+            state=tk.DISABLED,
+        )
+        self.undo_stage_button.pack(side=ctk.LEFT, padx=(0, 4))
+        self.redo_stage_button = ctk.CTkButton(
+            stage_history_actions,
+            text="Redo stage",
+            width=108,
+            fg_color="transparent",
+            border_width=1,
+            command=self.redo_stage_edit,
+            state=tk.DISABLED,
+        )
+        self.redo_stage_button.pack(side=ctk.LEFT)
+        ctk.CTkLabel(
+            processing,
+            text="Ctrl+Alt+Z / Ctrl+Alt+Y",
+            anchor="w",
+            text_color=("#60646c", "#a0a4ab"),
+            font=ctk.CTkFont(size=10),
+        ).pack(fill=ctk.X, padx=6, pady=(0, 14))
 
         self.inline_editor_host = ctk.CTkFrame(tab)
         self.inline_editor_host.grid_rowconfigure(0, weight=1)
@@ -1610,6 +1651,8 @@ class UnifiedScanApp(ctk.CTk):
         self.bind("<Control-Shift-C>", lambda _event: self._run_shortcut(self.capture_one))
         self.bind("<Control-e>", lambda _event: self._run_shortcut(self.quick_export_pdf))
         self.bind("<F5>", lambda _event: self._run_shortcut(self.update_page_preview))
+        self.bind("<Control-Alt-z>", lambda _event: self._run_shortcut(self.undo_stage_edit))
+        self.bind("<Control-Alt-y>", lambda _event: self._run_shortcut(self.redo_stage_edit))
 
         self.page_listbox.bind(
             "<Delete>",
@@ -1728,11 +1771,106 @@ class UnifiedScanApp(ctk.CTk):
         except Exception:
             self.session.store.close()
         finally:
-            self._autosave_lock.release()
-            self.destroy()
+            try:
+                history = self.__dict__.get("stage_history")
+                if history is not None:
+                    history.close()
+            finally:
+                self._autosave_lock.release()
+                self.destroy()
 
     def _set_status(self, text: str) -> None:
+        notice = self.__dict__.get("_pending_stage_history_notice")
+        if notice:
+            text = f"{text}{notice}"
+            self._pending_stage_history_notice = None
         self.status_var.set(text)
+
+    def _stage_history_lookup(self, entry_id: str):
+        return next(
+            (entry for entry in self.session.entries if entry.entry_id == entry_id),
+            None,
+        )
+
+    def _stage_history_capture(
+        self,
+        entries,
+        *,
+        action: str,
+        stage: str,
+        include_perspective: bool = False,
+    ):
+        return self.stage_history.capture(
+            entries,
+            action=action,
+            stage=stage,
+            include_perspective=include_perspective,
+        )
+
+    def _stage_history_record(self, capture, entries) -> None:
+        try:
+            self.stage_history.record(capture, entries)
+        except Exception as exc:
+            self._discard_stage_history_capture(capture)
+            self._pending_stage_history_notice = (
+                f" Undo is unavailable for this edit: {exc}."
+            )
+        if self.__dict__.get("page_listbox") is not None:
+            self._update_page_action_states()
+
+    @staticmethod
+    def _discard_stage_history_capture(capture) -> None:
+        try:
+            capture.discard()
+        except Exception:
+            # The history root is deleted during app close. Cleanup failure must
+            # never mask the edit/transaction outcome visible to the user.
+            pass
+
+    def _stage_history_operation_blocked(self, operation: str) -> bool:
+        if self.__dict__.get("job_thread") is not None:
+            self._set_status(
+                f"{operation} stage edit is unavailable while background work is running."
+            )
+            return True
+        if self.__dict__.get("inline_editor_close_callback") is not None:
+            self._set_status(
+                f"Finish or cancel the open editor before {operation.lower()}ing a stage edit."
+            )
+            return True
+        return False
+
+    def undo_stage_edit(self) -> None:
+        if self._stage_history_operation_blocked("Undo"):
+            return
+        try:
+            record = self.stage_history.undo(self._stage_history_lookup)
+        except StageHistoryBlocked as exc:
+            self._set_status(f"Stage undo blocked: {exc}")
+            return
+        except StageHistoryError as exc:
+            self._set_status(f"Stage undo unavailable: {exc}")
+            return
+        self.refresh_page_list(keep_entry_ids=record.entry_ids)
+        self._set_status(
+            f"Undid {record.action} ({record.stage}) for {len(record.entry_ids)} page(s)."
+        )
+
+    def redo_stage_edit(self) -> None:
+        if self._stage_history_operation_blocked("Redo"):
+            return
+        try:
+            record = self.stage_history.redo(self._stage_history_lookup)
+        except StageHistoryBlocked as exc:
+            self._set_status(f"Stage redo blocked: {exc}")
+            return
+        except StageHistoryError as exc:
+            self._set_status(f"Stage redo unavailable: {exc}")
+            return
+        self.refresh_page_list(keep_entry_ids=record.entry_ids)
+        self._set_status(
+            f"Redid {record.action} ({record.stage}) for {len(record.entry_ids)} page(s)."
+        )
 
     def _autosave_tick(self) -> None:
         try:
@@ -3979,6 +4117,9 @@ class UnifiedScanApp(ctk.CTk):
     def _update_page_action_states(self) -> None:
         selected = set(self._selected_entry_indices())
         can_undo_deletion = bool(getattr(self.session, "can_undo_deletion", False))
+        stage_history = self.__dict__.get("stage_history")
+        can_undo_stage = bool(stage_history is not None and stage_history.can_undo)
+        can_redo_stage = bool(stage_history is not None and stage_history.can_redo)
         can_move_up = any(index > 0 and index - 1 not in selected for index in selected)
         can_move_down = any(
             index + 1 < len(self.session.entries) and index + 1 not in selected
@@ -3992,6 +4133,8 @@ class UnifiedScanApp(ctk.CTk):
                 "undo_delete_button",
                 tk.NORMAL if can_undo_deletion else tk.DISABLED,
             ),
+            ("undo_stage_button", tk.NORMAL if can_undo_stage else tk.DISABLED),
+            ("redo_stage_button", tk.NORMAL if can_redo_stage else tk.DISABLED),
             (
                 "deskew_restore_button",
                 tk.NORMAL if self._deskew_restore_available() else tk.DISABLED,
@@ -4010,10 +4153,10 @@ class UnifiedScanApp(ctk.CTk):
             ),
         )
         for name, state in states:
-            button = getattr(self, name, None)
+            button = self.__dict__.get(name)
             if button is not None:
                 button.configure(state=state)
-        split_button = getattr(self, "apply_split_button", None)
+        split_button = self.__dict__.get("apply_split_button")
         if split_button is not None:
             split_ready = False
             if len(selected) == 1:
@@ -4024,7 +4167,7 @@ class UnifiedScanApp(ctk.CTk):
                     and self.pending_split_revision == selected_entry.revision
                 )
             split_button.configure(state=tk.NORMAL if split_ready else tk.DISABLED)
-        menu = getattr(self, "page_context_menu", None)
+        menu = self.__dict__.get("page_context_menu")
         if menu is not None:
             menu.entryconfigure(0, state=tk.NORMAL if can_move_up else tk.DISABLED)
             menu.entryconfigure(1, state=tk.NORMAL if can_move_down else tk.DISABLED)
@@ -4789,6 +4932,13 @@ class UnifiedScanApp(ctk.CTk):
                     }
                 )
 
+            entries = tuple(item["entry"] for item in staged)
+            history_capture = self._stage_history_capture(
+                entries,
+                action="Edit perspective",
+                stage="Perspective",
+                include_perspective=True,
+            )
             attempted = []
             try:
                 for item in staged:
@@ -4811,6 +4961,7 @@ class UnifiedScanApp(ctk.CTk):
                     entry.dewarp_control_points = item["snapshot_control_points"]
                     entry.dewarp_control_curves = item["snapshot_control_curves"]
             except Exception as exc:
+                self._discard_stage_history_capture(history_capture)
                 rollback_errors = []
                 for item in reversed(attempted):
                     entry = item["entry"]
@@ -4842,6 +4993,7 @@ class UnifiedScanApp(ctk.CTk):
                         + "; ".join(rollback_errors)
                     ) from exc
                 raise
+            self._stage_history_record(history_capture, entries)
 
     def _apply_perspective_crop(
         self,
@@ -5529,7 +5681,17 @@ class UnifiedScanApp(ctk.CTk):
                 "dewarp_control_points": normalized_curves[min(1, len(normalized_curves) - 1)][1],
             },
         )
-        transaction.commit()
+        history_capture = self._stage_history_capture(
+            (entry,),
+            action="Edit page waves",
+            stage="Waves",
+        )
+        try:
+            transaction.commit()
+        except Exception:
+            self._discard_stage_history_capture(history_capture)
+            raise
+        self._stage_history_record(history_capture, (entry,))
         self._last_processing_cache_hits = diagnostics.cache_hits
         return diagnostics.dewarp
 
@@ -6044,6 +6206,7 @@ class UnifiedScanApp(ctk.CTk):
             method = DESKEW_METHOD_HYBRID
         entries = tuple(self.session.entries[idx] for idx in indices)
         transaction = StageEditTransaction.begin(entries, metadata_fields=())
+        history_capture = None
         try:
             for entry in entries:
                 previous_committed = entry.committed_processing
@@ -6063,14 +6226,22 @@ class UnifiedScanApp(ctk.CTk):
                 pixels, committed, diagnostics = self._compute_processing_candidate(entry, request)
                 transaction.stage(entry.entry_id, pixels=pixels, committed_processing=committed)
                 angles.append(float(diagnostics.deskew_angle_degrees))
+            history_capture = self._stage_history_capture(
+                entries,
+                action="Auto deskew",
+                stage="Deskew",
+            )
             transaction.commit()
             self._last_processing_cache_hits = diagnostics.cache_hits
         except Exception:
+            if history_capture is not None:
+                self._discard_stage_history_capture(history_capture)
             try:
                 transaction.discard()
             except StageTransactionClosedError:
                 pass
             raise
+        self._stage_history_record(history_capture, entries)
 
         self.refresh_page_list(keep_entry_ids=entry_ids)
         mean_angle = sum(angles) / max(1, len(angles))
@@ -6900,6 +7071,12 @@ class UnifiedScanApp(ctk.CTk):
             if not page.result_path.is_file() or page.result_path.stat().st_size == 0:
                 raise RuntimeError(f"Processed page is missing: {snapshot.name}")
 
+        entries = tuple(entries_by_id[snapshot.entry_id] for snapshot in snapshots)
+        history_capture = self._stage_history_capture(
+            entries,
+            action="Apply processing candidate",
+            stage="Processing",
+        )
         committed_snapshots: list[_ApplyPageSnapshot] = []
         try:
             for snapshot in snapshots:
@@ -6911,6 +7088,7 @@ class UnifiedScanApp(ctk.CTk):
                 entry.committed_processing = staged_by_id[snapshot.entry_id].committed
                 committed_snapshots.append(snapshot)
         except Exception as exc:
+            self._discard_stage_history_capture(history_capture)
             rollback_error: Exception | None = None
             for snapshot in reversed(committed_snapshots):
                 try:
@@ -6928,6 +7106,7 @@ class UnifiedScanApp(ctk.CTk):
                     f"Apply failed and rollback was incomplete: {rollback_error}"
                 ) from exc
             raise
+        self._stage_history_record(history_capture, entries)
         return sum(len(page.cache_hits) for page in staged)
 
     def open_review_processing_dialog(self) -> None:

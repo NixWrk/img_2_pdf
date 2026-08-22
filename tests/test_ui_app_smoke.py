@@ -63,6 +63,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
     close_release = threading.Event()
     close_started = False
     close_completed = False
+    stage_history_root = app.stage_history.root
     try:
         app.withdraw()
         app.update()
@@ -73,6 +74,10 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.dewarp_method_var.get() == "Automatic (validated)"
         assert app.geometry_summary_var.get() == "Wave preview: pending"
         assert app.apply_processing_button.cget("text") == "Apply candidate for export"
+        assert app.undo_stage_button.cget("text") == "Undo stage"
+        assert app.undo_stage_button.cget("state") == "disabled"
+        assert app.redo_stage_button.cget("text") == "Redo stage"
+        assert app.redo_stage_button.cget("state") == "disabled"
         assert app.deskew_method_var.get() == "Hybrid (recommended)"
         assert app.deskew_reset_button.cget("text") == "Reset to automatic"
         assert app.deskew_restore_button.cget("text") == "Restore committed"
@@ -108,6 +113,8 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.undo_delete_button.cget("state") == "disabled"
         assert app.page_listbox.bind("<Delete>")
         assert app.page_listbox.bind("<Control-z>")
+        assert app.bind("<Control-Alt-z>")
+        assert app.bind("<Control-Alt-y>")
         assert app.page_listbox.bind("<Control-Right>")
         assert app.page_listbox.bind("<B1-Motion>")
         assert app.page_listbox.bind("<Button-3>")
@@ -658,6 +665,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         _pump_until(app, lambda: app._close_wait_job is None)
         close_completed = True
         assert app.autosave_path.exists()
+        assert not stage_history_root.exists()
     finally:
         preview_release.set()
         close_release.set()
@@ -666,6 +674,7 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
             close_started = True
         if not close_completed:
             _pump_until(app, lambda: app._close_wait_job is None)
+        assert not stage_history_root.exists()
 
 
 def test_split_workflow_previews_two_pages_before_mutating_session(tmp_path, monkeypatch) -> None:

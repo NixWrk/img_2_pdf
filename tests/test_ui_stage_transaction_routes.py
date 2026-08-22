@@ -7,6 +7,7 @@ from uniscan.core.processing import PageProcessingRequest, process_document_page
 from uniscan.session import CaptureSession, CommittedPageProcessing
 from uniscan.storage import PageStore
 from uniscan.ui.app import UnifiedScanApp
+from uniscan.ui.stage_history import StageHistory
 from uniscan.ui.stage_transaction import StageTransactionError
 
 
@@ -26,6 +27,8 @@ def _app_with_pages(tmp_path):
     app.session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
     app.session.add_image(name="one", image=np.full((30, 40, 3), 180, dtype=np.uint8))
     app.session.add_image(name="two", image=np.full((30, 40, 3), 160, dtype=np.uint8))
+    app.stage_history = StageHistory(tmp_path / "history")
+    app._pending_stage_history_notice = None
     app.deskew_method_var = _Var("Hybrid (recommended)")
     app.processing_cache = None
     app._last_processing_cache_hits = ()
@@ -69,6 +72,7 @@ def test_auto_deskew_processing_failure_on_second_page_keeps_real_batch_unchange
         np.testing.assert_array_equal(entry.current_image, pixels)
         assert entry.revision == revision
         assert entry.committed_processing is committed
+    assert app.stage_history.undo_depth == 0
 
 
 def test_auto_deskew_store_failure_on_second_page_rolls_back_real_batch(
@@ -97,3 +101,39 @@ def test_auto_deskew_store_failure_on_second_page_rolls_back_real_batch(
         np.testing.assert_array_equal(entry.current_image, pixels)
         assert entry.revision == 0
         assert entry.committed_processing is None
+    assert app.stage_history.undo_depth == 0
+
+
+def test_auto_deskew_success_is_one_batch_history_record(tmp_path, monkeypatch) -> None:
+    app = _app_with_pages(tmp_path)
+    before = [entry.current_image.copy() for entry in app.session.entries]
+    calls = 0
+
+    def candidate(entry, request):
+        nonlocal calls
+        calls += 1
+        pixels = np.full_like(entry.current_image, 70 + calls)
+        committed = CommittedPageProcessing(
+            recipe=request,
+            diagnostics={"deskew": calls},
+            current_fingerprint=CommittedPageProcessing.fingerprint_image(pixels),
+        )
+        diagnostics = type(
+            "Diagnostics",
+            (),
+            {"deskew_angle_degrees": float(calls), "cache_hits": ("deskew",)},
+        )()
+        return pixels, committed, diagnostics
+
+    monkeypatch.setattr(app, "_compute_processing_candidate", candidate)
+    app.auto_deskew_selected()
+
+    assert app.stage_history.undo_depth == 1
+    record = app.stage_history._undo[-1]
+    assert record.stage == "Deskew"
+    assert record.entry_ids == tuple(entry.entry_id for entry in app.session.entries)
+    app.stage_history.undo(app._stage_history_lookup)
+    for entry, pixels in zip(app.session.entries, before):
+        np.testing.assert_array_equal(entry.current_image, pixels)
+    app.stage_history.redo(app._stage_history_lookup)
+    assert all(entry.committed_processing is not None for entry in app.session.entries)

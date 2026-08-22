@@ -133,6 +133,38 @@ def test_perspective_roundtrip_restores_original_and_review_metadata(tmp_path):
     history.close()
 
 
+def test_non_perspective_record_omits_original_and_crop_metadata(tmp_path):
+    store = PageStore(tmp_path / "pages")
+    entry = _entry(store)
+    original = entry.original_image.copy()
+    contour = np.array([[0, 0], [3, 0], [3, 2], [0, 2]], np.float32)
+    entry.detected_contour = contour.copy()
+    entry.detected_backend = "detector"
+    before = entry.current_image.copy()
+    after = _color_image(17, 83, 211)
+    history = StageHistory(tmp_path / "history")
+
+    capture = history.capture((entry,), action="waves", stage="Waves")
+    entry.current_image = after
+    record = history.record(capture, (entry,))
+
+    assert record.before[0].original_path is None
+    assert record.after[0].original_path is None
+    assert record.before[0].perspective == {}
+    assert record.after[0].perspective == {}
+    history.undo(lambda _: entry)
+    np.testing.assert_array_equal(entry.current_image, before)
+    np.testing.assert_array_equal(entry.original_image, original)
+    np.testing.assert_array_equal(entry.detected_contour, contour)
+    assert entry.detected_backend == "detector"
+    history.redo(lambda _: entry)
+    np.testing.assert_array_equal(entry.current_image, after)
+    np.testing.assert_array_equal(entry.original_image, original)
+    np.testing.assert_array_equal(entry.detected_contour, contour)
+    assert entry.detected_backend == "detector"
+    history.close()
+
+
 @pytest.mark.parametrize("side", ["source", "target"])
 def test_corrupted_valid_snapshot_is_blocked_before_writes(tmp_path, side):
     store = PageStore(tmp_path / "pages")

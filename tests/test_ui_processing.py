@@ -46,6 +46,7 @@ from uniscan.ui.app import (
     _split_spread_pair,
     run_app,
 )
+from uniscan.ui.stage_history import StageHistory
 
 
 class _Var:
@@ -538,6 +539,8 @@ def test_ingest_keeps_detected_crop_as_uncommitted_proposal(tmp_path) -> None:
 
 def test_crop_proposal_previews_then_commits_only_through_apply(tmp_path) -> None:
     app = _app_for_processing()
+    app.stage_history = StageHistory(tmp_path / "history")
+    app._pending_stage_history_notice = None
     app.postprocess_var.set("None")
     app.session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
     raw = np.zeros((14, 18, 3), dtype=np.uint8)
@@ -577,12 +580,26 @@ def test_crop_proposal_previews_then_commits_only_through_apply(tmp_path) -> Non
         (float(x), float(y)) for x, y in contour
     )
     assert entry.committed_processing.diagnostics["geometry_resample_count"] == 1
+    assert app.stage_history.undo_depth == 1
+    assert app.stage_history._undo[-1].stage == "Perspective"
+    committed_current = entry.current_image.copy()
+    app.stage_history.undo(app._stage_history_lookup)
+    np.testing.assert_array_equal(entry.current_image, raw)
+    assert entry.crop_state == CROP_STATE_PROPOSED
+    assert entry.needs_review is True
+    assert entry.review_reasons == ("large_dark_border_region",)
+    app.stage_history.redo(app._stage_history_lookup)
+    np.testing.assert_array_equal(entry.current_image, committed_current)
+    assert entry.crop_state == CROP_STATE_APPLIED
+    assert entry.needs_review is False
 
 
 def test_crop_apply_all_rolls_back_every_page_when_later_commit_fails(
     tmp_path, monkeypatch
 ) -> None:
     app = _app_for_processing()
+    app.stage_history = StageHistory(tmp_path / "history")
+    app._pending_stage_history_notice = None
     app.session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
     raw_images = [np.full((14, 18, 3), value, dtype=np.uint8) for value in (30, 90)]
     contour = np.float32([[2, 2], [15, 2], [15, 11], [2, 11]])
@@ -645,6 +662,7 @@ def test_crop_apply_all_rolls_back_every_page_when_later_commit_fails(
         assert entry.needs_review == needs_review
         assert entry.review_reasons == review_reasons
         assert entry.revision == revision
+    assert app.stage_history.undo_depth == 0
 
 
 def test_failed_detection_does_not_leave_success_backend_status(tmp_path) -> None:
@@ -1617,6 +1635,8 @@ def test_staged_apply_rejects_stale_page_without_mutation(tmp_path) -> None:
 
 def test_staged_apply_rolls_back_prior_pages_on_commit_failure(tmp_path) -> None:
     app = _app_for_processing()
+    app.stage_history = StageHistory(tmp_path / "history")
+    app._pending_stage_history_notice = None
     app.session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
     entries = [
         app.session.add_image(name="one", image=np.full((8, 9, 3), 30, np.uint8)),
@@ -1659,6 +1679,45 @@ def test_staged_apply_rolls_back_prior_pages_on_commit_failure(tmp_path) -> None
         np.testing.assert_array_equal(entry.current_image, old_image)
         assert entry.committed_processing is None
         assert entry.revision == 0
+    assert app.stage_history.undo_depth == 0
+
+
+def test_staged_apply_success_is_undoable_as_one_batch(tmp_path) -> None:
+    app = _app_for_processing()
+    app.stage_history = StageHistory(tmp_path / "history")
+    app._pending_stage_history_notice = None
+    app.session = CaptureSession(store=PageStore(root_dir=tmp_path / "store"))
+    entry = app.session.add_image(name="page", image=np.full((8, 9, 3), 30, np.uint8))
+    before = entry.current_image.copy()
+    previous = tmp_path / "previous-success.png"
+    result_path = tmp_path / "result-success.png"
+    after = np.full((8, 9, 3), 210, np.uint8)
+    assert imwrite_unicode(previous, before)
+    assert imwrite_unicode(result_path, after)
+    request = PageProcessingRequest()
+    result = process_document_page(entry.original_image, request)
+    committed = CommittedPageProcessing.from_result(request, result.diagnostics, after)
+    snapshot = _ApplyPageSnapshot(
+        entry.entry_id,
+        entry.name,
+        entry.original_path,
+        previous,
+        entry.revision,
+        request,
+        None,
+    )
+    staged = _StagedAppliedPage(entry.entry_id, result_path, committed, ("cleanup",))
+
+    assert app._commit_staged_apply([snapshot], [staged]) == 1
+    np.testing.assert_array_equal(entry.current_image, after)
+    assert app.stage_history.undo_depth == 1
+    assert app.stage_history._undo[-1].stage == "Processing"
+    app.stage_history.undo(app._stage_history_lookup)
+    np.testing.assert_array_equal(entry.current_image, before)
+    assert entry.committed_processing is None
+    app.stage_history.redo(app._stage_history_lookup)
+    np.testing.assert_array_equal(entry.current_image, after)
+    assert entry.committed_processing is not None
 
 
 def test_gui_import_consumes_pdf_pages_lazily_and_stages_to_disk(tmp_path, monkeypatch) -> None:

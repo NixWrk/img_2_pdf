@@ -65,9 +65,16 @@ class StageHistoryRecord:
 
 
 class StageHistoryCapture:
-    def __init__(self, history: "StageHistory", record: StageHistoryRecord) -> None:
+    def __init__(
+        self,
+        history: "StageHistory",
+        record: StageHistoryRecord,
+        *,
+        include_perspective: bool,
+    ) -> None:
         self.history = history
         self.record = record
+        self.include_perspective = include_perspective
         self.closed = False
 
     def discard(self) -> None:
@@ -135,7 +142,11 @@ class StageHistory:
             for snapshot in snapshots:
                 self._delete_snapshot_files(snapshot)
             raise
-        return StageHistoryCapture(self, StageHistoryRecord(action, stage, tuple(snapshots), ()))
+        return StageHistoryCapture(
+            self,
+            StageHistoryRecord(action, stage, tuple(snapshots), ()),
+            include_perspective=include_perspective,
+        )
 
     def record(self, capture: StageHistoryCapture, entries: Iterable[Any]) -> StageHistoryRecord:
         if capture.history is not self or capture.closed:
@@ -147,7 +158,7 @@ class StageHistory:
             raise StageHistoryError("record entry set does not match capture")
         try:
             after = tuple(
-                self._snapshot(by_id[item.entry_id], bool(item.original_path), "after")
+                self._snapshot(by_id[item.entry_id], capture.include_perspective, "after")
                 for item in capture.record.before
             )
         except Exception:
