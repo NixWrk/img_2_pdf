@@ -286,6 +286,82 @@ def _fit_image_to_box(image: np.ndarray, max_width: int, max_height: int) -> np.
     )
 
 
+PREVIEW_ZOOM_MIN = 1.0
+PREVIEW_ZOOM_MAX = 8.0
+PREVIEW_ZOOM_FACTOR = 1.25
+
+
+def _clamp_preview_zoom(zoom: float) -> float:
+    return float(np.clip(float(zoom), PREVIEW_ZOOM_MIN, PREVIEW_ZOOM_MAX))
+
+
+def _preview_crop_bounds(
+    image_shape: tuple[int, ...],
+    viewport_size: tuple[int, int],
+    zoom: float,
+    pan: tuple[float, float],
+) -> tuple[int, int, int, int]:
+    """Return a clamped source crop; zoom 1.0 always means the full image."""
+
+    height, width = image_shape[:2]
+    if height <= 0 or width <= 0:
+        raise ValueError("image dimensions must be positive")
+    viewport_width = max(1, int(viewport_size[0]))
+    viewport_height = max(1, int(viewport_size[1]))
+    zoom = _clamp_preview_zoom(zoom)
+    fit_scale = min(viewport_width / width, viewport_height / height)
+    display_scale = max(1e-9, fit_scale * zoom)
+    crop_width = min(width, max(1, int(round(viewport_width / display_scale))))
+    crop_height = min(height, max(1, int(round(viewport_height / display_scale))))
+    center_x = float(np.clip(pan[0], 0.0, 1.0)) * width
+    center_y = float(np.clip(pan[1], 0.0, 1.0)) * height
+    left = int(round(center_x - crop_width / 2))
+    top = int(round(center_y - crop_height / 2))
+    left = max(0, min(left, width - crop_width))
+    top = max(0, min(top, height - crop_height))
+    return left, top, left + crop_width, top + crop_height
+
+
+def _preview_zoom_pan(
+    image_shape: tuple[int, ...],
+    viewport_size: tuple[int, int],
+    old_zoom: float,
+    new_zoom: float,
+    pan: tuple[float, float],
+    cursor: tuple[float, float],
+) -> tuple[float, tuple[float, float]]:
+    """Zoom while keeping the source point under the cursor approximately fixed."""
+
+    new_zoom = _clamp_preview_zoom(new_zoom)
+    viewport_width = max(1, int(viewport_size[0]))
+    viewport_height = max(1, int(viewport_size[1]))
+    cursor_x = float(np.clip(cursor[0] / viewport_width, 0.0, 1.0))
+    cursor_y = float(np.clip(cursor[1] / viewport_height, 0.0, 1.0))
+    old_left, old_top, old_right, old_bottom = _preview_crop_bounds(
+        image_shape,
+        viewport_size,
+        old_zoom,
+        pan,
+    )
+    source_x = old_left + cursor_x * (old_right - old_left)
+    source_y = old_top + cursor_y * (old_bottom - old_top)
+    new_left, new_top, new_right, new_bottom = _preview_crop_bounds(
+        image_shape,
+        viewport_size,
+        new_zoom,
+        (0.5, 0.5),
+    )
+    new_width = new_right - new_left
+    new_height = new_bottom - new_top
+    image_height, image_width = image_shape[:2]
+    center_x = source_x - cursor_x * new_width + new_width / 2
+    center_y = source_y - cursor_y * new_height + new_height / 2
+    return new_zoom, (
+        float(np.clip(center_x / image_width, 0.0, 1.0)),
+        float(np.clip(center_y / image_height, 0.0, 1.0)),
+    )
+
+
 def _image_to_tk_photo(image: np.ndarray) -> ImageTk.PhotoImage:
     rgb = (
         cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
@@ -639,6 +715,10 @@ class UnifiedScanApp(ctk.CTk):
         self.page_preview_after_photo: ctk.CTkImage | None = None
         self.page_preview_before_image: np.ndarray | None = None
         self.page_preview_after_image: np.ndarray | None = None
+        self.preview_zoom = PREVIEW_ZOOM_MIN
+        self.preview_pan = (0.5, 0.5)
+        self.preview_view_entry_id: str | None = None
+        self.preview_drag_state: tuple[ctk.CTkLabel, float, float] | None = None
         self.pending_split_entry_id: str | None = None
         self.pending_split_ratio: float | None = None
         self.pending_split_revision: int | None = None
@@ -711,6 +791,7 @@ class UnifiedScanApp(ctk.CTk):
         self.apply_changes_to_all_var = tk.BooleanVar(value=False)
         self.lightweight_preview_var = tk.BooleanVar(value=True)
         self.preview_mode_var = tk.StringVar(value="Preview")
+        self.preview_zoom_value_var = tk.StringVar(value="Fit")
         self.crop_warning_var = tk.StringVar(value="")
         self.export_readiness_var = tk.StringVar(value="No pages to export")
         self.postprocess_var = tk.StringVar(value="None")
@@ -1297,11 +1378,12 @@ class UnifiedScanApp(ctk.CTk):
 
         preview_toolbar = ctk.CTkFrame(preview, fg_color="transparent")
         preview_toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 0))
+        preview_toolbar.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             preview_toolbar,
             text="Preview",
             font=ctk.CTkFont(size=15, weight="bold"),
-        ).pack(side=ctk.LEFT)
+        ).grid(row=0, column=0, sticky="w")
         self.preview_mode_selector = ctk.CTkSegmentedButton(
             preview_toolbar,
             values=["Preview", "Original", "Compare"],
@@ -1309,7 +1391,55 @@ class UnifiedScanApp(ctk.CTk):
             command=self._on_preview_mode_change,
             **component_style("segmented"),
         )
-        self.preview_mode_selector.pack(side=ctk.RIGHT)
+        self.preview_mode_selector.grid(row=0, column=1, sticky="e")
+        preview_view_controls = ctk.CTkFrame(preview_toolbar, fg_color="transparent")
+        preview_view_controls.grid(row=1, column=0, columnspan=2, sticky="e", pady=(4, 0))
+        self.preview_fit_button = ctk.CTkButton(
+            preview_view_controls,
+            text="Fit",
+            width=42,
+            command=self._set_preview_fit,
+            **component_style("secondary_button"),
+        )
+        self.preview_fit_button.pack(side=ctk.LEFT)
+        self.preview_zoom_100_button = ctk.CTkButton(
+            preview_view_controls,
+            text="100%",
+            width=50,
+            command=self._set_preview_100,
+            **component_style("secondary_button"),
+        )
+        self.preview_zoom_100_button.pack(side=ctk.LEFT, padx=(4, 0))
+        self.preview_zoom_out_button = ctk.CTkButton(
+            preview_view_controls,
+            text="-",
+            width=32,
+            command=lambda: self._change_preview_zoom(1.0 / PREVIEW_ZOOM_FACTOR),
+            **component_style("secondary_button"),
+        )
+        self.preview_zoom_out_button.pack(side=ctk.LEFT, padx=(4, 0))
+        self.preview_zoom_in_button = ctk.CTkButton(
+            preview_view_controls,
+            text="+",
+            width=32,
+            command=lambda: self._change_preview_zoom(PREVIEW_ZOOM_FACTOR),
+            **component_style("secondary_button"),
+        )
+        self.preview_zoom_in_button.pack(side=ctk.LEFT, padx=(4, 0))
+        ctk.CTkLabel(
+            preview_view_controls,
+            textvariable=self.preview_zoom_value_var,
+            width=62,
+            anchor="e",
+            text_color=COLORS["text.secondary"],
+        ).pack(side=ctk.LEFT, padx=(6, 0))
+        for button in (
+            self.preview_fit_button,
+            self.preview_zoom_100_button,
+            self.preview_zoom_out_button,
+            self.preview_zoom_in_button,
+        ):
+            bind_focus_ring(button)
         self.pipeline_strip = ctk.CTkScrollableFrame(
             preview,
             height=132,
@@ -1361,6 +1491,29 @@ class UnifiedScanApp(ctk.CTk):
             self._on_review_preview_resize,
             add="+",
         )
+        for label in (self.page_preview_before_label, self.page_preview_after_label):
+            label.bind(
+                "<MouseWheel>",
+                lambda event, target=label: self._on_preview_wheel(event, target),
+                add="+",
+            )
+            label.bind(
+                "<Button-4>",
+                lambda event, target=label: self._on_preview_wheel(event, target),
+                add="+",
+            )
+            label.bind(
+                "<Button-5>",
+                lambda event, target=label: self._on_preview_wheel(event, target),
+                add="+",
+            )
+            label.bind(
+                "<ButtonPress-1>",
+                lambda event, target=label: self._on_preview_drag_start(event, target),
+                add="+",
+            )
+            label.bind("<B1-Motion>", self._on_preview_drag, add="+")
+            label.bind("<ButtonRelease-1>", self._on_preview_drag_end, add="+")
         self._layout_page_previews()
 
         processing = ctk.CTkScrollableFrame(tab, width=270, label_text="Processing")
@@ -1709,6 +1862,26 @@ class UnifiedScanApp(ctk.CTk):
         self.bind("<Control-Shift-C>", lambda _event: self._run_shortcut(self.capture_one))
         self.bind("<Control-e>", lambda _event: self._run_shortcut(self.quick_export_pdf))
         self.bind("<F5>", lambda _event: self._run_shortcut(self.update_page_preview))
+        self.bind("<Control-Key-0>", lambda _event: self._run_shortcut(self._set_preview_fit))
+        self.bind("<Control-Key-1>", lambda _event: self._run_shortcut(self._set_preview_100))
+        self.bind(
+            "<Control-minus>",
+            lambda _event: self._run_shortcut(
+                lambda: self._change_preview_zoom(1.0 / PREVIEW_ZOOM_FACTOR)
+            ),
+        )
+        self.bind(
+            "<Control-equal>",
+            lambda _event: self._run_shortcut(
+                lambda: self._change_preview_zoom(PREVIEW_ZOOM_FACTOR)
+            ),
+        )
+        self.bind(
+            "<Control-plus>",
+            lambda _event: self._run_shortcut(
+                lambda: self._change_preview_zoom(PREVIEW_ZOOM_FACTOR)
+            ),
+        )
         self.bind("<Control-Alt-z>", lambda _event: self._run_shortcut(self.undo_stage_edit))
         self.bind("<Control-Alt-y>", lambda _event: self._run_shortcut(self.redo_stage_edit))
 
@@ -3416,6 +3589,20 @@ class UnifiedScanApp(ctk.CTk):
         pil_image = Image.fromarray(rgb)
         return ctk.CTkImage(light_image=pil_image, dark_image=pil_image, size=(new_w, new_h))
 
+    def _to_review_photo_for_label(
+        self,
+        image: np.ndarray,
+        label: ctk.CTkLabel,
+    ) -> ctk.CTkImage:
+        viewport = (max(200, label.winfo_width()), max(120, label.winfo_height()))
+        left, top, right, bottom = _preview_crop_bounds(
+            image.shape,
+            viewport,
+            self.preview_zoom,
+            self.preview_pan,
+        )
+        return self._to_ctk_photo_for_label(image[top:bottom, left:right], label)
+
     def _process_capture_frame(
         self,
         frame: np.ndarray,
@@ -4563,6 +4750,115 @@ class UnifiedScanApp(ctk.CTk):
         self.update_idletasks()
         self.update_page_preview()
 
+    def _reset_preview_viewport(self, *, render: bool = True) -> None:
+        self.preview_zoom = PREVIEW_ZOOM_MIN
+        self.preview_pan = (0.5, 0.5)
+        self.preview_drag_state = None
+        self.preview_zoom_value_var.set("Fit")
+        if render:
+            self._render_cached_review_previews(force=True)
+
+    def _set_preview_fit(self) -> None:
+        self._reset_preview_viewport()
+
+    def _preview_view_target(self) -> tuple[np.ndarray | None, ctk.CTkLabel]:
+        mode = self.preview_mode_var.get()
+        if mode == "Original":
+            return self.page_preview_before_image, self.page_preview_before_label
+        if self.page_preview_after_image is not None:
+            return self.page_preview_after_image, self.page_preview_after_label
+        return self.page_preview_before_image, self.page_preview_before_label
+
+    def _set_preview_100(self) -> None:
+        image, label = self._preview_view_target()
+        if image is None:
+            self._set_preview_fit()
+            return
+        height, width = image.shape[:2]
+        viewport = (max(200, label.winfo_width()), max(120, label.winfo_height()))
+        fit_scale = min(viewport[0] / width, viewport[1] / height)
+        self.preview_zoom = _clamp_preview_zoom(1.0 / max(1e-9, fit_scale))
+        self.preview_pan = (0.5, 0.5)
+        self.preview_zoom_value_var.set(
+            "Fit" if self.preview_zoom <= PREVIEW_ZOOM_MIN else "100% px"
+        )
+        self._render_cached_review_previews(force=True)
+
+    def _change_preview_zoom(self, factor: float) -> None:
+        self.preview_zoom = _clamp_preview_zoom(self.preview_zoom * float(factor))
+        if self.preview_zoom <= PREVIEW_ZOOM_MIN:
+            self.preview_pan = (0.5, 0.5)
+            self.preview_zoom_value_var.set("Fit")
+        else:
+            self.preview_zoom_value_var.set(f"{self.preview_zoom:.0%}")
+        self._render_cached_review_previews(force=True)
+
+    def _preview_image_for_label(self, label: ctk.CTkLabel) -> np.ndarray | None:
+        if label is self.page_preview_before_label:
+            return self.page_preview_before_image
+        return self.page_preview_after_image
+
+    def _on_preview_wheel(self, event, label: ctk.CTkLabel) -> str:
+        image = self._preview_image_for_label(label)
+        if image is None:
+            return "break"
+        wheel_up = bool(getattr(event, "delta", 0) > 0 or getattr(event, "num", None) == 4)
+        factor = PREVIEW_ZOOM_FACTOR if wheel_up else 1.0 / PREVIEW_ZOOM_FACTOR
+        viewport = (max(200, label.winfo_width()), max(120, label.winfo_height()))
+        self.preview_zoom, self.preview_pan = _preview_zoom_pan(
+            image.shape,
+            viewport,
+            self.preview_zoom,
+            self.preview_zoom * factor,
+            self.preview_pan,
+            (float(getattr(event, "x", viewport[0] / 2)), float(getattr(event, "y", viewport[1] / 2))),
+        )
+        if self.preview_zoom <= PREVIEW_ZOOM_MIN:
+            self.preview_pan = (0.5, 0.5)
+            self.preview_zoom_value_var.set("Fit")
+        else:
+            self.preview_zoom_value_var.set(f"{self.preview_zoom:.0%}")
+        self._render_cached_review_previews(force=True)
+        return "break"
+
+    def _on_preview_drag_start(self, event, label: ctk.CTkLabel) -> str:
+        if self.preview_zoom > PREVIEW_ZOOM_MIN and self._preview_image_for_label(label) is not None:
+            self.preview_drag_state = (label, float(event.x), float(event.y))
+        return "break"
+
+    def _on_preview_drag(self, event) -> str:
+        state = self.preview_drag_state
+        if state is None:
+            return "break"
+        label, last_x, last_y = state
+        image = self._preview_image_for_label(label)
+        if image is None:
+            self.preview_drag_state = None
+            return "break"
+        current_x = float(event.x)
+        current_y = float(event.y)
+        viewport = (max(200, label.winfo_width()), max(120, label.winfo_height()))
+        left, top, right, bottom = _preview_crop_bounds(
+            image.shape,
+            viewport,
+            self.preview_zoom,
+            self.preview_pan,
+        )
+        height, width = image.shape[:2]
+        pan_x = self.preview_pan[0] - (current_x - last_x) / viewport[0] * (right - left) / width
+        pan_y = self.preview_pan[1] - (current_y - last_y) / viewport[1] * (bottom - top) / height
+        self.preview_pan = (
+            float(np.clip(pan_x, 0.0, 1.0)),
+            float(np.clip(pan_y, 0.0, 1.0)),
+        )
+        self.preview_drag_state = (label, current_x, current_y)
+        self._render_cached_review_previews(force=True)
+        return "break"
+
+    def _on_preview_drag_end(self, _event=None) -> str:
+        self.preview_drag_state = None
+        return "break"
+
     def _set_preview_result_state(self, text: str, *, kind: str = "pending") -> None:
         label = self.__dict__.get("page_preview_after_state")
         if label is None:
@@ -4622,6 +4918,8 @@ class UnifiedScanApp(ctk.CTk):
         self._cancel_review_page_preview(refresh_pipeline=False)
         selected = self.page_listbox.curselection()
         if len(selected) != 1:
+            self.preview_view_entry_id = None
+            self._reset_preview_viewport(render=False)
             self._clear_preview_label(self.page_preview_before_label)
             self._clear_preview_label(self.page_preview_after_label)
             self.page_preview_before_photo = None
@@ -4635,6 +4933,8 @@ class UnifiedScanApp(ctk.CTk):
 
         index = selected[0]
         if index < 0 or index >= len(self.session.entries):
+            self.preview_view_entry_id = None
+            self._reset_preview_viewport(render=False)
             self._clear_preview_label(self.page_preview_before_label)
             self._clear_preview_label(self.page_preview_after_label)
             self.page_preview_before_photo = None
@@ -4647,6 +4947,9 @@ class UnifiedScanApp(ctk.CTk):
             return
 
         entry = self.session.entries[index]
+        if self.preview_view_entry_id != entry.entry_id:
+            self.preview_view_entry_id = entry.entry_id
+            self._reset_preview_viewport(render=False)
         mode = self.preview_mode_var.get()
         split_ratio = (
             self.pending_split_ratio
@@ -4675,7 +4978,7 @@ class UnifiedScanApp(ctk.CTk):
 
         if mode in {"Original", "Compare"}:
             self.page_preview_before_image = before
-            before_photo = self._to_ctk_photo_for_label(before, self.page_preview_before_label)
+            before_photo = self._to_review_photo_for_label(before, self.page_preview_before_label)
             self.page_preview_before_label.configure(image=before_photo, text="")
             self.page_preview_before_photo = before_photo
         else:
@@ -4737,7 +5040,7 @@ class UnifiedScanApp(ctk.CTk):
             self._render_cached_review_previews,
         )
 
-    def _render_cached_review_previews(self) -> None:
+    def _render_cached_review_previews(self, *, force: bool = False) -> None:
         self.review_preview_resize_job = None
         if self._closing or not self.winfo_exists():
             return
@@ -4747,19 +5050,19 @@ class UnifiedScanApp(ctk.CTk):
             self.page_preview_after_label.winfo_width(),
             self.page_preview_after_label.winfo_height(),
         )
-        if render_size == self.review_preview_render_size:
+        if not force and render_size == self.review_preview_render_size:
             return
         self.review_preview_render_size = render_size
         mode = self.preview_mode_var.get()
         if mode in {"Original", "Compare"} and self.page_preview_before_image is not None:
-            photo = self._to_ctk_photo_for_label(
+            photo = self._to_review_photo_for_label(
                 self.page_preview_before_image,
                 self.page_preview_before_label,
             )
             self.page_preview_before_label.configure(image=photo, text="")
             self.page_preview_before_photo = photo
         if mode in {"Preview", "Compare"} and self.page_preview_after_image is not None:
-            photo = self._to_ctk_photo_for_label(
+            photo = self._to_review_photo_for_label(
                 self.page_preview_after_image,
                 self.page_preview_after_label,
             )
@@ -4870,7 +5173,7 @@ class UnifiedScanApp(ctk.CTk):
             self._set_preview_result_state("Preview failed", kind="error")
             self._set_status(message)
             return
-        after_photo = self._to_ctk_photo_for_label(image, self.page_preview_after_label)
+        after_photo = self._to_review_photo_for_label(image, self.page_preview_after_label)
         self.page_preview_after_label.configure(image=after_photo, text="")
         self.page_preview_after_photo = after_photo
         self.page_preview_after_image = image

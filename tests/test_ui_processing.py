@@ -810,7 +810,7 @@ def test_preview_reports_applied_and_rejected_wave_correction() -> None:
     app.page_preview_after_photo = None
     app.page_preview_after_label = SimpleNamespace(configure=lambda **_kwargs: None)
     app.geometry_summary_var = _Var("Wave preview: pending")
-    app._to_ctk_photo_for_label = lambda _image, _label: "preview-photo"
+    app._to_review_photo_for_label = lambda _image, _label: "preview-photo"
     image = np.zeros((4, 5, 3), dtype=np.uint8)
 
     applied = SimpleNamespace(

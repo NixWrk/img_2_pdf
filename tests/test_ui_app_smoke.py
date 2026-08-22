@@ -89,6 +89,11 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.despeckle_strength_var.get() == "None"
         assert app.page_layout_var.get() == "Keep source page"
         assert app.preview_mode_var.get() == "Preview"
+        assert app.preview_fit_button.cget("text") == "Fit"
+        assert app.preview_zoom_100_button.cget("text") == "100%"
+        assert app.preview_zoom_out_button.cget("text") == "-"
+        assert app.preview_zoom_in_button.cget("text") == "+"
+        assert app.preview_zoom_value_var.get() == "Fit"
         assert app.crop_warning_var.get() == ""
         assert app.export_readiness_var.get() == "No pages to export"
         assert app.pipeline_strip is not None
@@ -129,6 +134,10 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.page_listbox.bind("<Control-z>")
         assert app.bind("<Control-Alt-z>")
         assert app.bind("<Control-Alt-y>")
+        assert app.bind("<Control-Key-0>")
+        assert app.bind("<Control-Key-1>")
+        assert app.bind("<Control-minus>")
+        assert app.bind("<Control-equal>")
         assert app.page_listbox.bind("<Control-Right>")
         assert app.page_listbox.bind("<B1-Motion>")
         assert app.page_listbox.bind("<Button-3>")
@@ -497,6 +506,26 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.geometry_summary_var.get() != "Wave preview: pending"
         assert app.page_preview_after_state.cget("text") == "Committed — export ready"
         assert "Committed result is ready for export." in _widget_texts(app.pipeline_strip)
+        viewport_generation = app.review_preview_generation
+        app.preview_zoom_in_button.invoke()
+        assert app.preview_zoom == pytest.approx(app_module.PREVIEW_ZOOM_FACTOR)
+        assert app.preview_zoom_value_var.get() == "125%"
+        assert app.review_preview_generation == viewport_generation
+        pan_before_drag = app.preview_pan
+        app._on_preview_drag_start(
+            SimpleNamespace(x=50, y=50),
+            app.page_preview_before_label,
+        )
+        app._on_preview_drag(SimpleNamespace(x=70, y=60))
+        app._on_preview_drag_end()
+        assert app.preview_pan != pan_before_drag
+        assert app.page_preview_before_photo is not None
+        assert app.page_preview_after_photo is not None
+        assert app.review_preview_generation == viewport_generation
+        app.preview_fit_button.invoke()
+        assert app.preview_zoom == pytest.approx(1.0)
+        assert app.preview_pan == (0.5, 0.5)
+        assert app.preview_zoom_value_var.get() == "Fit"
         app.postprocess_var.set("Black and White")
         app.update_page_preview()
         _pump_until(
