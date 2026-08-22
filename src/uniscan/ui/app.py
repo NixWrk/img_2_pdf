@@ -737,6 +737,7 @@ class UnifiedScanApp(ctk.CTk):
         self.review_preview_error: str | None = None
         self.pipeline_strip: ctk.CTkFrame | None = None
         self.review_processing_window: ctk.CTkFrame | None = None
+        self.review_numeric_value_vars: dict[str, tk.StringVar] = {}
         self.export_dialog_window: ctk.CTkToplevel | None = None
         self.inline_editor_host: ctk.CTkFrame | None = None
         self.inline_editor_close_callback = None
@@ -7790,6 +7791,61 @@ class UnifiedScanApp(ctk.CTk):
     def _on_review_processing_slider_change(self, _value: float) -> None:
         self.update_page_preview()
 
+    @staticmethod
+    def _format_review_numeric_value(value: object, format_kind: str) -> str:
+        """Format Advanced slider values without changing their Tk variables."""
+        numeric = float(value)
+        if format_kind == "contrast":
+            return f"{numeric:.2f}×"
+        if format_kind == "signed_int":
+            return f"{int(round(numeric)):+d}"
+        if format_kind == "int":
+            return f"{int(round(numeric))}"
+        if format_kind == "k":
+            return f"{numeric:.2f}"
+        if format_kind == "margin":
+            return f"{numeric:.1f} mm"
+        raise ValueError(f"unknown Advanced numeric format: {format_kind!r}")
+
+    def _review_numeric_value_var(
+        self,
+        key: str,
+        variable: tk.Variable,
+        format_kind: str,
+    ) -> tk.StringVar:
+        """Expose one slider's current value while keeping processing callbacks unchanged."""
+        value_var = self.review_numeric_value_vars.get(key)
+        if value_var is None:
+            value_var = tk.StringVar(
+                value=self._format_review_numeric_value(variable.get(), format_kind)
+            )
+
+            def _sync_value(*_args: object) -> None:
+                value_var.set(self._format_review_numeric_value(variable.get(), format_kind))
+
+            variable.trace_add("write", _sync_value)
+            self.review_numeric_value_vars[key] = value_var
+        return value_var
+
+    def _add_review_numeric_value_label(
+        self,
+        parent: ctk.CTkFrame,
+        *,
+        row: int,
+        key: str,
+        variable: tk.Variable,
+        format_kind: str,
+        pady: tuple[int, int] = (4, 4),
+    ) -> None:
+        ctk.CTkLabel(
+            parent,
+            textvariable=self._review_numeric_value_var(key, variable, format_kind),
+            width=62,
+            anchor="e",
+            text_color=COLORS["text.secondary"],
+            font=ctk.CTkFont(size=12),
+        ).grid(row=row, column=2, sticky="e", padx=(0, 8), pady=pady)
+
     def _snapshot_apply_pages(self, target_entries):
         snapshot_dir = tempfile.TemporaryDirectory(prefix="uniscan_gui_apply_")
         snapshots: list[_ApplyPageSnapshot] = []
@@ -7929,9 +7985,10 @@ class UnifiedScanApp(ctk.CTk):
             pady=(12, 8),
         )
 
-        body = ctk.CTkFrame(window)
+        body = ctk.CTkScrollableFrame(window, height=260)
         body.pack(fill=ctk.BOTH, expand=True, padx=12, pady=(0, 10))
         body.grid_columnconfigure(1, weight=1)
+        body.grid_columnconfigure(2, minsize=70)
 
         ctk.CTkLabel(body, text="Contrast").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
         ctk.CTkSlider(
@@ -7942,6 +7999,14 @@ class UnifiedScanApp(ctk.CTk):
             variable=self.preprocess_contrast_var,
             command=self._on_review_processing_slider_change,
         ).grid(row=0, column=1, sticky="ew", padx=8, pady=(8, 4))
+        self._add_review_numeric_value_label(
+            body,
+            row=0,
+            key="contrast",
+            variable=self.preprocess_contrast_var,
+            format_kind="contrast",
+            pady=(8, 4),
+        )
 
         ctk.CTkLabel(body, text="Brightness").grid(row=1, column=0, sticky="w", padx=8, pady=4)
         ctk.CTkSlider(
@@ -7952,6 +8017,13 @@ class UnifiedScanApp(ctk.CTk):
             variable=self.preprocess_brightness_var,
             command=self._on_review_processing_slider_change,
         ).grid(row=1, column=1, sticky="ew", padx=8, pady=4)
+        self._add_review_numeric_value_label(
+            body,
+            row=1,
+            key="brightness",
+            variable=self.preprocess_brightness_var,
+            format_kind="signed_int",
+        )
 
         ctk.CTkLabel(body, text="Denoise").grid(row=2, column=0, sticky="w", padx=8, pady=4)
         ctk.CTkSlider(
@@ -7962,6 +8034,13 @@ class UnifiedScanApp(ctk.CTk):
             variable=self.preprocess_denoise_var,
             command=self._on_review_processing_slider_change,
         ).grid(row=2, column=1, sticky="ew", padx=8, pady=4)
+        self._add_review_numeric_value_label(
+            body,
+            row=2,
+            key="denoise",
+            variable=self.preprocess_denoise_var,
+            format_kind="int",
+        )
 
         ctk.CTkLabel(body, text="B/W Threshold").grid(
             row=3, column=0, sticky="w", padx=8, pady=(4, 8)
@@ -7974,6 +8053,14 @@ class UnifiedScanApp(ctk.CTk):
             variable=self.preprocess_threshold_var,
             command=self._on_review_processing_slider_change,
         ).grid(row=3, column=1, sticky="ew", padx=8, pady=(4, 8))
+        self._add_review_numeric_value_label(
+            body,
+            row=3,
+            key="threshold",
+            variable=self.preprocess_threshold_var,
+            format_kind="int",
+            pady=(4, 8),
+        )
 
         ctk.CTkLabel(body, text="Even page lighting").grid(
             row=4, column=0, sticky="w", padx=8, pady=(0, 8)
@@ -7994,6 +8081,13 @@ class UnifiedScanApp(ctk.CTk):
             variable=self.binarization_window_var,
             command=self._on_review_processing_slider_change,
         ).grid(row=5, column=1, sticky="ew", padx=8, pady=4)
+        self._add_review_numeric_value_label(
+            body,
+            row=5,
+            key="binarization_window",
+            variable=self.binarization_window_var,
+            format_kind="int",
+        )
 
         ctk.CTkLabel(body, text="Sauvola/Wolf k").grid(row=6, column=0, sticky="w", padx=8, pady=4)
         ctk.CTkSlider(
@@ -8004,6 +8098,13 @@ class UnifiedScanApp(ctk.CTk):
             variable=self.binarization_k_var,
             command=self._on_binarization_k_change,
         ).grid(row=6, column=1, sticky="ew", padx=8, pady=4)
+        self._add_review_numeric_value_label(
+            body,
+            row=6,
+            key="binarization_k",
+            variable=self.binarization_k_var,
+            format_kind="k",
+        )
 
         ctk.CTkLabel(body, text="Page margin (mm)").grid(
             row=7, column=0, sticky="w", padx=8, pady=4
@@ -8016,6 +8117,13 @@ class UnifiedScanApp(ctk.CTk):
             variable=self.page_margin_mm_var,
             command=self._on_review_processing_slider_change,
         ).grid(row=7, column=1, sticky="ew", padx=8, pady=4)
+        self._add_review_numeric_value_label(
+            body,
+            row=7,
+            key="page_margin_mm",
+            variable=self.page_margin_mm_var,
+            format_kind="margin",
+        )
 
         ctk.CTkLabel(body, text="Horizontal alignment").grid(
             row=8, column=0, sticky="w", padx=8, pady=4

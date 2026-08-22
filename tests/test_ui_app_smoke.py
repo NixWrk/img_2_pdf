@@ -491,6 +491,17 @@ def test_gui_constructs_with_all_tabs_and_closes_cleanly(tmp_path, monkeypatch) 
         assert app.cleanup_restore_button.cget("text") == "Restore committed cleanup"
         assert app.layout_reset_button.cget("text") == "Reset layout"
         assert app.layout_restore_button.cget("text") == "Restore committed layout"
+        assert app.review_numeric_value_vars["contrast"].get() == "1.25×"
+        assert app.review_numeric_value_vars["brightness"].get() == "+10"
+        assert app.review_numeric_value_vars["denoise"].get() == "4"
+        assert app.review_numeric_value_vars["threshold"].get() == "170"
+        assert app.review_numeric_value_vars["binarization_window"].get() == "31"
+        assert app.review_numeric_value_vars["binarization_k"].get() == "0.20"
+        assert app.review_numeric_value_vars["page_margin_mm"].get() == "10.0 mm"
+        app.preprocess_contrast_var.set(1.7)
+        app.update()
+        assert app.review_numeric_value_vars["contrast"].get() == "1.70×"
+        app.preprocess_contrast_var.set(1.25)
         assert app.inline_editor_host.winfo_manager() == "grid"
         app.review_processing_close_button.invoke()
         assert app.inline_editor_host.winfo_manager() == ""

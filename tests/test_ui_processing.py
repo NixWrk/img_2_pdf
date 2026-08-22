@@ -103,6 +103,22 @@ def _read_image(path) -> np.ndarray:
     return image
 
 
+@pytest.mark.parametrize(
+    ("value", "format_kind", "expected"),
+    [
+        (1.25, "contrast", "1.25×"),
+        (-5, "signed_int", "-5"),
+        (4, "int", "4"),
+        (0.2, "k", "0.20"),
+        (10, "margin", "10.0 mm"),
+    ],
+)
+def test_review_numeric_value_formatting_is_compact_and_explicit(
+    value: object, format_kind: str, expected: str
+) -> None:
+    assert UnifiedScanApp._format_review_numeric_value(value, format_kind) == expected
+
+
 def test_import_preferences_round_trip_and_corruption_fails_safe(tmp_path) -> None:
     path = tmp_path / "state" / "import_preferences.json"
 
