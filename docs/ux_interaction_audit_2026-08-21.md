@@ -338,3 +338,52 @@ Layout edit                 -> result only
 - Удаление и batch edits восстанавливаются без потери сессии.
 - Проверка края/таблицы выполняется без внешнего viewer.
 - Любая операция >500 мс даёт состояние; потенциально долгая — progress и cancel.
+
+## Follow-up 2026-08-22 — реализация против гипотез
+
+Этот follow-up фиксирует текущую реализацию поверх исходного аудита; он не
+объявляет UX-гипотезы доказанными пользовательским исследованием.
+
+**Реализованные факты, подтверждённые кодом и тестами.** `ff4742c` унифицировал
+cancellable background jobs с progress/cancel/retry; `27a130b` добавил слой
+semantic tokens/status chips; `c54f348` — интерактивные hover/disabled/focus
+состояния; `bd3f4bf` — linked zoom/pan, Fit/100% и синхронный Compare;
+`e40c04d` — Space hold-to-original; `0aca661` — numeric Advanced values и
+reset/restore; `f140905` — page status filters. Точки входа и проверки находятся
+в [app.py](../src/uniscan/ui/app.py#L294),
+[theme.py](../src/uniscan/ui/theme.py#L161),
+[test_ui_preview_viewport.py](../tests/test_ui_preview_viewport.py),
+[test_ui_job_manager.py](../tests/test_ui_job_manager.py) и
+[test_ui_page_filters.py](../tests/test_ui_page_filters.py).
+
+**Оставшиеся гипотезы/непроверенные пункты.** Полный путь import photo/PDF →
+perspective → waves → lighting → compare → batch → export ещё требует
+наблюдаемого пользовательского теста на реальных документах. Не подтверждены
+понимание `Auto/Not needed/Applied/Rejected/Edited`, recovery после отмены и
+ошибок долгих операций, сохранность текста/краёв/прямолинейность таблиц,
+keyboard-only import-to-export, 200% scaling/minimum window и сценарии 12/100
+страниц. Инвалидирование downstream и command history подтверждены unit/UI
+тестами, но их понятность пользователю остаётся гипотезой.
+
+**Capture и ручные критерии.** Запускать на Windows с видимым GUI:
+
+```powershell
+python scripts/capture_ui_regression.py --output-dir .\artifacts\ui-regression
+```
+
+`manifest.json` фиксирует `scene`, `theme`, requested size, фактический размер
+PNG, имя файла и полный `HEAD`; состояние хранится только во временном
+`UNISCAN_STATE_DIR`. Матрица включает workspace, Advanced и keyboard-focus для
+Light/Dark при 1280×800 и 1024×680. Это ручное сравнение без golden pixel
+thresholds в CI. Проверять: clipping/scroll, контраст и текстовую семантику
+статусов, focus/hover/disabled, 200% и minimum window, а также одинаковый
+selected page/stage/status/reason после ручной правки и пересчёта.
+
+**Наблюдаемый residual (P2, quick-fix).** В принятой capture matrix при размере
+`1024×680` summary export-readiness в верхней toolbar визуально обрезается/усекается
+из-за плотности верхней панели. Это факт responsive UI, обнаруженный в capture,
+а не дизайнерская гипотеза; production-код на этом tooling/docs этапе не менялся.
+Evidence path: `light-1024x680-workspace.png` и `dark-1024x680-workspace.png` из
+accepted `manifest.json`. Вынести в отдельный P2 quick-fix: переразместить или
+свернуть readiness summary на малой ширине и повторно проверить путь export
+на обеих темах.

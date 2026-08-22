@@ -194,3 +194,52 @@
 - В Compare исходник/результат имеют одинаковый fit, linked zoom/pan и различимую границу листа.
 - На 1024×680 canvas остаётся пригодным для проверки текста и краёв; панели переходят в collapsible режим.
 - Light/dark отличаются токенами, а не набором исключений.
+
+## Follow-up 2026-08-22 — что уже реализовано и что ещё требует проверки
+
+Этот блок дополняет исходный аудит и не заменяет его. Реализация ниже подтверждена
+кодом и targeted/UI smoke tests; это не результат пользовательского тестирования.
+
+**Реализованные факты.** `ff4742c` объединил фоновые операции в cancellable job
+manager с progress/cancel/retry; `27a130b` вынес semantic color/status tokens в
+[theme.py](../src/uniscan/ui/theme.py#L23) и связал их с pipeline cards;
+`c54f348` добавил локальные hover/disabled/focus состояния компонентов;
+`bd3f4bf` добавил linked zoom/pan, Fit/100% и synchronized Compare viewport;
+`e40c04d` добавил Space hold-to-original с блокировкой в текстовых полях;
+`0aca661` добавил числовые значения Advanced controls и явные reset/restore
+действия; `f140905` добавил status filters страниц. Поведение проверено в
+[test_ui_theme.py](../tests/test_ui_theme.py),
+[test_ui_preview_viewport.py](../tests/test_ui_preview_viewport.py),
+[test_ui_job_manager.py](../tests/test_ui_job_manager.py) и
+[test_ui_page_filters.py](../tests/test_ui_page_filters.py).
+
+**Оставшиеся гипотезы.** WCAG-проверка обеих тем на реальном мониторе, 200% scaling,
+минимальное окно, deuteranopia/protanopia, длительные реальные batch jobs,
+сохранность текста/краёв/таблиц и понятность терминов у пользователей пока не
+доказаны. Не доказана и пригодность всей визуальной иерархии для 12/100 страниц.
+Предложенные направления A/B/C остаются дизайнерскими гипотезами до
+пользовательского теста.
+
+**Повторяемый visual check.** На Windows с видимым рабочим столом запустить из
+корня репозитория:
+
+```powershell
+python scripts/capture_ui_regression.py --output-dir .\artifacts\ui-regression
+```
+
+Скрипт запускает фактический GUI, временно задаёт отдельный
+`UNISCAN_STATE_DIR`, создаёт `manifest.json` с HEAD и захватывает Light/Dark ×
+1280×800/1024×680 для workspace, Advanced и keyboard-focus. Это opt-in manual
+review; golden-pixel thresholds в CI нет. При ручном сравнении проверять clipping
+и scroll, контраст status colors/текста, видимость focus ring, 200%/min-window
+переполнение и согласованность mode/status/reason между pipeline, preview и
+Advanced.
+
+**Наблюдаемый residual (P2, quick-fix).** В принятой capture matrix при
+`1024×680` summary export-readiness в верхней toolbar визуально обрезается/усекается
+из-за плотности верхней панели. Это обнаруженный responsive-layout факт, а не
+гипотеза; production-код в рамках tooling/docs этапа не изменялся. Evidence path:
+`light-1024x680-workspace.png` и `dark-1024x680-workspace.png` из одного
+accepted manifest. Рекомендуемое исправление — отдельная P2-задача
+для responsive toolbar/readiness placement, с повторной ручной проверкой обоих
+themes и 1024×680.
