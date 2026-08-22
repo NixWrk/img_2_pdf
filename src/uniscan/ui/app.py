@@ -113,6 +113,7 @@ from uniscan.ui.live_detect import DEFAULT_LIVE_BACKEND, LIVE_BACKEND_CHOICES, L
 from uniscan.ui.overlays import draw_quad_overlay, scale_contour
 from uniscan.ui.pipeline_strip import render_pipeline_strip
 from uniscan.ui.review_pipeline import build_pipeline_cards
+from uniscan.ui.theme import COLORS, resolve_pair
 
 # Poll faster than the camera delivers: a tick without a new frame costs
 # almost nothing, while Tk's ~15 ms timer granularity on Windows would
@@ -292,6 +293,18 @@ def _image_to_tk_photo(image: np.ndarray) -> ImageTk.PhotoImage:
         else cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     )
     return ImageTk.PhotoImage(Image.fromarray(rgb))
+
+
+def _document_canvas(parent) -> tk.Canvas:
+    """Create the shared neutral inspection surface for raw Tk canvases."""
+
+    return tk.Canvas(
+        parent,
+        bg=resolve_pair("surface.canvas"),
+        highlightthickness=1,
+        highlightbackground=resolve_pair("border.default"),
+        highlightcolor=resolve_pair("focus"),
+    )
 
 
 def _show_canvas_magnifier(
@@ -778,7 +791,7 @@ class UnifiedScanApp(ctk.CTk):
         container = ctk.CTkFrame(self)
         container.pack(fill=ctk.BOTH, expand=True, padx=12, pady=12)
 
-        header = ctk.CTkFrame(container, fg_color=("#dbdbdb", "#2b2b2b"))
+        header = ctk.CTkFrame(container, fg_color=COLORS["surface.panel"])
         header.pack(fill=ctk.X, padx=12, pady=(10, 4))
         brand = ctk.CTkFrame(header, fg_color="transparent")
         brand.pack(side=ctk.LEFT)
@@ -790,17 +803,17 @@ class UnifiedScanApp(ctk.CTk):
         ctk.CTkLabel(
             brand,
             text="Capture, clean and export documents",
-            text_color=("#60646c", "#a0a4ab"),
+            text_color=COLORS["text.secondary"],
         ).pack(anchor="w")
         ctk.CTkLabel(
             header,
             textvariable=self.camera_health_var,
-            text_color=("#60646c", "#a0a4ab"),
+            text_color=COLORS["text.secondary"],
         ).pack(side=ctk.RIGHT, padx=(8, 0))
         ctk.CTkLabel(
             header,
             textvariable=self.page_count_var,
-            text_color=("#60646c", "#a0a4ab"),
+            text_color=COLORS["text.secondary"],
         ).pack(side=ctk.RIGHT, padx=8)
 
         toolbar = ctk.CTkFrame(container)
@@ -852,8 +865,9 @@ class UnifiedScanApp(ctk.CTk):
             toolbar,
             text="Export PDF",
             width=120,
-            fg_color="#2f855a",
-            hover_color="#276749",
+            fg_color=COLORS["success"],
+            hover_color=COLORS["success.hover"],
+            text_color=COLORS["success.text"],
             command=self.quick_export_pdf,
         )
         self.toolbar_export_pdf_button.pack(side=ctk.RIGHT, padx=(4, 8), pady=8)
@@ -869,7 +883,7 @@ class UnifiedScanApp(ctk.CTk):
         self.export_readiness_label = ctk.CTkLabel(
             toolbar,
             textvariable=self.export_readiness_var,
-            text_color=("#60646c", "#a0a4ab"),
+            text_color=COLORS["text.secondary"],
         )
         self.export_readiness_label.pack(side=ctk.RIGHT, padx=8, pady=8)
 
@@ -962,8 +976,9 @@ class UnifiedScanApp(ctk.CTk):
             controls,
             text="Capture Page",
             height=40,
-            fg_color="#2f855a",
-            hover_color="#276749",
+            fg_color=COLORS["success"],
+            hover_color=COLORS["success.hover"],
+            text_color=COLORS["success.text"],
             command=self.capture_one,
         )
         self.capture_one_button.pack(fill=ctk.X, padx=10, pady=(0, 8))
@@ -1135,13 +1150,13 @@ class UnifiedScanApp(ctk.CTk):
         ctk.CTkLabel(
             list_header,
             textvariable=self.page_count_var,
-            text_color=("#60646c", "#a0a4ab"),
+            text_color=COLORS["text.secondary"],
         ).pack(side=ctk.RIGHT)
         self.crop_warning_label = ctk.CTkLabel(
             left,
             textvariable=self.crop_warning_var,
             anchor="w",
-            text_color=("#8a5a00", "#d6a84b"),
+            text_color=COLORS["warning"],
             font=ctk.CTkFont(size=11),
         )
         self.page_listbox = tk.Listbox(
@@ -1149,16 +1164,16 @@ class UnifiedScanApp(ctk.CTk):
             selectmode=tk.EXTENDED,
             width=30,
             height=8,
-            bg="#202225",
-            fg="#f2f2f2",
-            selectbackground="#1f6aa5",
-            selectforeground="#ffffff",
+            bg=resolve_pair("surface.panel"),
+            fg=resolve_pair("text.primary"),
+            selectbackground=resolve_pair("action.primary"),
+            selectforeground=resolve_pair("action.text"),
             activestyle="none",
             relief=tk.FLAT,
             borderwidth=0,
             highlightthickness=1,
-            highlightbackground="#45484d",
-            highlightcolor="#1f6aa5",
+            highlightbackground=resolve_pair("border.default"),
+            highlightcolor=resolve_pair("focus"),
             font=("Segoe UI", 11),
             exportselection=False,
         )
@@ -1189,8 +1204,9 @@ class UnifiedScanApp(ctk.CTk):
             page_actions,
             text="Delete",
             width=72,
-            fg_color="#b42318",
-            hover_color="#912018",
+            fg_color=COLORS["danger"],
+            hover_color=COLORS["danger.hover"],
+            text_color=COLORS["danger.text"],
             command=self.delete_selected_pages,
         )
         self.delete_pages_button.pack(side=ctk.LEFT)
@@ -1279,7 +1295,7 @@ class UnifiedScanApp(ctk.CTk):
         self.preview_mode_selector.pack(side=ctk.RIGHT)
         self.pipeline_strip = ctk.CTkScrollableFrame(
             preview,
-            height=110,
+            height=132,
             orientation="horizontal",
             label_text="Pipeline",
         )
@@ -1308,7 +1324,7 @@ class UnifiedScanApp(ctk.CTk):
         self.page_preview_after_state = ctk.CTkLabel(
             self.page_preview_after_frame,
             text="Preview pending",
-            text_color=("#60646c", "#a0a4ab"),
+            text_color=COLORS["text.secondary"],
         )
         self.page_preview_after_state.grid(row=0, column=1, sticky="e", padx=8, pady=(8, 4))
         self.page_preview_after_label = ctk.CTkLabel(
@@ -1365,7 +1381,7 @@ class UnifiedScanApp(ctk.CTk):
             processing,
             textvariable=self.split_preview_var,
             anchor="w",
-            text_color=("#60646c", "#a0a4ab"),
+            text_color=COLORS["text.secondary"],
         ).pack(fill=ctk.X, padx=6, pady=(0, 5))
         ctk.CTkButton(
             processing,
@@ -1472,7 +1488,7 @@ class UnifiedScanApp(ctk.CTk):
             anchor="w",
             justify="left",
             wraplength=230,
-            text_color=("#60646c", "#a0a4ab"),
+            text_color=COLORS["text.secondary"],
         ).pack(fill=ctk.X, padx=6, pady=(0, 8))
         ctk.CTkLabel(processing, text="Page orientation", anchor="w").pack(
             fill=ctk.X, padx=6, pady=(0, 2)
@@ -1504,7 +1520,7 @@ class UnifiedScanApp(ctk.CTk):
             processing,
             textvariable=self.manual_deskew_summary_var,
             anchor="w",
-            text_color=("#60646c", "#a0a4ab"),
+            text_color=COLORS["text.secondary"],
         ).pack(fill=ctk.X, padx=6, pady=(0, 8))
         deskew_actions = ctk.CTkFrame(processing, fg_color="transparent")
         deskew_actions.pack(fill=ctk.X, padx=6, pady=(0, 8))
@@ -1538,7 +1554,7 @@ class UnifiedScanApp(ctk.CTk):
             anchor="w",
             justify="left",
             wraplength=230,
-            text_color=("#60646c", "#a0a4ab"),
+            text_color=COLORS["text.secondary"],
         ).pack(fill=ctk.X, padx=6, pady=(0, 10))
 
         ctk.CTkLabel(processing, text="Even page lighting", anchor="w").pack(
@@ -1608,7 +1624,7 @@ class UnifiedScanApp(ctk.CTk):
             anchor="w",
             justify="left",
             wraplength=230,
-            text_color=("#60646c", "#a0a4ab"),
+            text_color=COLORS["text.secondary"],
         ).pack(fill=ctk.X, padx=6, pady=(0, 10))
 
         processing_actions = ctk.CTkFrame(processing, fg_color="transparent")
@@ -1661,7 +1677,7 @@ class UnifiedScanApp(ctk.CTk):
             processing,
             text="Ctrl+Alt+Z / Ctrl+Alt+Y",
             anchor="w",
-            text_color=("#60646c", "#a0a4ab"),
+            text_color=COLORS["text.secondary"],
             font=ctk.CTkFont(size=10),
         ).pack(fill=ctk.X, padx=6, pady=(0, 14))
 
@@ -2015,7 +2031,7 @@ class UnifiedScanApp(ctk.CTk):
             text="Split is off by default. Imported pixels remain unchanged unless you enable it.",
             justify="left",
             wraplength=380,
-            text_color=("#60646c", "#a0a4ab"),
+            text_color=COLORS["text.secondary"],
         ).pack(anchor="w", padx=16)
 
         def apply_options() -> None:
@@ -4346,10 +4362,10 @@ class UnifiedScanApp(ctk.CTk):
         if label is None:
             return
         colors = {
-            "empty": ("#60646c", "#a0a4ab"),
-            "ready": ("#157347", "#59d98e"),
-            "warning": ("#8a5a00", "#d6a84b"),
-            "blocked": ("#b42318", "#ff7b72"),
+            "empty": COLORS["text.secondary"],
+            "ready": COLORS["success"],
+            "warning": COLORS["warning"],
+            "blocked": COLORS["danger"],
         }
         label.configure(text_color=colors[kind])
 
@@ -4529,10 +4545,10 @@ class UnifiedScanApp(ctk.CTk):
         if label is None:
             return
         colors = {
-            "pending": ("#60646c", "#a0a4ab"),
-            "candidate": ("#8a5a00", "#d6a84b"),
-            "committed": ("#157347", "#59d98e"),
-            "error": ("#b42318", "#ff7b72"),
+            "pending": COLORS["text.secondary"],
+            "candidate": COLORS["warning"],
+            "committed": COLORS["success"],
+            "error": COLORS["danger"],
         }
         label.configure(text=text, text_color=colors[kind])
 
@@ -5402,9 +5418,9 @@ class UnifiedScanApp(ctk.CTk):
             row=0, column=1, sticky="w", padx=8, pady=(8, 4)
         )
 
-        canvas = tk.Canvas(canvas_frame, bg="black", highlightthickness=0)
+        canvas = _document_canvas(canvas_frame)
         canvas.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
-        corrected_canvas = tk.Canvas(canvas_frame, bg="black", highlightthickness=0)
+        corrected_canvas = _document_canvas(canvas_frame)
         corrected_canvas.grid(row=1, column=1, sticky="nsew", padx=8, pady=(0, 8))
         self.corner_source_canvas = canvas
         self.corner_preview_canvas = corrected_canvas
@@ -6191,8 +6207,8 @@ class UnifiedScanApp(ctk.CTk):
         ctk.CTkLabel(panes, text="Two output pages").grid(
             row=0, column=1, sticky="w", padx=8, pady=(8, 4)
         )
-        source_canvas = tk.Canvas(panes, bg="black", highlightthickness=0)
-        preview_canvas = tk.Canvas(panes, bg="black", highlightthickness=0)
+        source_canvas = _document_canvas(panes)
+        preview_canvas = _document_canvas(panes)
         source_canvas.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
         preview_canvas.grid(row=1, column=1, sticky="nsew", padx=8, pady=(0, 8))
         self.split_source_canvas = source_canvas
@@ -6842,18 +6858,8 @@ class UnifiedScanApp(ctk.CTk):
             row=0, column=1, sticky="w", padx=8, pady=(8, 4)
         )
 
-        left_canvas = tk.Canvas(
-            panes,
-            bg="#202225",
-            highlightthickness=1,
-            highlightbackground="#45484d",
-        )
-        right_canvas = tk.Canvas(
-            panes,
-            bg="#202225",
-            highlightthickness=1,
-            highlightbackground="#45484d",
-        )
+        left_canvas = _document_canvas(panes)
+        right_canvas = _document_canvas(panes)
         left_canvas.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
         right_canvas.grid(row=1, column=1, sticky="nsew", padx=8, pady=(0, 8))
         self.dewarp_source_canvas = left_canvas

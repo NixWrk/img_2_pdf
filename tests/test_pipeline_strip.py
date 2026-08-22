@@ -30,6 +30,9 @@ class _FakeWidget:
     def cget(self, name: str):
         return self.options.get(name)
 
+    def configure(self, **options) -> None:
+        self.options.update(options)
+
 
 def _texts(widget: _FakeWidget) -> list[str]:
     texts: list[str] = []
@@ -39,6 +42,14 @@ def _texts(widget: _FakeWidget) -> list[str]:
             texts.append(str(text))
         texts.extend(_texts(child))
     return texts
+
+
+def _widgets(widget: _FakeWidget) -> list[_FakeWidget]:
+    result: list[_FakeWidget] = []
+    for child in widget.winfo_children():
+        result.append(child)
+        result.extend(_widgets(child))
+    return result
 
 
 def _entry(*, committed=None, revision=4):
@@ -75,10 +86,23 @@ def test_pipeline_strip_renders_initial_committed_and_pending_states(monkeypatch
     pipeline_strip.render_pipeline_strip(frame, committed_cards)
     committed_texts = _texts(frame)
     assert sum(card.title in committed_texts for card in committed_cards) == 7
-    assert any("Applied" in text for text in committed_texts)
+    assert "+ Applied" in committed_texts
+    assert any(text.startswith("Mode: Auto") for text in committed_texts)
+    assert any("| Edit" in text for text in committed_texts)
+    assert any(
+        widget.cget("fg_color") == pipeline_strip.COLORS["tint.success"]
+        for widget in _widgets(frame)
+    )
 
+    rendered_children = frame.winfo_children()
     pending_cards = build_pipeline_cards(_entry(revision=8), pending_request=_recipe())
     pipeline_strip.render_pipeline_strip(frame, pending_cards)
+    assert frame.winfo_children() == rendered_children
     pending_texts = _texts(frame)
     assert sum(card.title in pending_texts for card in pending_cards) == 7
     assert pending_cards[-1].status_label == "Running"
+    assert "> Running" in pending_texts
+
+    rendered_children = frame.winfo_children()
+    pipeline_strip.render_pipeline_strip(frame, pending_cards)
+    assert frame.winfo_children() == rendered_children
