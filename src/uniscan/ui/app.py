@@ -717,6 +717,7 @@ class UnifiedScanApp(ctk.CTk):
         self.page_preview_after_image: np.ndarray | None = None
         self.preview_zoom = PREVIEW_ZOOM_MIN
         self.preview_pan = (0.5, 0.5)
+        self.preview_hold_original = False
         self.preview_view_entry_id: str | None = None
         self.preview_drag_state: tuple[ctk.CTkLabel, float, float] | None = None
         self.pending_split_entry_id: str | None = None
@@ -1882,6 +1883,8 @@ class UnifiedScanApp(ctk.CTk):
                 lambda: self._change_preview_zoom(PREVIEW_ZOOM_FACTOR)
             ),
         )
+        self.bind("<KeyPress-space>", self._on_preview_hold_key_press, add="+")
+        self.bind("<KeyRelease-space>", self._on_preview_hold_key_release, add="+")
         self.bind("<Control-Alt-z>", lambda _event: self._run_shortcut(self.undo_stage_edit))
         self.bind("<Control-Alt-y>", lambda _event: self._run_shortcut(self.redo_stage_edit))
 
@@ -4746,9 +4749,58 @@ class UnifiedScanApp(ctk.CTk):
         return "break"
 
     def _on_preview_mode_change(self, _value: str | None = None) -> None:
+        self._release_preview_hold_original(render=False)
         self._layout_page_previews()
         self.update_idletasks()
         self.update_page_preview()
+
+    def _preview_space_shortcut_is_allowed(self) -> bool:
+        """Keep Space available for text fields and other native controls."""
+        focus = self.focus_get()
+        if focus is None:
+            return True
+        try:
+            widget_class = str(focus.winfo_class()).lower()
+        except (AttributeError, tk.TclError):
+            return True
+        return widget_class not in {
+            "button",
+            "entry",
+            "listbox",
+            "spinbox",
+            "tbutton",
+            "tcombobox",
+            "tentry",
+            "text",
+            "tlistbox",
+        }
+
+    def _on_preview_hold_key_press(self, event) -> str | None:
+        if (
+            getattr(event, "keysym", "") != "space"
+            or self.preview_mode_var.get() != "Preview"
+            or self.page_preview_before_image is None
+            or self.page_preview_after_image is None
+            or not self._preview_space_shortcut_is_allowed()
+        ):
+            return None
+        if self.preview_hold_original:
+            return "break"
+        self.preview_hold_original = True
+        self._render_cached_review_previews(force=True)
+        return "break"
+
+    def _on_preview_hold_key_release(self, event) -> str | None:
+        if getattr(event, "keysym", "") != "space" or not self.preview_hold_original:
+            return None
+        self._release_preview_hold_original()
+        return "break"
+
+    def _release_preview_hold_original(self, *, render: bool = True) -> None:
+        was_holding = self.preview_hold_original
+        self.preview_hold_original = False
+        if was_holding and render:
+            self._render_cached_review_previews(force=True)
 
     def _reset_preview_viewport(self, *, render: bool = True) -> None:
         self.preview_zoom = PREVIEW_ZOOM_MIN
@@ -4765,6 +4817,8 @@ class UnifiedScanApp(ctk.CTk):
         mode = self.preview_mode_var.get()
         if mode == "Original":
             return self.page_preview_before_image, self.page_preview_before_label
+        if mode == "Preview" and self.preview_hold_original:
+            return self.page_preview_before_image, self.page_preview_after_label
         if self.page_preview_after_image is not None:
             return self.page_preview_after_image, self.page_preview_after_label
         return self.page_preview_before_image, self.page_preview_before_label
@@ -4795,6 +4849,8 @@ class UnifiedScanApp(ctk.CTk):
 
     def _preview_image_for_label(self, label: ctk.CTkLabel) -> np.ndarray | None:
         if label is self.page_preview_before_label:
+            return self.page_preview_before_image
+        if self.preview_mode_var.get() == "Preview" and self.preview_hold_original:
             return self.page_preview_before_image
         return self.page_preview_after_image
 
@@ -4915,6 +4971,7 @@ class UnifiedScanApp(ctk.CTk):
             )
 
     def update_page_preview(self) -> None:
+        self._release_preview_hold_original(render=False)
         self._cancel_review_page_preview(refresh_pipeline=False)
         selected = self.page_listbox.curselection()
         if len(selected) != 1:
@@ -4976,14 +5033,13 @@ class UnifiedScanApp(ctk.CTk):
             self._refresh_pipeline_strip()
             return
 
+        self.page_preview_before_image = before
         if mode in {"Original", "Compare"}:
-            self.page_preview_before_image = before
             before_photo = self._to_review_photo_for_label(before, self.page_preview_before_label)
             self.page_preview_before_label.configure(image=before_photo, text="")
             self.page_preview_before_photo = before_photo
         else:
             self.page_preview_before_photo = None
-            self.page_preview_before_image = None
 
         if mode in {"Preview", "Compare"}:
             self.page_preview_after_image = None
@@ -5061,7 +5117,18 @@ class UnifiedScanApp(ctk.CTk):
             )
             self.page_preview_before_label.configure(image=photo, text="")
             self.page_preview_before_photo = photo
-        if mode in {"Preview", "Compare"} and self.page_preview_after_image is not None:
+        if (
+            mode == "Preview"
+            and self.preview_hold_original
+            and self.page_preview_before_image is not None
+        ):
+            photo = self._to_review_photo_for_label(
+                self.page_preview_before_image,
+                self.page_preview_after_label,
+            )
+            self.page_preview_after_label.configure(image=photo, text="")
+            self.page_preview_after_photo = photo
+        elif mode in {"Preview", "Compare"} and self.page_preview_after_image is not None:
             photo = self._to_review_photo_for_label(
                 self.page_preview_after_image,
                 self.page_preview_after_label,
@@ -5173,10 +5240,19 @@ class UnifiedScanApp(ctk.CTk):
             self._set_preview_result_state("Preview failed", kind="error")
             self._set_status(message)
             return
-        after_photo = self._to_review_photo_for_label(image, self.page_preview_after_label)
-        self.page_preview_after_label.configure(image=after_photo, text="")
-        self.page_preview_after_photo = after_photo
         self.page_preview_after_image = image
+        preview_mode_var = self.__dict__.get("preview_mode_var")
+        if (
+            preview_mode_var is not None
+            and preview_mode_var.get() == "Preview"
+            and self.__dict__.get("preview_hold_original", False)
+        ):
+            self.page_preview_after_photo = None
+            self._render_cached_review_previews(force=True)
+        else:
+            after_photo = self._to_review_photo_for_label(image, self.page_preview_after_label)
+            self.page_preview_after_label.configure(image=after_photo, text="")
+            self.page_preview_after_photo = after_photo
         context = self.__dict__.get("review_preview_context")
         is_candidate = False
         if context is not None and context[0] == generation:
