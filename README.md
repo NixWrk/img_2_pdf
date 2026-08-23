@@ -24,6 +24,8 @@ It also cannot reconstruct detail that glare or clipping already destroyed in th
 
 ![UniScan document workspace](docs/images/workspace-v1.png)
 
+See the [plain-language Russian UX implementation summary](docs/ux_implementation_summary_2026-08-23.md).
+
 ## Quick start
 
 ### Run from this source checkout on Windows
